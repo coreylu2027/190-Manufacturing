@@ -13,6 +13,7 @@
     "@supabase/ssr": "^0.12.5",
     "@supabase/supabase-js": "^2.112.4",
     "@tanstack/react-query": "^5.102.8",
+    "@vercel/analytics": "^2.0.1",
     "ag-grid-community": "^36.1.0",
     "ag-grid-react": "^36.1.0",
     "class-variance-authority": "^0.7.1",
