@@ -41,6 +41,13 @@ async function submitReview(item: QualityControlItem, result: "passed" | "failed
   return body;
 }
 
+async function undoPassedReview(item: QualityControlItem) {
+  const response = await fetch(`/api/admin/qc/${item.operation.id}`, { method: "DELETE" });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error ?? "Unable to undo the QC pass");
+  return body;
+}
+
 function formatDate(value: string | null) {
   if (!value) return "Never";
   return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(value));
@@ -64,11 +71,21 @@ export function AdminDashboard() {
   const reviewMutation = useMutation({
     mutationFn: ({ item, result }: { item: QualityControlItem; result: "passed" | "failed" }) => submitReview(item, result, notes[item.operation.id] ?? item.notes),
     onSuccess: (_data, variables) => {
-      toast.success(variables.result === "passed" ? "Quality check passed" : "Operation returned for rework");
+      toast.success(variables.result === "passed" ? "Quality check passed" : "Operation returned for rework", variables.result === "passed" ? { action: { label: "Undo", onClick: () => undoReviewMutation.mutate(variables.item) } } : undefined);
       queryClient.invalidateQueries({ queryKey: ["admin"] });
       queryClient.invalidateQueries({ queryKey: ["operations"] });
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to record quality review"),
+  });
+
+  const undoReviewMutation = useMutation({
+    mutationFn: undoPassedReview,
+    onSuccess: () => {
+      toast.success("QC pass undone");
+      queryClient.invalidateQueries({ queryKey: ["admin"] });
+      queryClient.invalidateQueries({ queryKey: ["operations"] });
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to undo QC pass"),
   });
 
   const stats = useMemo(() => ({
@@ -119,7 +136,7 @@ export function AdminDashboard() {
                     </div>
                     <label className="mt-4 block text-xs font-semibold text-muted-foreground" htmlFor={`qc-notes-${item.operation.id}`}>Inspection notes</label>
                     <textarea id={`qc-notes-${item.operation.id}`} value={notes[item.operation.id] ?? item.notes} onChange={(event) => setNotes((current) => ({ ...current, [item.operation.id]: event.target.value }))} placeholder="Measurements, defects, or acceptance notes…" className="mt-1.5 min-h-20 w-full resize-y rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring focus:ring-3 focus:ring-ring/50" />
-                    <div className="mt-3 flex flex-wrap justify-end gap-2"><Button variant="destructive" onClick={() => reviewMutation.mutate({ item, result: "failed" })} disabled={reviewMutation.isPending || item.operation.status !== "Complete"}><X /> Fail QC</Button><Button className="bg-emerald-600 hover:bg-emerald-700" onClick={() => reviewMutation.mutate({ item, result: "passed" })} disabled={reviewMutation.isPending || item.operation.status !== "Complete"}>{reviewMutation.isPending ? <LoaderCircle className="animate-spin" /> : <Check />} Pass QC</Button></div>
+                    <div className="mt-3 flex flex-wrap items-center justify-end gap-2">{item.result === "pending" ? <><Button variant="destructive" onClick={() => reviewMutation.mutate({ item, result: "failed" })} disabled={reviewMutation.isPending || item.operation.status !== "Complete"}><X /> Fail QC</Button><Button className="bg-emerald-600 hover:bg-emerald-700" onClick={() => reviewMutation.mutate({ item, result: "passed" })} disabled={reviewMutation.isPending || item.operation.status !== "Complete"}>{reviewMutation.isPending ? <LoaderCircle className="animate-spin" /> : <Check />} Pass QC</Button></> : item.result === "passed" ? <Button variant="outline" onClick={() => undoReviewMutation.mutate(item)} disabled={undoReviewMutation.isPending}><Clock3 /> Undo QC pass</Button> : <p className="text-xs text-muted-foreground">Complete the rework to request QC again.</p>}</div>
                   </article>
                 ))}
               </div>

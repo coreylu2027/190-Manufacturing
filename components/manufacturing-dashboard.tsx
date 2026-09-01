@@ -4,7 +4,6 @@ import {
   AllCommunityModule,
   ModuleRegistry,
   themeQuartz,
-  type CellValueChangedEvent,
   type ColDef,
 } from "ag-grid-community";
 import { AgGridReact } from "ag-grid-react";
@@ -25,6 +24,7 @@ import {
   MoreHorizontal,
   PackageCheck,
   RefreshCw,
+  RotateCcw,
   Search,
   ShieldCheck,
   SlidersHorizontal,
@@ -40,6 +40,14 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { AdminDashboard } from "@/components/admin-dashboard";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -66,11 +74,12 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
+import { isShopName } from "@/lib/profile-name";
 import { cn } from "@/lib/utils";
 import {
-  OPERATION_STATUSES,
   type ManufacturingOperation,
-  type OperationPatch,
+  type OperationQuantityAction,
+  type OperationQuantityPatch,
   type OperationStatus,
   type OperationsResponse,
 } from "@/lib/types";
@@ -129,10 +138,11 @@ function StatusCell({ value }: { value: OperationStatus }) {
 
 function ActionCell({ data, onOpen }: { data?: ManufacturingOperation; onOpen: (operation: ManufacturingOperation) => void }) {
   if (!data) return null;
+  const claimable = ["Ready", "In Progress", "Needs Rework"].includes(data.status) && data.availableQuantity > 0;
   return (
     <div className="flex h-full items-center justify-end">
-      <Button size="sm" variant={data.status === "Ready" ? "default" : "ghost"} onClick={() => onOpen(data)}>
-        {data.status === "Ready" ? "Start" : "Open"}<ChevronRight />
+      <Button size="sm" variant={claimable ? "default" : "ghost"} onClick={() => onOpen(data)}>
+        {claimable ? "Claim" : "Open"}<ChevronRight />
       </Button>
     </div>
   );
@@ -161,6 +171,27 @@ function formatDate(value: string | null) {
   if (!value) return "Not recorded";
   return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(value));
 }
+
+function allocationForUser(operation: ManufacturingOperation, user: OperationsResponse["user"]) {
+  if (!user) return { claimed: 0, completed: 0 };
+  return operation.allocations.find((allocation) => allocation.userId === user.id)
+    ?? operation.allocations.find((allocation) => allocation.name.toLocaleLowerCase() === user.name.toLocaleLowerCase())
+    ?? { claimed: 0, completed: 0 };
+}
+
+const quantityActionCopy: Record<OperationQuantityAction, { title: string; button: string; success: string }> = {
+  claim: { title: "Claim parts", button: "Claim", success: "Parts claimed" },
+  release: { title: "Release claimed parts", button: "Release", success: "Claim released" },
+  complete: { title: "Mark parts complete", button: "Complete", success: "Parts marked complete" },
+  undo_complete: { title: "Undo completed parts", button: "Undo completion", success: "Completion undone" },
+};
+
+const inverseQuantityAction: Record<OperationQuantityAction, OperationQuantityAction> = {
+  claim: "release",
+  release: "claim",
+  complete: "undo_complete",
+  undo_complete: "complete",
+};
 
 function requirementStatus(operations: ManufacturingOperation[]): OperationStatus {
   if (operations.every((operation) => operation.status === "Complete")) return "Complete";
@@ -301,6 +332,11 @@ export function ManufacturingDashboard() {
   const [machine, setMachine] = useState("all");
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [quantityDialog, setQuantityDialog] = useState<{ action: OperationQuantityAction; max: number } | null>(null);
+  const [quantityDraft, setQuantityDraft] = useState("1");
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [firstName, setFirstName] = useState("");
+  const [lastInitial, setLastInitial] = useState("");
 
   const query = useQuery({ queryKey: ["operations"], queryFn: fetchOperations });
   const userName = query.data?.user?.name ?? "Machinist";
@@ -311,7 +347,7 @@ export function ManufacturingDashboard() {
   }, [query.error, router]);
 
   const mutation = useMutation({
-    mutationFn: async ({ id, patch }: { id: number; patch: OperationPatch }) => {
+    mutationFn: async ({ id, patch }: { id: number; patch: OperationQuantityPatch; suppressUndo?: boolean }) => {
       const response = await fetch(`/api/operations/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -323,83 +359,113 @@ export function ManufacturingDashboard() {
       }
       return response.json();
     },
-    onMutate: async ({ id, patch }) => {
-      await queryClient.cancelQueries({ queryKey: ["operations"] });
-      const previous = queryClient.getQueryData<OperationsResponse>(["operations"]);
-      queryClient.setQueryData<OperationsResponse>(["operations"], (current) => {
-        if (!current) return current;
-        const now = new Date().toISOString();
-        return {
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to update operation"),
+    onSuccess: (data, variables) => {
+      if (data.updated?.status) {
+        queryClient.setQueryData<OperationsResponse>(["operations"], (current) => current ? {
           ...current,
-          operations: current.operations.map((operation) => operation.id === id ? {
-            ...operation,
-            ...patch,
-            machinist: patch.machinist ?? ((patch.status === "In Progress" || patch.status === "Complete") ? userName : operation.machinist),
-            startedAt: patch.status === "In Progress" && !operation.startedAt ? now : operation.startedAt,
-            completedAt: patch.status === "Complete" ? now : operation.completedAt,
-          } : operation),
-        };
+          operations: current.operations.map((operation) => operation.id === variables.id ? { ...operation, ...data.updated } : operation),
+        } : current);
+      }
+      const copy = quantityActionCopy[variables.patch.action];
+      toast.success(`${copy.success}: ${variables.patch.quantity}`, variables.suppressUndo ? undefined : {
+        action: {
+          label: "Undo",
+          onClick: () => mutation.mutate({
+            id: variables.id,
+            patch: { action: inverseQuantityAction[variables.patch.action], quantity: variables.patch.quantity },
+            suppressUndo: true,
+          }),
+        },
       });
-      return { previous };
-    },
-    onError: (error, _variables, context) => {
-      if (context?.previous) queryClient.setQueryData(["operations"], context.previous);
-      toast.error(error instanceof Error ? error.message : "Unable to update operation");
-    },
-    onSuccess: (_data, variables) => {
-      const message = variables.patch.status === "Complete" ? "Operation marked complete" : variables.patch.status === "In Progress" ? "Operation claimed and started" : "Operation updated";
-      toast.success(message);
+      setQuantityDialog(null);
     },
     onSettled: () => {
       if (query.data?.source === "baserow") queryClient.invalidateQueries({ queryKey: ["operations"] });
     },
   });
 
+  const profileMutation = useMutation({
+    mutationFn: async () => {
+      const response = await fetch("/api/account", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ firstName, lastInitial }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error ?? "Unable to update profile");
+      return body;
+    },
+    onSuccess: (body) => {
+      queryClient.setQueryData<OperationsResponse>(["operations"], (current) => current ? { ...current, user: body.user } : current);
+      queryClient.invalidateQueries({ queryKey: ["operations"] });
+      queryClient.invalidateQueries({ queryKey: ["admin"] });
+      setProfileOpen(false);
+      toast.success(`Shop name updated to ${body.user.name}`);
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to update profile"),
+  });
+
   const operations = useMemo(() => query.data?.operations ?? [], [query.data?.operations]);
   const selected = selectedId === null ? null : operations.find((operation) => operation.id === selectedId) ?? null;
+  const selectedAllocation = selected ? allocationForUser(selected, query.data?.user ?? null) : { claimed: 0, completed: 0 };
   const machines = useMemo(() => [...new Set(operations.map((operation) => operation.machine))].sort(), [operations]);
 
   const filtered = useMemo(() => {
     const term = search.trim().toLowerCase();
     return operations.filter((operation) => {
       if (machine !== "all" && operation.machine !== machine) return false;
-      if (view === "available" && operation.status !== "Ready") return false;
-      if (view === "mine" && (operation.machinist !== userName || operation.status === "Complete")) return false;
+      const allocation = allocationForUser(operation, query.data?.user ?? null);
+      const claimable = ["Ready", "In Progress", "Needs Rework"].includes(operation.status) && operation.availableQuantity > 0;
+      if (view === "available" && !claimable) return false;
+      if (view === "mine" && allocation.claimed === 0) return false;
       if (term && ![operation.partNumber, operation.partName, operation.assemblyNumber, operation.machine, operation.operationNumber].join(" ").toLowerCase().includes(term)) return false;
       return true;
     });
-  }, [machine, operations, search, userName, view]);
+  }, [machine, operations, query.data?.user, search, view]);
 
   const stats = useMemo(() => ({
-    ready: operations.filter((operation) => operation.status === "Ready").length,
+    ready: operations.filter((operation) => ["Ready", "In Progress", "Needs Rework"].includes(operation.status) && operation.availableQuantity > 0).length,
     active: operations.filter((operation) => operation.status === "In Progress").length,
     attention: operations.filter((operation) => operation.status === "Blocked" || operation.status === "Needs Rework").length,
     complete: operations.filter((operation) => operation.status === "Complete").length,
   }), [operations]);
 
   const openOperation = (operation: ManufacturingOperation) => setSelectedId(operation.id);
-  const updateOperation = (operation: ManufacturingOperation, patch: OperationPatch) => mutation.mutate({ id: operation.id, patch });
+  const runQuantityAction = (action: OperationQuantityAction, quantity: number) => {
+    if (!selected) return;
+    mutation.mutate({ id: selected.id, patch: { action, quantity } });
+  };
+  const requestQuantityAction = (action: OperationQuantityAction, max: number) => {
+    if (!isShopName(userName)) {
+      openProfile();
+      toast.info("Set your first name and last initial before recording work");
+      return;
+    }
+    if (max <= 1) return runQuantityAction(action, 1);
+    setQuantityDraft(String(max));
+    setQuantityDialog({ action, max });
+  };
+  const openProfile = () => {
+    const match = userName.match(/^(.+?)\s+([\p{L}])\.$/u);
+    setFirstName(match?.[1] ?? userName.split(/\s+/)[0] ?? "");
+    setLastInitial(match?.[2] ?? "");
+    setProfileOpen(true);
+  };
 
   const columnDefs = useMemo<ColDef<ManufacturingOperation>[]>(() => [
     { field: "partNumber", headerName: "PART", minWidth: 155, pinned: "left", cellClass: "font-mono font-semibold" },
     { field: "partName", headerName: "DESCRIPTION", minWidth: 230, flex: 1 },
     { field: "assemblyNumber", headerName: "ASSEMBLY", minWidth: 155 },
-    { field: "quantity", headerName: "QTY", width: 78, filter: "agNumberColumnFilter" },
+    { field: "quantity", headerName: "REQUIRED", width: 98, filter: "agNumberColumnFilter" },
+    { field: "availableQuantity", headerName: "AVAILABLE", width: 98, filter: "agNumberColumnFilter" },
+    { field: "completedQuantity", headerName: "DONE", width: 82, filter: "agNumberColumnFilter" },
     { field: "operationNumber", headerName: "OP", width: 90, filter: true },
     { field: "machine", headerName: "MACHINE", minWidth: 175, filter: true },
-    {
-      field: "status", headerName: "STATUS", minWidth: 145, editable: true,
-      cellEditor: "agSelectCellEditor", cellEditorParams: { values: [...OPERATION_STATUSES] }, cellRenderer: StatusCell,
-    },
-    { field: "machinist", headerName: "MACHINIST", minWidth: 140, editable: true, valueFormatter: ({ value }) => value || "—" },
+    { field: "status", headerName: "STATUS", minWidth: 145, cellRenderer: StatusCell },
+    { field: "machinist", headerName: "MACHINIST", minWidth: 180, valueFormatter: ({ value }) => value || "—" },
     { headerName: "", width: 102, pinned: "right", sortable: false, filter: false, resizable: false, cellRenderer: ActionCell, cellRendererParams: { onOpen: openOperation } },
   ], []);
-
-  const onCellValueChanged = (event: CellValueChangedEvent<ManufacturingOperation>) => {
-    if (!event.data || event.newValue === event.oldValue) return;
-    if (event.colDef.field === "status") updateOperation(event.data, { status: event.newValue as OperationStatus });
-    if (event.colDef.field === "machinist") updateOperation(event.data, { machinist: String(event.newValue ?? "") });
-  };
 
   return (
     <main className="min-h-screen bg-background text-foreground">
@@ -454,6 +520,7 @@ export function ManufacturingDashboard() {
                   <DropdownMenuLabel>Signed in as<br /><span className="font-normal text-foreground">{query.data?.user?.email ?? userName}</span></DropdownMenuLabel>
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={openProfile}>Edit shop name</DropdownMenuItem>
                 <DropdownMenuItem render={<a href="/login" />}>Switch account</DropdownMenuItem>
                 <DropdownMenuItem render={<a href="/auth/signout" />}>Sign out</DropdownMenuItem>
               </DropdownMenuContent>
@@ -521,7 +588,6 @@ export function ManufacturingDashboard() {
                   columnDefs={columnDefs}
                   defaultColDef={{ sortable: true, filter: false, resizable: true }}
                   getRowId={({ data }) => String(data.id)}
-                  onCellValueChanged={onCellValueChanged}
                   onRowDoubleClicked={({ data }) => data && openOperation(data)}
                   pagination
                   paginationPageSize={25}
@@ -534,7 +600,7 @@ export function ManufacturingDashboard() {
                 {filtered.map((operation) => (
                   <button key={operation.id} onClick={() => openOperation(operation)} className="block w-full p-4 text-left transition hover:bg-muted/40">
                     <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary">{operation.partNumber}</p><h3 className="mt-1 font-semibold">{operation.partName}</h3></div><StatusBadge status={operation.status} /></div>
-                    <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground"><span>{operation.operationNumber}</span><span className="flex items-center gap-1"><Wrench className="size-3" />{operation.machine}</span><span>Qty {operation.quantity}</span></div>
+                    <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground"><span>{operation.operationNumber}</span><span className="flex items-center gap-1"><Wrench className="size-3" />{operation.machine}</span><span>{operation.completedQuantity}/{operation.quantity} done</span><span>{operation.availableQuantity} available</span></div>
                   </button>
                 ))}
               </div>
@@ -542,7 +608,7 @@ export function ManufacturingDashboard() {
           )}
         </div>
         <div className="mt-3 flex flex-col gap-1 text-[11px] text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
-          <span>Tip: status and machinist cells are directly editable in the grid.</span>
+          <span>Open an operation to claim, release, complete, or undo quantities.</span>
           <span>Last refreshed {query.data ? formatDate(query.data.syncedAt) : "—"}</span>
         </div>
       </section> : (
@@ -570,10 +636,12 @@ export function ManufacturingDashboard() {
                   <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Operation details</h3>
                   <div className="grid grid-cols-2 overflow-hidden rounded-xl border">
                     {[
-                      ["Machine", selected.machine], ["Quantity", String(selected.quantity)],
+                      ["Machine", selected.machine], ["Required", String(selected.quantity)],
+                      ["Available", String(selected.availableQuantity)], ["Claimed", String(selected.claimedQuantity)],
+                      ["Completed", String(selected.completedQuantity)], ["Your claim", String(selectedAllocation.claimed)],
                       ["Assembly", selected.assemblyNumber], ["Machinist", selected.machinist || "Unclaimed"],
-                      ["Started", formatDate(selected.startedAt)], ["Completed", formatDate(selected.completedAt)],
-                    ].map(([label, value], index) => <div key={label} className={cn("p-3", index % 2 === 0 && "border-r", index < 4 && "border-b")}><p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{label}</p><p className="mt-1 text-sm font-semibold">{value}</p></div>)}
+                      ["Started", formatDate(selected.startedAt)], ["Finished", formatDate(selected.completedAt)],
+                    ].map(([label, value], index) => <div key={label} className={cn("p-3", index % 2 === 0 && "border-r", index < 8 && "border-b")}><p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{label}</p><p className="mt-1 text-sm font-semibold">{value}</p></div>)}
                   </div>
                 </section>
 
@@ -593,12 +661,12 @@ export function ManufacturingDashboard() {
                   <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Files & source</h3>
                   <div className="grid gap-2 sm:grid-cols-2">
                     {[
-                      { label: "Drawing PDF", href: selected.drawingPdfUrl, icon: FileText },
-                      { label: "STEP file", href: selected.stepUrl, icon: Download },
-                      { label: "Onshape drawing", href: selected.drawingUrl, icon: ArrowUpRight },
-                      { label: "BOM source", href: selected.onshapeUrl, icon: Cloud },
-                    ].map(({ label, href, icon: Icon }) => href ? (
-                      <a key={label} href={href} target="_blank" rel="noreferrer" className="flex items-center gap-3 rounded-xl border p-3 text-sm font-semibold transition hover:border-primary/40 hover:bg-accent/40"><div className="grid size-8 place-items-center rounded-lg bg-primary/10 text-primary"><Icon className="size-4" /></div>{label}<ChevronRight className="ml-auto size-4 text-muted-foreground" /></a>
+                      { label: "Drawing PDF", href: selected.drawingPdfUrl ? `/api/operations/${selected.id}/files/drawing-pdf` : null, fileName: selected.drawingPdfName, icon: FileText },
+                      { label: "STEP file", href: selected.stepUrl ? `/api/operations/${selected.id}/files/step` : null, fileName: selected.stepName, icon: Download },
+                      { label: "Onshape drawing", href: selected.drawingUrl, fileName: null, icon: ArrowUpRight },
+                      { label: "BOM source", href: selected.onshapeUrl, fileName: null, icon: Cloud },
+                    ].map(({ label, href, fileName, icon: Icon }) => href ? (
+                      <a key={label} href={href} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-3 rounded-xl border p-3 text-sm font-semibold transition hover:border-primary/40 hover:bg-accent/40"><div className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary"><Icon className="size-4" /></div><span className="min-w-0"><span className="block">{label}</span>{fileName && <span className="block truncate text-[10px] font-normal text-muted-foreground">{fileName}</span>}</span><ChevronRight className="ml-auto size-4 shrink-0 text-muted-foreground" /></a>
                     ) : (
                       <div key={label} className="flex items-center gap-3 rounded-xl border border-dashed p-3 text-sm text-muted-foreground"><div className="grid size-8 place-items-center rounded-lg bg-muted"><Icon className="size-4" /></div>{label}<span className="ml-auto text-[10px] uppercase">Missing</span></div>
                     ))}
@@ -607,16 +675,52 @@ export function ManufacturingDashboard() {
               </div>
 
               <SheetFooter className="sticky bottom-0 border-t bg-card/95 p-4 backdrop-blur">
-                {selected.status === "Ready" && <Button size="lg" className="h-11" onClick={() => updateOperation(selected, { status: "In Progress" })} disabled={mutation.isPending}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <CircleDot />} Claim & start operation</Button>}
-                {selected.status === "In Progress" && <Button size="lg" className="h-11 bg-emerald-600 hover:bg-emerald-700" onClick={() => updateOperation(selected, { status: "Complete" })} disabled={mutation.isPending}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <Check />} Mark operation complete</Button>}
-                {(selected.status === "Blocked" || selected.status === "Needs Rework") && <Button size="lg" className="h-11" onClick={() => updateOperation(selected, { status: "In Progress" })}><RefreshCw /> Resume work</Button>}
-                {selected.status === "Complete" && <div className="flex items-center justify-center gap-2 rounded-xl bg-emerald-50 p-3 text-sm font-semibold text-emerald-800"><Check className="size-4" /> Completed by {selected.machinist || "machinist"}</div>}
+                {["Ready", "In Progress", "Needs Rework"].includes(selected.status) && selected.availableQuantity > 0 && <Button size="lg" className="h-11" onClick={() => requestQuantityAction("claim", selected.availableQuantity)} disabled={mutation.isPending}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <CircleDot />} Claim {selected.availableQuantity === 1 ? "part" : "parts"}</Button>}
+                {selectedAllocation.claimed > 0 && <Button size="lg" className="h-11 bg-emerald-600 hover:bg-emerald-700" onClick={() => requestQuantityAction("complete", selectedAllocation.claimed)} disabled={mutation.isPending}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <Check />} Mark complete</Button>}
+                {selectedAllocation.claimed > 0 && <Button variant="outline" onClick={() => requestQuantityAction("release", selectedAllocation.claimed)} disabled={mutation.isPending}><RotateCcw /> Release claim</Button>}
+                {selectedAllocation.completed > 0 && <Button variant="outline" onClick={() => requestQuantityAction("undo_complete", selectedAllocation.completed)} disabled={mutation.isPending}><RotateCcw /> Undo completion</Button>}
+                {selected.status === "Complete" && <div className="flex items-center justify-center gap-2 rounded-xl bg-emerald-50 p-3 text-sm font-semibold text-emerald-800"><Check className="size-4" /> {selected.completedQuantity} of {selected.quantity} completed by {selected.machinist || "machinist"}</div>}
                 <Button variant="outline" onClick={() => setSelectedId(null)}>Close</Button>
               </SheetFooter>
             </>
           )}
         </SheetContent>
       </Sheet>
+
+      <Dialog open={Boolean(quantityDialog)} onOpenChange={(open) => !open && setQuantityDialog(null)}>
+        <DialogContent>
+          <form onSubmit={(event) => {
+            event.preventDefault();
+            if (!quantityDialog) return;
+            const quantity = Number(quantityDraft);
+            if (!Number.isInteger(quantity) || quantity < 1 || quantity > quantityDialog.max) {
+              toast.error(`Enter a whole number from 1 to ${quantityDialog.max}`);
+              return;
+            }
+            runQuantityAction(quantityDialog.action, quantity);
+          }}>
+            <DialogHeader>
+              <DialogTitle>{quantityDialog ? quantityActionCopy[quantityDialog.action].title : "Update quantity"}</DialogTitle>
+              <DialogDescription>Choose a whole number from 1 to {quantityDialog?.max ?? 1}. You can reverse this action afterward.</DialogDescription>
+            </DialogHeader>
+            <div className="my-5"><label className="mb-1.5 block text-xs font-semibold" htmlFor="action-quantity">Number of parts</label><Input id="action-quantity" type="number" inputMode="numeric" min={1} max={quantityDialog?.max ?? 1} step={1} value={quantityDraft} onChange={(event) => setQuantityDraft(event.target.value)} autoFocus /></div>
+            <DialogFooter><Button type="button" variant="outline" onClick={() => setQuantityDialog(null)}>Cancel</Button><Button type="submit" disabled={mutation.isPending}>{mutation.isPending && <LoaderCircle className="animate-spin" />}{quantityDialog ? quantityActionCopy[quantityDialog.action].button : "Save"}</Button></DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={profileOpen} onOpenChange={setProfileOpen}>
+        <DialogContent>
+          <form onSubmit={(event) => { event.preventDefault(); profileMutation.mutate(); }}>
+            <DialogHeader>
+              <DialogTitle>Edit shop name</DialogTitle>
+              <DialogDescription>This name is recorded on claims and completed work instead of your email identifier.</DialogDescription>
+            </DialogHeader>
+            <div className="my-5 grid grid-cols-[minmax(0,1fr)_7rem] gap-3"><div><label className="mb-1.5 block text-xs font-semibold" htmlFor="profile-first-name">First name</label><Input id="profile-first-name" autoComplete="given-name" value={firstName} onChange={(event) => setFirstName(event.target.value)} required /></div><div><label className="mb-1.5 block text-xs font-semibold" htmlFor="profile-last-initial">Last initial</label><Input id="profile-last-initial" autoComplete="family-name" maxLength={1} value={lastInitial} onChange={(event) => setLastInitial(event.target.value)} required className="uppercase" /></div></div>
+            <DialogFooter><Button type="button" variant="outline" onClick={() => setProfileOpen(false)}>Cancel</Button><Button type="submit" disabled={profileMutation.isPending}>{profileMutation.isPending && <LoaderCircle className="animate-spin" />}Save shop name</Button></DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
     </main>
   );
 }

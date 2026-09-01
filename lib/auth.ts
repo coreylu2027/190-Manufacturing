@@ -15,7 +15,7 @@ export interface AppUser {
 
 export const DEMO_ADMIN: AppUser = {
   id: "demo-admin",
-  name: "Demo Administrator",
+  name: "Demo A.",
   email: null,
   role: "admin",
   approved: true,

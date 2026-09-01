@@ -27,21 +27,25 @@ Without a Baserow token, the app intentionally loads realistic demo rows so the 
 
 ## Baserow writes
 
-The editable `Status` and `Machinist` cells update the Operations table. Quick actions also set:
+Operation actions update the Baserow Operations table and also set:
 
 - `Started At` and the signed-in machinist when work begins.
 - `Completed At` and the signed-in machinist when work is completed.
+- The linked production requirement's `Status`, `Machinist`, and `QC Outcome` as work advances through machining and inspection.
+
+Operations also include whole-number `Claimed Quantity` and `Completed Quantity` fields plus a long-text `Quantity Ledger`. For batches larger than one, machinists choose how many parts to claim or complete. Claims can be released, completions can be reopened before QC passes, and the success notification offers an immediate undo action.
 
 Supported statuses match the live schema: Planned, Ready, In Progress, Blocked, Needs Rework, and Complete.
 
 ## Access and quality control
 
 - New email/password and OAuth accounts enter a pending state.
+- Registration and account settings collect a first name and last initial. Shop assignments use the normalized `FirstName L.` display name rather than an email identifier.
 - Any environment connected to live Baserow data requires authentication automatically; demo identities are available only when no Baserow token is configured.
 - An approved administrator assigns either the `machinist` or `admin` role.
 - Approval and role checks are repeated on protected server routes; hiding the Admin tab is not the security boundary.
 - Completed operations enter the administrator QC queue. Passing records the review; failing records the review and returns the operation to `Needs Rework`.
-- QC reviews are stored in Supabase. Operation status remains stored in Baserow.
+- QC notes and reviewer details are stored in Supabase. The operation status and linked production requirement's QC outcome remain stored in Baserow.
 
 ## Vercel
 

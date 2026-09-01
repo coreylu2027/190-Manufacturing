@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { getAdminActor } from "@/lib/auth";
-import { getOperations, patchOperation } from "@/lib/baserow";
+import { clearPassedQualityOutcome, getOperations, patchOperation, patchQualityOutcome } from "@/lib/baserow";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 const reviewSchema = z.object({
@@ -45,9 +45,35 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     if (parsed.data.result === "failed") {
       await patchOperation(operationId, { status: "Needs Rework" }, currentUser.name);
     }
+    await patchQualityOutcome(operationId, parsed.data.result);
 
     return NextResponse.json({ review: { operationId, ...parsed.data } });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to record quality review" }, { status: 502 });
+  }
+}
+
+export async function DELETE(_request: Request, { params }: { params: Promise<{ id: string }> }) {
+  const currentUser = await getAdminActor();
+  if (!currentUser) return NextResponse.json({ error: "Authentication required" }, { status: 401 });
+  if (!currentUser.approved || currentUser.role !== "admin") return NextResponse.json({ error: "Administrator access required" }, { status: 403 });
+
+  const { id } = await params;
+  const operationId = Number(id);
+  if (!Number.isInteger(operationId)) return NextResponse.json({ error: "Invalid operation ID" }, { status: 400 });
+
+  try {
+    const admin = createAdminClient();
+    if (admin) {
+      const { data: review, error: reviewError } = await admin.from("quality_control").select("result").eq("operation_id", operationId).maybeSingle();
+      if (reviewError) throw reviewError;
+      if (review?.result !== "passed") return NextResponse.json({ error: "Only a passed QC review can be undone directly" }, { status: 409 });
+      const { error: deleteError } = await admin.from("quality_control").delete().eq("operation_id", operationId);
+      if (deleteError) throw deleteError;
+    }
+    await clearPassedQualityOutcome(operationId);
+    return NextResponse.json({ undone: true, operationId });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to undo quality review" }, { status: 502 });
   }
 }

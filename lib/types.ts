@@ -11,6 +11,14 @@ export type OperationStatus = (typeof OPERATION_STATUSES)[number];
 
 export type DataSource = "baserow" | "demo";
 export type UserRole = "machinist" | "admin";
+export type OperationQuantityAction = "claim" | "release" | "complete" | "undo_complete";
+
+export interface OperationAllocation {
+  userId: string;
+  name: string;
+  claimed: number;
+  completed: number;
+}
 
 export interface ManufacturingOperation {
   id: number;
@@ -19,6 +27,10 @@ export interface ManufacturingOperation {
   partName: string;
   assemblyNumber: string;
   quantity: number;
+  claimedQuantity: number;
+  completedQuantity: number;
+  availableQuantity: number;
+  allocations: OperationAllocation[];
   operationNumber: "OP1" | "OP2" | "OP3" | "OP4";
   machine: string;
   status: OperationStatus;
@@ -28,7 +40,9 @@ export interface ManufacturingOperation {
   activeInRouting: boolean;
   drawingUrl: string | null;
   drawingPdfUrl: string | null;
+  drawingPdfName: string | null;
   stepUrl: string | null;
+  stepName: string | null;
   onshapeUrl: string | null;
 }
 
@@ -42,6 +56,11 @@ export interface OperationsResponse {
 export interface OperationPatch {
   status?: OperationStatus;
   machinist?: string;
+}
+
+export interface OperationQuantityPatch {
+  action: OperationQuantityAction;
+  quantity: number;
 }
 
 export interface AdminUserSummary {
