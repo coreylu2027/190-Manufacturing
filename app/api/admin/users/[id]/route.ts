@@ -23,7 +23,12 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   }
 
   const admin = createAdminClient();
-  if (!admin) return NextResponse.json({ user: { id, ...parsed.data } });
+  if (!admin) {
+    return NextResponse.json(
+      { error: "Supabase administration is not configured (SUPABASE_SERVICE_ROLE_KEY is missing)" },
+      { status: 503 },
+    );
+  }
 
   const { data: authData, error: authError } = await admin.auth.admin.getUserById(id);
   if (authError || !authData.user) return NextResponse.json({ error: authError?.message ?? "User not found" }, { status: 404 });

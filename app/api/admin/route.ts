@@ -23,14 +23,6 @@ interface ReviewRow {
   reviewed_at: string;
 }
 
-function emptyResponse(): AdminResponse {
-  return {
-    source: "demo",
-    users: [],
-    qualityControl: [],
-  };
-}
-
 export async function GET() {
   const currentUser = await getAdminActor();
   if (!currentUser) return NextResponse.json({ error: "Authentication required" }, { status: 401 });
@@ -38,7 +30,12 @@ export async function GET() {
   if (currentUser.role !== "admin") return NextResponse.json({ error: "Administrator access required" }, { status: 403 });
 
   const admin = createAdminClient();
-  if (!admin) return NextResponse.json(emptyResponse());
+  if (!admin) {
+    return NextResponse.json(
+      { error: "Supabase administration is not configured (SUPABASE_SERVICE_ROLE_KEY is missing)" },
+      { status: 503 },
+    );
+  }
 
   try {
     const [{ data: authData, error: authError }, { data: profileData, error: profileError }, { data: reviewData, error: reviewError }, operationData] = await Promise.all([
