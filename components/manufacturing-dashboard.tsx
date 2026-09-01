@@ -40,6 +40,7 @@ import { toast } from "sonner";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { AdminDashboard } from "@/components/admin-dashboard";
 import { FabricationDashboard } from "@/components/fabrication-dashboard";
+import { NotificationInbox } from "@/components/notification-inbox";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -80,8 +81,8 @@ import { isShopName } from "@/lib/profile-name";
 import { cn } from "@/lib/utils";
 import {
   type ManufacturingOperation,
+  type OperationActionPatch,
   type OperationQuantityAction,
-  type OperationQuantityPatch,
   type OperationStatus,
   type OperationsResponse,
 } from "@/lib/types";
@@ -138,13 +139,14 @@ function StatusCell({ value }: { value: OperationStatus }) {
   return <div className="flex h-full items-center"><StatusBadge status={value} /></div>;
 }
 
-function ActionCell({ data, onOpen }: { data?: ManufacturingOperation; onOpen: (operation: ManufacturingOperation) => void }) {
+function ActionCell({ data, onOpen, user }: { data?: ManufacturingOperation; onOpen: (operation: ManufacturingOperation) => void; user: OperationsResponse["user"] }) {
   if (!data) return null;
   const claimable = ["Ready", "In Progress", "Needs Rework"].includes(data.status) && data.availableQuantity > 0;
+  const stealable = isOperationStealable(data, user);
   return (
     <div className="flex h-full items-center justify-end">
-      <Button size="sm" variant={claimable ? "default" : "ghost"} onClick={() => onOpen(data)}>
-        {claimable ? "Claim" : "Open"}<ChevronRight />
+      <Button size="sm" variant={claimable ? "default" : stealable ? "destructive" : "ghost"} onClick={() => onOpen(data)}>
+        {claimable ? "Claim" : stealable ? "Steal" : "Open"}<ChevronRight />
       </Button>
     </div>
   );
@@ -179,6 +181,21 @@ function allocationForUser(operation: ManufacturingOperation, user: OperationsRe
   return operation.allocations.find((allocation) => allocation.userId === user.id)
     ?? operation.allocations.find((allocation) => allocation.name.toLocaleLowerCase() === user.name.toLocaleLowerCase())
     ?? { claimed: 0, completed: 0 };
+}
+
+function allocationBelongsToUser(allocation: ManufacturingOperation["allocations"][number], user: OperationsResponse["user"]) {
+  if (!user) return false;
+  return allocation.userId === user.id || allocation.name.toLocaleLowerCase() === user.name.toLocaleLowerCase();
+}
+
+function otherClaimants(operation: ManufacturingOperation, user: OperationsResponse["user"]) {
+  return operation.allocations.filter((allocation) => allocation.claimed > 0 && !allocationBelongsToUser(allocation, user));
+}
+
+function isOperationStealable(operation: ManufacturingOperation, user: OperationsResponse["user"]) {
+  return ["Ready", "In Progress", "Needs Rework"].includes(operation.status)
+    && operation.availableQuantity === 0
+    && otherClaimants(operation, user).length > 0;
 }
 
 const quantityActionCopy: Record<OperationQuantityAction, { title: string; button: string; success: string }> = {
@@ -336,6 +353,7 @@ export function ManufacturingDashboard() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [quantityDialog, setQuantityDialog] = useState<{ action: OperationQuantityAction; max: number } | null>(null);
   const [quantityDraft, setQuantityDraft] = useState("1");
+  const [stealDialogOpen, setStealDialogOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [firstName, setFirstName] = useState("");
   const [lastInitial, setLastInitial] = useState("");
@@ -349,7 +367,7 @@ export function ManufacturingDashboard() {
   }, [query.error, router]);
 
   const mutation = useMutation({
-    mutationFn: async ({ id, patch }: { id: number; patch: OperationQuantityPatch; suppressUndo?: boolean }) => {
+    mutationFn: async ({ id, patch }: { id: number; patch: OperationActionPatch; suppressUndo?: boolean }) => {
       const response = await fetch(`/api/operations/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -369,17 +387,28 @@ export function ManufacturingDashboard() {
           operations: current.operations.map((operation) => operation.id === variables.id ? { ...operation, ...data.updated } : operation),
         } : current);
       }
-      const copy = quantityActionCopy[variables.patch.action];
-      toast.success(`${copy.success}: ${variables.patch.quantity}`, variables.suppressUndo ? undefined : {
-        action: {
-          label: "Undo",
-          onClick: () => mutation.mutate({
-            id: variables.id,
-            patch: { action: inverseQuantityAction[variables.patch.action], quantity: variables.patch.quantity },
-            suppressUndo: true,
-          }),
-        },
-      });
+      if (variables.patch.action === "steal") {
+        const stolenQuantity = data.displaced?.reduce((sum: number, claimant: { quantity: number }) => sum + claimant.quantity, 0) ?? 0;
+        toast.success(`Production requirement stolen${stolenQuantity ? `: ${stolenQuantity} ${stolenQuantity === 1 ? "part" : "parts"}` : ""}`);
+        const delivery = data.notificationDelivery;
+        if (delivery && (delivery.emailsFailed > 0 || delivery.emailsSkipped > 0 || delivery.unmappedRecipients > 0)) {
+          toast.warning("The claim changed, but one or more email alerts could not be delivered. The website alert was kept when possible.");
+        }
+        setStealDialogOpen(false);
+      } else {
+        const quantityPatch = variables.patch;
+        const copy = quantityActionCopy[quantityPatch.action];
+        toast.success(`${copy.success}: ${quantityPatch.quantity}`, variables.suppressUndo ? undefined : {
+          action: {
+            label: "Undo",
+            onClick: () => mutation.mutate({
+              id: variables.id,
+              patch: { action: inverseQuantityAction[quantityPatch.action], quantity: quantityPatch.quantity },
+              suppressUndo: true,
+            }),
+          },
+        });
+      }
       setQuantityDialog(null);
     },
     onSettled: () => {
@@ -411,6 +440,7 @@ export function ManufacturingDashboard() {
   const operations = useMemo(() => query.data?.operations ?? [], [query.data?.operations]);
   const selected = selectedId === null ? null : operations.find((operation) => operation.id === selectedId) ?? null;
   const selectedAllocation = selected ? allocationForUser(selected, query.data?.user ?? null) : { claimed: 0, completed: 0 };
+  const selectedOtherClaimants = selected ? otherClaimants(selected, query.data?.user ?? null) : [];
   const machines = useMemo(() => [...new Set(operations.map((operation) => operation.machine))].sort(), [operations]);
 
   const filtered = useMemo(() => {
@@ -419,7 +449,7 @@ export function ManufacturingDashboard() {
       if (machine !== "all" && operation.machine !== machine) return false;
       const allocation = allocationForUser(operation, query.data?.user ?? null);
       const claimable = ["Ready", "In Progress", "Needs Rework"].includes(operation.status) && operation.availableQuantity > 0;
-      if (view === "available" && !claimable) return false;
+      if (view === "available" && !claimable && !isOperationStealable(operation, query.data?.user ?? null)) return false;
       if (view === "mine" && allocation.claimed === 0) return false;
       if (term && ![operation.partNumber, operation.partName, operation.assemblyNumber, operation.machine, operation.operationNumber].join(" ").toLowerCase().includes(term)) return false;
       return true;
@@ -448,6 +478,14 @@ export function ManufacturingDashboard() {
     setQuantityDraft(String(max));
     setQuantityDialog({ action, max });
   };
+  const requestSteal = () => {
+    if (!isShopName(userName)) {
+      openProfile();
+      toast.info("Set your first name and last initial before recording work");
+      return;
+    }
+    setStealDialogOpen(true);
+  };
   const openProfile = () => {
     const match = userName.match(/^(.+?)\s+([\p{L}])\.$/u);
     setFirstName(match?.[1] ?? userName.split(/\s+/)[0] ?? "");
@@ -466,11 +504,12 @@ export function ManufacturingDashboard() {
     { field: "machine", headerName: "MACHINE", minWidth: 175, filter: true },
     { field: "status", headerName: "STATUS", minWidth: 145, cellRenderer: StatusCell },
     { field: "machinist", headerName: "MACHINIST", minWidth: 180, valueFormatter: ({ value }) => value || "—" },
-    { headerName: "", width: 102, pinned: "right", sortable: false, filter: false, resizable: false, cellRenderer: ActionCell, cellRendererParams: { onOpen: openOperation } },
-  ], []);
+    { headerName: "", width: 102, pinned: "right", sortable: false, filter: false, resizable: false, cellRenderer: ActionCell, cellRendererParams: { onOpen: openOperation, user: query.data?.user ?? null } },
+  ], [query.data?.user]);
 
   return (
     <main className="min-h-screen bg-background text-foreground">
+      <NotificationInbox enabled={Boolean(query.data?.user?.approved && query.data.user.id !== "demo-admin")} />
       <header className="sticky top-0 z-40 border-b bg-card/95 backdrop-blur">
         <div className="mx-auto flex h-16 max-w-[1800px] items-center gap-5 px-4 md:px-7">
           <div className="flex items-center gap-3 md:min-w-56">
@@ -705,6 +744,7 @@ export function ManufacturingDashboard() {
 
               <SheetFooter className="sticky bottom-0 border-t bg-card/95 p-4 backdrop-blur">
                 {["Ready", "In Progress", "Needs Rework"].includes(selected.status) && selected.availableQuantity > 0 && <Button size="lg" className="h-11" onClick={() => requestQuantityAction("claim", selected.availableQuantity)} disabled={mutation.isPending}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <CircleDot />} Claim {selected.availableQuantity === 1 ? "part" : "parts"}</Button>}
+                {isOperationStealable(selected, query.data?.user ?? null) && <Button size="lg" variant="destructive" className="h-11" onClick={requestSteal} disabled={mutation.isPending}><TriangleAlert /> Steal production requirement</Button>}
                 {selectedAllocation.claimed > 0 && <Button size="lg" className="h-11 bg-emerald-600 hover:bg-emerald-700" onClick={() => requestQuantityAction("complete", selectedAllocation.claimed)} disabled={mutation.isPending}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <Check />} Mark complete</Button>}
                 {selectedAllocation.claimed > 0 && <Button variant="outline" onClick={() => requestQuantityAction("release", selectedAllocation.claimed)} disabled={mutation.isPending}><RotateCcw /> Release claim</Button>}
                 {selectedAllocation.completed > 0 && <Button variant="outline" onClick={() => requestQuantityAction("undo_complete", selectedAllocation.completed)} disabled={mutation.isPending}><RotateCcw /> Undo completion</Button>}
@@ -735,6 +775,32 @@ export function ManufacturingDashboard() {
             <div className="my-5"><label className="mb-1.5 block text-xs font-semibold" htmlFor="action-quantity">Number of parts</label><Input id="action-quantity" type="number" inputMode="numeric" min={1} max={quantityDialog?.max ?? 1} step={1} value={quantityDraft} onChange={(event) => setQuantityDraft(event.target.value)} autoFocus /></div>
             <DialogFooter><Button type="button" variant="outline" onClick={() => setQuantityDialog(null)}>Cancel</Button><Button type="submit" disabled={mutation.isPending}>{mutation.isPending && <LoaderCircle className="animate-spin" />}{quantityDialog ? quantityActionCopy[quantityDialog.action].button : "Save"}</Button></DialogFooter>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={stealDialogOpen} onOpenChange={setStealDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <div className="mb-1 grid size-10 place-items-center rounded-full bg-destructive/10 text-destructive"><TriangleAlert className="size-5" /></div>
+            <DialogTitle>Steal this production requirement?</DialogTitle>
+            <DialogDescription>
+              This immediately transfers the claimed work from {selectedOtherClaimants.map((claimant) => claimant.name).join(", ") || "the current claimant"} to you. They will receive a website alert and an email. Completed work will not change.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="rounded-xl border border-destructive/20 bg-destructive/5 p-3 text-sm">
+            <p className="font-semibold">This action cannot be undone automatically.</p>
+            <p className="mt-1 text-muted-foreground">Confirm only if you have coordinated the handoff or the work needs to be reassigned now.</p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setStealDialogOpen(false)}>Cancel</Button>
+            <Button
+              variant="destructive"
+              onClick={() => selected && mutation.mutate({ id: selected.id, patch: { action: "steal", confirmed: true } })}
+              disabled={!selected || mutation.isPending}
+            >
+              {mutation.isPending && <LoaderCircle className="animate-spin" />} Yes, steal requirement
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 

@@ -49,7 +49,7 @@ export const DEMO_OPERATIONS: ManufacturingOperation[] = DEMO_OPERATION_ROWS.map
     return {
       ...operation,
       claimedQuantity: operation.quantity,
-      allocations: [{ userId: "demo-admin", name: "Demo M.", claimed: operation.quantity, completed: 0 }],
+      allocations: [{ userId: "demo-machinist", name: "Demo M.", claimed: operation.quantity, completed: 0 }],
       machinist: "Demo M.",
     };
   }

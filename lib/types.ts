@@ -12,6 +12,7 @@ export type OperationStatus = (typeof OPERATION_STATUSES)[number];
 export type DataSource = "baserow" | "demo";
 export type UserRole = "machinist" | "admin";
 export type OperationQuantityAction = "claim" | "release" | "complete" | "undo_complete";
+export type OperationAction = OperationQuantityAction | "steal";
 export type FabricationAction = "claim" | "release" | "complete" | "undo_complete";
 
 export interface OperationAllocation {
@@ -95,6 +96,22 @@ export interface OperationPatch {
 export interface OperationQuantityPatch {
   action: OperationQuantityAction;
   quantity: number;
+}
+
+export interface OperationStealPatch {
+  action: "steal";
+  confirmed: true;
+}
+
+export type OperationActionPatch = OperationQuantityPatch | OperationStealPatch;
+
+export interface AppNotification {
+  id: string;
+  type: string;
+  title: string;
+  message: string;
+  data: Record<string, unknown>;
+  createdAt: string;
 }
 
 export interface AdminUserSummary {

@@ -544,6 +544,148 @@ export async function applyQuantityAction(
   };
 }
 
+export interface DisplacedClaimant {
+  userId: string;
+  name: string;
+  quantity: number;
+}
+
+export interface StolenOperationContext {
+  operationId: number;
+  partNumber: string;
+  partName: string;
+  operationNumber: ManufacturingOperation["operationNumber"];
+}
+
+export async function stealOperationClaim(
+  id: number,
+  actor: { id: string; name: string },
+) {
+  if (!hasBaserowCredentials()) {
+    const operation = DEMO_STATE.get(id);
+    if (!operation) throw new Error("Operation not found");
+    if (!["Ready", "In Progress", "Needs Rework"].includes(operation.status)) {
+      throw new Error("This production requirement cannot be stolen right now");
+    }
+    if (operation.availableQuantity > 0) throw new Error("Claim the remaining available parts instead");
+
+    const allocations = operation.allocations.map((allocation) => ({ ...allocation }));
+    const namedActorAllocation = allocations.find((allocation) =>
+      allocation.userId !== actor.id && allocation.name.toLocaleLowerCase() === actor.name.toLocaleLowerCase(),
+    );
+    if (namedActorAllocation) namedActorAllocation.userId = actor.id;
+    const displaced = allocations
+      .filter((allocation) => allocation.userId !== actor.id && allocation.claimed > 0)
+      .map((allocation) => ({ userId: allocation.userId, name: allocation.name, quantity: allocation.claimed }));
+    const stolenQuantity = displaced.reduce((sum, allocation) => sum + allocation.quantity, 0);
+    if (stolenQuantity === 0) throw new Error("No one else currently has this production requirement claimed");
+
+    for (const allocation of allocations) {
+      if (allocation.userId !== actor.id) allocation.claimed = 0;
+    }
+    let actorAllocation = allocations.find((allocation) => allocation.userId === actor.id);
+    if (!actorAllocation) {
+      actorAllocation = { userId: actor.id, name: actor.name, claimed: 0, completed: 0 };
+      allocations.push(actorAllocation);
+    }
+    actorAllocation.name = actor.name;
+    actorAllocation.claimed += stolenQuantity;
+
+    const activeAllocations = allocations.filter((allocation) => allocation.claimed > 0 || allocation.completed > 0);
+    const updated = {
+      id,
+      status: "In Progress" as OperationStatus,
+      machinist: machinistSummary(activeAllocations, operation.quantity),
+      claimedQuantity: activeAllocations.reduce((sum, allocation) => sum + allocation.claimed, 0),
+      completedQuantity: activeAllocations.reduce((sum, allocation) => sum + allocation.completed, 0),
+      availableQuantity: 0,
+      allocations: activeAllocations,
+      startedAt: operation.startedAt ?? new Date().toISOString(),
+      completedAt: null,
+    };
+    DEMO_STATE.set(id, { ...operation, ...updated });
+    return {
+      updated,
+      displaced,
+      context: {
+        operationId: id,
+        partNumber: operation.partNumber,
+        partName: operation.partName,
+        operationNumber: operation.operationNumber,
+      } satisfies StolenOperationContext,
+    };
+  }
+
+  const operation = await getRow(OPERATIONS_TABLE_ID, id);
+  const requirementId = linkedId(operation["Production Requirement"]);
+  if (!requirementId) throw new Error("Operation is not linked to a production requirement");
+  const requirement = await getRow(REQUIREMENTS_TABLE_ID, requirementId);
+  const requiredQuantity = Math.max(1, Math.floor(Number(requirement["Required Quantity"] ?? 1)));
+  const currentStatus = selectValue(operation.Status, "Planned") as OperationStatus;
+  if (!["Ready", "In Progress", "Needs Rework"].includes(currentStatus)) {
+    throw new Error("This production requirement cannot be stolen right now");
+  }
+
+  const current = quantitiesForRow(operation, requiredQuantity, currentStatus);
+  if (current.availableQuantity > 0) throw new Error("Claim the remaining available parts instead");
+  const allocations = current.allocations.map((allocation) => ({ ...allocation }));
+  const legacyActorAllocation = allocations.find((allocation) =>
+    allocation.userId.startsWith("legacy:") && allocation.name.toLocaleLowerCase() === actor.name.toLocaleLowerCase(),
+  );
+  if (legacyActorAllocation) legacyActorAllocation.userId = actor.id;
+  const displaced = allocations
+    .filter((allocation) => allocation.userId !== actor.id && allocation.claimed > 0)
+    .map((allocation) => ({ userId: allocation.userId, name: allocation.name, quantity: allocation.claimed }));
+  const stolenQuantity = displaced.reduce((sum, allocation) => sum + allocation.quantity, 0);
+  if (stolenQuantity === 0) throw new Error("No one else currently has this production requirement claimed");
+
+  for (const allocation of allocations) {
+    if (allocation.userId !== actor.id) allocation.claimed = 0;
+  }
+  let actorAllocation = allocations.find((allocation) => allocation.userId === actor.id);
+  if (!actorAllocation) {
+    actorAllocation = { userId: actor.id, name: actor.name, claimed: 0, completed: 0 };
+    allocations.push(actorAllocation);
+  }
+  actorAllocation.name = actor.name;
+  actorAllocation.claimed += stolenQuantity;
+
+  const activeAllocations = allocations.filter((allocation) => allocation.claimed > 0 || allocation.completed > 0);
+  const claimedQuantity = activeAllocations.reduce((sum, allocation) => sum + allocation.claimed, 0);
+  const completedQuantity = activeAllocations.reduce((sum, allocation) => sum + allocation.completed, 0);
+  const summary = machinistSummary(activeAllocations, requiredQuantity);
+  const timestamp = new Date().toISOString();
+  const operationPatch = {
+    Status: "In Progress",
+    Machinist: summary,
+    "Claimed Quantity": claimedQuantity,
+    "Completed Quantity": completedQuantity,
+    "Quantity Ledger": JSON.stringify(activeAllocations),
+    "Started At": operation["Started At"] ?? timestamp,
+    "Completed At": null,
+  };
+  await patchRow(OPERATIONS_TABLE_ID, id, operationPatch);
+  await patchRow(REQUIREMENTS_TABLE_ID, requirementId, { Status: "On Machine", Machinist: summary });
+
+  const parsed = parseRequirement(linkedValue(operation["Production Requirement"]));
+  const operationNumber = selectValue(operation["Operation Number"], "OP1") as ManufacturingOperation["operationNumber"];
+  return {
+    updated: {
+      id,
+      status: "In Progress" as OperationStatus,
+      machinist: summary,
+      claimedQuantity,
+      completedQuantity,
+      availableQuantity: Math.max(0, requiredQuantity - claimedQuantity - completedQuantity),
+      allocations: activeAllocations,
+      startedAt: operationPatch["Started At"],
+      completedAt: null,
+    },
+    displaced,
+    context: { operationId: id, ...parsed, operationNumber } satisfies StolenOperationContext,
+  };
+}
+
 export async function renameMachinistAllocations(userId: string, oldName: string, newName: string) {
   if (!hasBaserowCredentials() || oldName === newName) return;
 
