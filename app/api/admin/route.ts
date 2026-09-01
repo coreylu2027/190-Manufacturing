@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { DEMO_ADMIN, getAdminActor, isBootstrapAdminEmail } from "@/lib/auth";
 import { getOperations } from "@/lib/baserow";
 import { DEMO_OPERATIONS } from "@/lib/demo-data";
+import { isShopName } from "@/lib/profile-name";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { AdminResponse, AdminUserSummary, QualityControlItem, QualityResult } from "@/lib/types";
 
@@ -66,10 +67,11 @@ export async function GET() {
       const profile = profiles.get(user.id);
       const email = user.email ?? "No email";
       const bootstrapAdmin = isBootstrapAdminEmail(user.email);
+      const metadataName = user.user_metadata.full_name ?? user.user_metadata.name ?? "";
       return {
         id: user.id,
         email,
-        name: profile?.display_name || user.user_metadata.full_name || user.user_metadata.name || email.split("@")[0],
+        name: isShopName(metadataName) ? metadataName : profile?.display_name || metadataName || email.split("@")[0],
         role: bootstrapAdmin ? "admin" : profile?.role ?? "machinist",
         approved: bootstrapAdmin || Boolean(profile?.approved),
         createdAt: user.created_at,

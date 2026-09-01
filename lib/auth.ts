@@ -1,5 +1,6 @@
 import "server-only";
 
+import { isShopName } from "@/lib/profile-name";
 import { createClient, getCurrentUser } from "@/lib/supabase/server";
 
 export const APP_ROLES = ["machinist", "admin"] as const;
@@ -40,7 +41,8 @@ export async function getAppUser(): Promise<AppUser | null> {
   if (!user) return null;
 
   const email = user.email ?? null;
-  const fallbackName = user.user_metadata.full_name ?? user.user_metadata.name ?? email?.split("@")[0] ?? "Machinist";
+  const metadataName = user.user_metadata.full_name ?? user.user_metadata.name ?? "";
+  const fallbackName = metadataName || email?.split("@")[0] || "Machinist";
   if (isBootstrapAdminEmail(email)) {
     return { id: user.id, name: fallbackName, email, role: "admin", approved: true };
   }
@@ -56,7 +58,7 @@ export async function getAppUser(): Promise<AppUser | null> {
 
   return {
     id: user.id,
-    name: data?.display_name || fallbackName,
+    name: isShopName(metadataName) ? metadataName : data?.display_name || fallbackName,
     email,
     role: data?.role === "admin" ? "admin" : "machinist",
     approved: Boolean(data?.approved),

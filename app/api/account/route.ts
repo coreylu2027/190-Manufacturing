@@ -4,6 +4,7 @@ import { getAppUser } from "@/lib/auth";
 import { renameMachinistAllocations } from "@/lib/baserow";
 import { formatShopName, shopNameSchema } from "@/lib/profile-name";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { createClient } from "@/lib/supabase/server";
 
 export async function GET() {
   const user = await getAppUser();
@@ -18,17 +19,36 @@ export async function PATCH(request: Request) {
   const parsed = shopNameSchema.safeParse(await request.json());
   if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message }, { status: 400 });
 
-  const admin = createAdminClient();
-  if (!admin) return NextResponse.json({ error: "Account profile updates are not configured" }, { status: 503 });
-
   const displayName = formatShopName(parsed.data.firstName, parsed.data.lastInitial);
-  await renameMachinistAllocations(user.id, user.name, displayName);
-  const [{ error: profileError }, { error: authError }] = await Promise.all([
-    admin.from("profiles").update({ display_name: displayName, updated_at: new Date().toISOString() }).eq("id", user.id),
-    admin.auth.admin.updateUserById(user.id, { user_metadata: { full_name: displayName } }),
-  ]);
-  if (profileError || authError) {
-    return NextResponse.json({ error: profileError?.message ?? authError?.message ?? "Unable to update profile" }, { status: 502 });
+  const supabase = await createClient();
+  if (!supabase) {
+    return NextResponse.json({ error: "Supabase is not configured" }, { status: 503 });
+  }
+
+  try {
+    await renameMachinistAllocations(user.id, user.name, displayName);
+
+    const { error: authError } = await supabase.auth.updateUser({
+      data: { full_name: displayName },
+    });
+    if (authError) {
+      return NextResponse.json({ error: authError.message }, { status: 502 });
+    }
+
+    // Mirror the name into the profile table when elevated credentials exist,
+    // but do not require them for a user to update their own Auth metadata.
+    const admin = createAdminClient();
+    if (admin) {
+      await admin
+        .from("profiles")
+        .update({ display_name: displayName, updated_at: new Date().toISOString() })
+        .eq("id", user.id);
+    }
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Unable to update profile" },
+      { status: 502 },
+    );
   }
 
   return NextResponse.json({ user: { ...user, name: displayName } });
