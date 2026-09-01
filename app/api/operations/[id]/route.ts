@@ -26,7 +26,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   const parsed = patchSchema.safeParse(await request.json());
   if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message }, { status: 400 });
 
-  const machinist = user?.name ?? "Corey Lu";
+  const machinist = user?.name ?? "Demo Machinist";
   try {
     const updated = await patchOperation(operationId, parsed.data, machinist);
     return NextResponse.json({ updated });

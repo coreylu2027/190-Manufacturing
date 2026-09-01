@@ -15,7 +15,7 @@ export interface AppUser {
 
 export const DEMO_ADMIN: AppUser = {
   id: "demo-admin",
-  name: "Corey Lu",
+  name: "Demo Administrator",
   email: null,
   role: "admin",
   approved: true,
@@ -31,7 +31,8 @@ export function isBootstrapAdminEmail(email: string | null | undefined) {
 }
 
 export function isAuthRequired() {
-  return process.env.REQUIRE_AUTH === "true";
+  // Live manufacturing data must never be exposed through a demo identity.
+  return process.env.REQUIRE_AUTH === "true" || Boolean(process.env.BASEROW_API_TOKEN);
 }
 
 export async function getAppUser(): Promise<AppUser | null> {

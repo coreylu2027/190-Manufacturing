@@ -37,6 +37,7 @@ Supported statuses match the live schema: Planned, Ready, In Progress, Blocked, 
 ## Access and quality control
 
 - New email/password and OAuth accounts enter a pending state.
+- Any environment connected to live Baserow data requires authentication automatically; demo identities are available only when no Baserow token is configured.
 - An approved administrator assigns either the `machinist` or `admin` role.
 - Approval and role checks are repeated on protected server routes; hiding the Admin tab is not the security boundary.
 - Completed operations enter the administrator QC queue. Passing records the review; failing records the review and returns the operation to `Needs Rework`.
