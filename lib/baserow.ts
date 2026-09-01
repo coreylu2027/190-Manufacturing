@@ -1,7 +1,9 @@
 import "server-only";
 
-import { DEMO_OPERATIONS } from "@/lib/demo-data";
+import { DEMO_FABRICATION_JOBS, DEMO_OPERATIONS } from "@/lib/demo-data";
 import type {
+  FabricationAction,
+  FabricationJob,
   ManufacturingOperation,
   OperationAllocation,
   OperationPatch,
@@ -14,11 +16,13 @@ type BaserowRow = Record<string, unknown> & { id: number };
 
 const OPERATIONS_TABLE_ID = process.env.BASEROW_OPERATIONS_TABLE_ID ?? "1169282";
 const REQUIREMENTS_TABLE_ID = process.env.BASEROW_REQUIREMENTS_TABLE_ID ?? "1119642";
+const FINISHING_TABLE_ID = process.env.BASEROW_FINISHING_TABLE_ID ?? "1170619";
 const API_URL = (process.env.BASEROW_API_URL ?? "https://api.baserow.io").replace(/\/$/, "");
 const DEMO_STATE = new Map(DEMO_OPERATIONS.map((operation) => [operation.id, {
   ...operation,
   allocations: operation.allocations.map((allocation) => ({ ...allocation })),
 }]));
+const DEMO_FABRICATION_STATE = new Map(DEMO_FABRICATION_JOBS.map((job) => [job.id, { ...job }]));
 
 export function hasBaserowCredentials() {
   return Boolean(process.env.BASEROW_API_TOKEN);
@@ -160,6 +164,118 @@ function machinistSummary(allocations: OperationAllocation[], requiredQuantity: 
       ? `${allocation.name} (${allocation.claimed + allocation.completed})`
       : allocation.name)
     .join(", ");
+}
+
+function fabricationStatus(requirementStatus: string, machinist: string): ManufacturingOperation["status"] {
+  if (requirementStatus === "Complete") return "Complete";
+  if (requirementStatus === "Needs Rework") return "Needs Rework";
+  if (requirementStatus === "Ready for Finishing") return machinist ? "In Progress" : "Ready";
+  return "Planned";
+}
+
+export async function getFabricationJobs(): Promise<{ jobs: FabricationJob[]; source: "baserow" | "demo" }> {
+  if (!hasBaserowCredentials()) return { jobs: [...DEMO_FABRICATION_STATE.values()], source: "demo" };
+
+  const [finishingRows, requirementRows] = await Promise.all([
+    listAllRows(FINISHING_TABLE_ID),
+    listAllRows(REQUIREMENTS_TABLE_ID),
+  ]);
+  const requirements = new Map(requirementRows.map((row) => [row.id, row]));
+
+  const jobs = finishingRows.flatMap((row): FabricationJob[] => {
+    const requirementId = linkedId(row["Production Requirement"]);
+    const requirement = requirementId ? requirements.get(requirementId) : undefined;
+    if (!requirementId || !requirement) return [];
+
+    const parsed = parseRequirement(linkedValue(row["Production Requirement"]));
+    const machinist = String(row.Machinist ?? "").trim();
+    const requirementStatus = selectValue(requirement.Status, "Needs Triage");
+    const drawingPdf = firstFile(requirement["Drawing PDF"]);
+    const stepFile = firstFile(requirement["STEP File"]);
+    return [{
+      id: row.id,
+      productionKey: String(row["Production Key"] ?? row.id),
+      requirementId,
+      ...parsed,
+      quantity: Math.max(1, Math.floor(Number(row["Required Quantity"] ?? requirement["Required Quantity"] ?? 1))),
+      color: selectValue(row["Powder Coat Color"], selectValue(requirement.Finishing, "Unspecified")),
+      status: fabricationStatus(requirementStatus, machinist),
+      requirementStatus,
+      machinist,
+      active: Boolean(row.Active),
+      lastSyncedAt: row["Last Synced At"] ? String(row["Last Synced At"]) : null,
+      drawingUrl: linkedValue(requirement.Drawing) || null,
+      drawingPdfUrl: drawingPdf?.url ?? null,
+      drawingPdfName: drawingPdf?.name ?? null,
+      stepUrl: stepFile?.url ?? null,
+      stepName: stepFile?.name ?? null,
+      onshapeUrl: requirement["Onshape Source"] ? String(requirement["Onshape Source"]) : null,
+    }];
+  });
+
+  return { jobs: jobs.filter((job) => job.active), source: "baserow" };
+}
+
+export async function applyFabricationAction(id: number, action: FabricationAction, actor: { name: string }) {
+  if (!hasBaserowCredentials()) {
+    const job = DEMO_FABRICATION_STATE.get(id);
+    if (!job) throw new Error("Finishing job not found");
+    if (action === "claim") {
+      if (job.status !== "Ready") throw new Error("This finishing job is not available to claim");
+      job.machinist = actor.name;
+      job.status = "In Progress";
+    } else if (action === "release") {
+      if (job.machinist.toLocaleLowerCase() !== actor.name.toLocaleLowerCase()) throw new Error("Only the assigned machinist can release this job");
+      job.machinist = "";
+      job.status = "Ready";
+    } else if (action === "complete") {
+      if (job.status !== "In Progress" || job.machinist.toLocaleLowerCase() !== actor.name.toLocaleLowerCase()) throw new Error("Claim this finishing job before completing it");
+      job.status = "Complete";
+      job.requirementStatus = "Complete";
+    } else {
+      if (job.status !== "Complete" || job.machinist.toLocaleLowerCase() !== actor.name.toLocaleLowerCase()) throw new Error("Only the assigned machinist can undo this completion");
+      job.status = "In Progress";
+      job.requirementStatus = "Ready for Finishing";
+    }
+    DEMO_FABRICATION_STATE.set(id, { ...job });
+    return { id, status: job.status, requirementStatus: job.requirementStatus, machinist: job.machinist };
+  }
+
+  const finishing = await getRow(FINISHING_TABLE_ID, id);
+  if (!Boolean(finishing.Active)) throw new Error("This finishing job is no longer active");
+  const requirementId = linkedId(finishing["Production Requirement"]);
+  if (!requirementId) throw new Error("Finishing job is not linked to a production requirement");
+  const requirement = await getRow(REQUIREMENTS_TABLE_ID, requirementId);
+  const requirementStatus = selectValue(requirement.Status, "Needs Triage");
+  const assignedMachinist = String(finishing.Machinist ?? "").trim();
+  const isAssignedActor = assignedMachinist.toLocaleLowerCase() === actor.name.toLocaleLowerCase();
+
+  let nextMachinist = assignedMachinist;
+  let nextRequirementStatus = requirementStatus;
+  if (action === "claim") {
+    if (requirementStatus !== "Ready for Finishing" || assignedMachinist) throw new Error("This finishing job is not available to claim");
+    nextMachinist = actor.name;
+    await patchRow(FINISHING_TABLE_ID, id, { Machinist: nextMachinist });
+  } else if (action === "release") {
+    if (requirementStatus !== "Ready for Finishing" || !isAssignedActor) throw new Error("Only the assigned machinist can release this job");
+    nextMachinist = "";
+    await patchRow(FINISHING_TABLE_ID, id, { Machinist: "" });
+  } else if (action === "complete") {
+    if (requirementStatus !== "Ready for Finishing" || !isAssignedActor) throw new Error("Claim this finishing job before completing it");
+    nextRequirementStatus = "Complete";
+    await patchRow(REQUIREMENTS_TABLE_ID, requirementId, { Status: nextRequirementStatus });
+  } else {
+    if (requirementStatus !== "Complete" || !isAssignedActor) throw new Error("Only the assigned machinist can undo this completion");
+    nextRequirementStatus = "Ready for Finishing";
+    await patchRow(REQUIREMENTS_TABLE_ID, requirementId, { Status: nextRequirementStatus });
+  }
+
+  return {
+    id,
+    status: fabricationStatus(nextRequirementStatus, nextMachinist),
+    requirementStatus: nextRequirementStatus,
+    machinist: nextMachinist,
+  };
 }
 
 export async function getOperations(): Promise<{ operations: ManufacturingOperation[]; source: "baserow" | "demo" }> {
@@ -463,6 +579,12 @@ export async function renameMachinistAllocations(userId: string, oldName: string
     });
     if (requirementId) await patchRow(REQUIREMENTS_TABLE_ID, requirementId, { Machinist: summary });
   }));
+
+  const finishingRows = await listAllRows(FINISHING_TABLE_ID);
+  await Promise.all(finishingRows.map(async (job) => {
+    if (String(job.Machinist ?? "").trim().toLocaleLowerCase() !== oldName.toLocaleLowerCase()) return;
+    await patchRow(FINISHING_TABLE_ID, job.id, { Machinist: newName });
+  }));
 }
 
 export async function patchQualityOutcome(operationId: number, result: Exclude<QualityResult, "pending">) {
@@ -473,7 +595,7 @@ export async function patchQualityOutcome(operationId: number, result: Exclude<Q
   if (!requirementId) throw new Error("Operation is not linked to a production requirement");
 
   const requirement = await getRow(REQUIREMENTS_TABLE_ID, requirementId);
-  const finishing = selectValue(requirement.FInishing);
+  const finishing = selectValue(requirement.Finishing);
   const status = result === "failed"
     ? "Needs Rework"
     : finishing && finishing !== "None"

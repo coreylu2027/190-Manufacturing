@@ -12,6 +12,7 @@ export type OperationStatus = (typeof OPERATION_STATUSES)[number];
 export type DataSource = "baserow" | "demo";
 export type UserRole = "machinist" | "admin";
 export type OperationQuantityAction = "claim" | "release" | "complete" | "undo_complete";
+export type FabricationAction = "claim" | "release" | "complete" | "undo_complete";
 
 export interface OperationAllocation {
   userId: string;
@@ -51,6 +52,39 @@ export interface OperationsResponse {
   source: DataSource;
   syncedAt: string;
   user: { id: string; name: string; email: string | null; role: UserRole; approved: boolean } | null;
+}
+
+export interface FabricationJob {
+  id: number;
+  productionKey: string;
+  requirementId: number;
+  partNumber: string;
+  partName: string;
+  assemblyNumber: string;
+  quantity: number;
+  color: string;
+  status: OperationStatus;
+  requirementStatus: string;
+  machinist: string;
+  active: boolean;
+  lastSyncedAt: string | null;
+  drawingUrl: string | null;
+  drawingPdfUrl: string | null;
+  drawingPdfName: string | null;
+  stepUrl: string | null;
+  stepName: string | null;
+  onshapeUrl: string | null;
+}
+
+export interface FabricationResponse {
+  jobs: FabricationJob[];
+  source: DataSource;
+  syncedAt: string;
+  user: OperationsResponse["user"];
+}
+
+export interface FabricationActionPatch {
+  action: FabricationAction;
 }
 
 export interface OperationPatch {

@@ -23,6 +23,7 @@ import {
   LoaderCircle,
   MoreHorizontal,
   PackageCheck,
+  Paintbrush,
   RefreshCw,
   RotateCcw,
   Search,
@@ -38,6 +39,7 @@ import { toast } from "sonner";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { AdminDashboard } from "@/components/admin-dashboard";
+import { FabricationDashboard } from "@/components/fabrication-dashboard";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -87,7 +89,7 @@ import {
 ModuleRegistry.registerModules([AllCommunityModule]);
 
 type QueueView = "available" | "mine" | "all";
-type WorkspaceView = "operations" | "production" | "admin";
+type WorkspaceView = "operations" | "fabrication" | "production" | "admin";
 
 interface ProductionRequirement {
   key: string;
@@ -482,7 +484,16 @@ export function ManufacturingDashboard() {
               aria-pressed={workspaceView === "operations"}
               onClick={() => setWorkspaceView("operations")}
             >
-              <LayoutList /> Operations
+              <LayoutList /><span className="hidden lg:inline">Operations</span>
+            </Button>
+            <Button
+              variant="ghost"
+              className={cn("h-10", workspaceView === "fabrication" ? "bg-accent/70 text-primary" : "text-muted-foreground")}
+              aria-pressed={workspaceView === "fabrication"}
+              aria-label="Fabrication"
+              onClick={() => setWorkspaceView("fabrication")}
+            >
+              <Paintbrush /><span className="hidden lg:inline">Fabrication</span>
             </Button>
             <Button
               variant="ghost"
@@ -490,7 +501,7 @@ export function ManufacturingDashboard() {
               aria-pressed={workspaceView === "production"}
               onClick={() => setWorkspaceView("production")}
             >
-              <PackageCheck /> Production
+              <PackageCheck /><span className="hidden lg:inline">Production</span>
             </Button>
             {query.data?.user?.role === "admin" && (
               <Button
@@ -499,7 +510,7 @@ export function ManufacturingDashboard() {
                 aria-pressed={workspaceView === "admin"}
                 onClick={() => setWorkspaceView("admin")}
               >
-                <ShieldCheck /> Admin
+                <ShieldCheck /><span className="hidden lg:inline">Admin</span>
               </Button>
             )}
           </nav>
@@ -508,7 +519,13 @@ export function ManufacturingDashboard() {
               {query.data?.source === "baserow" ? <Cloud className="size-3.5" /> : <CloudOff className="size-3.5" />}
               {query.data?.source === "baserow" ? "Baserow live" : "Demo data"}
             </div>
-            <Button variant="ghost" size="icon" aria-label="Refresh operations" onClick={() => query.refetch()} disabled={query.isFetching}><RefreshCw className={cn(query.isFetching && "animate-spin")} /></Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label="Refresh data"
+              onClick={() => workspaceView === "fabrication" ? queryClient.invalidateQueries({ queryKey: ["fabrication"] }) : query.refetch()}
+              disabled={workspaceView !== "fabrication" && query.isFetching}
+            ><RefreshCw className={cn(workspaceView !== "fabrication" && query.isFetching && "animate-spin")} /></Button>
             <DropdownMenu>
               <DropdownMenuTrigger render={<Button variant="outline" className="h-10 gap-2 px-2 pr-3" />}>
                 <Avatar size="sm"><AvatarFallback className="bg-primary/10 font-bold text-primary">{initials(userName)}</AvatarFallback></Avatar>
@@ -527,6 +544,16 @@ export function ManufacturingDashboard() {
             </DropdownMenu>
           </div>
         </div>
+        <nav className={cn("grid gap-1 border-t px-3 py-1.5 md:hidden", query.data?.user?.role === "admin" ? "grid-cols-4" : "grid-cols-3")}>
+          {[
+            { id: "operations" as const, label: "Operations", icon: LayoutList },
+            { id: "fabrication" as const, label: "Fabrication", icon: Paintbrush },
+            { id: "production" as const, label: "Production", icon: PackageCheck },
+            ...(query.data?.user?.role === "admin" ? [{ id: "admin" as const, label: "Admin", icon: ShieldCheck }] : []),
+          ].map(({ id, label, icon: Icon }) => (
+            <Button key={id} size="sm" variant="ghost" className={cn("min-w-0 gap-1 px-1 text-[11px]", workspaceView === id ? "bg-accent/70 text-primary" : "text-muted-foreground")} aria-pressed={workspaceView === id} onClick={() => setWorkspaceView(id)}><Icon />{label}</Button>
+          ))}
+        </nav>
       </header>
 
       {workspaceView === "admin" && query.data?.user?.role === "admin" ? <AdminDashboard /> : workspaceView === "operations" ? <section className="mx-auto max-w-[1800px] px-4 py-5 md:px-7 md:py-7">
@@ -611,7 +638,9 @@ export function ManufacturingDashboard() {
           <span>Open an operation to claim, release, complete, or undo quantities.</span>
           <span>Last refreshed {query.data ? formatDate(query.data.syncedAt) : "—"}</span>
         </div>
-      </section> : (
+      </section> : workspaceView === "fabrication" ? (
+        <FabricationDashboard user={query.data?.user ?? null} onProfileRequired={openProfile} />
+      ) : (
         <ProductionOverview
           operations={operations}
           isLoading={query.isLoading}

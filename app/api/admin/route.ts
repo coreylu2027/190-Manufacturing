@@ -1,8 +1,7 @@
 import { NextResponse } from "next/server";
 
-import { DEMO_ADMIN, getAdminActor, isBootstrapAdminEmail } from "@/lib/auth";
+import { getAdminActor, isBootstrapAdminEmail } from "@/lib/auth";
 import { getOperations } from "@/lib/baserow";
-import { DEMO_OPERATIONS } from "@/lib/demo-data";
 import { isShopName } from "@/lib/profile-name";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { AdminResponse, AdminUserSummary, QualityControlItem, QualityResult } from "@/lib/types";
@@ -24,20 +23,11 @@ interface ReviewRow {
   reviewed_at: string;
 }
 
-function demoResponse(): AdminResponse {
+function emptyResponse(): AdminResponse {
   return {
     source: "demo",
-    users: [
-      { ...DEMO_ADMIN, email: "admin@frc190.test", createdAt: new Date().toISOString(), lastSignInAt: new Date().toISOString() },
-      { id: "demo-pending", email: "new.machinist@frc190.test", name: "New Machinist", role: "machinist", approved: false, createdAt: new Date().toISOString(), lastSignInAt: null },
-    ],
-    qualityControl: DEMO_OPERATIONS.filter((operation) => operation.status === "Complete").map((operation) => ({
-      operation,
-      result: "pending",
-      notes: "",
-      reviewedAt: null,
-      reviewedBy: null,
-    })),
+    users: [],
+    qualityControl: [],
   };
 }
 
@@ -48,7 +38,7 @@ export async function GET() {
   if (currentUser.role !== "admin") return NextResponse.json({ error: "Administrator access required" }, { status: 403 });
 
   const admin = createAdminClient();
-  if (!admin) return NextResponse.json(demoResponse());
+  if (!admin) return NextResponse.json(emptyResponse());
 
   try {
     const [{ data: authData, error: authError }, { data: profileData, error: profileError }, { data: reviewData, error: reviewError }, operationData] = await Promise.all([

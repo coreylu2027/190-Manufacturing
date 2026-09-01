@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, ClipboardCheck, Clock3, LoaderCircle, ShieldCheck, UserCheck, Users, X } from "lucide-react";
+import { Check, ClipboardCheck, Clock3, ExternalLink, FileText, LoaderCircle, ShieldCheck, UserCheck, Users, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 
@@ -136,7 +136,11 @@ export function AdminDashboard() {
                     </div>
                     <label className="mt-4 block text-xs font-semibold text-muted-foreground" htmlFor={`qc-notes-${item.operation.id}`}>Inspection notes</label>
                     <textarea id={`qc-notes-${item.operation.id}`} value={notes[item.operation.id] ?? item.notes} onChange={(event) => setNotes((current) => ({ ...current, [item.operation.id]: event.target.value }))} placeholder="Measurements, defects, or acceptance notes…" className="mt-1.5 min-h-20 w-full resize-y rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring focus:ring-3 focus:ring-ring/50" />
-                    <div className="mt-3 flex flex-wrap items-center justify-end gap-2">{item.result === "pending" ? <><Button variant="destructive" onClick={() => reviewMutation.mutate({ item, result: "failed" })} disabled={reviewMutation.isPending || item.operation.status !== "Complete"}><X /> Fail QC</Button><Button className="bg-emerald-600 hover:bg-emerald-700" onClick={() => reviewMutation.mutate({ item, result: "passed" })} disabled={reviewMutation.isPending || item.operation.status !== "Complete"}>{reviewMutation.isPending ? <LoaderCircle className="animate-spin" /> : <Check />} Pass QC</Button></> : item.result === "passed" ? <Button variant="outline" onClick={() => undoReviewMutation.mutate(item)} disabled={undoReviewMutation.isPending}><Clock3 /> Undo QC pass</Button> : <p className="text-xs text-muted-foreground">Complete the rework to request QC again.</p>}</div>
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                      <Button variant="outline" render={item.operation.drawingPdfUrl ? <a href={`/api/operations/${item.operation.id}/files/drawing-pdf`} target="_blank" rel="noreferrer" /> : undefined} disabled={!item.operation.drawingPdfUrl}><FileText /> Drawing PDF</Button>
+                      <Button variant="outline" render={item.operation.onshapeUrl ? <a href={item.operation.onshapeUrl} target="_blank" rel="noreferrer" /> : undefined} disabled={!item.operation.onshapeUrl}><ExternalLink /> Onshape source</Button>
+                      <div className="ml-auto flex flex-wrap items-center justify-end gap-2">{item.result === "pending" ? <><Button variant="destructive" onClick={() => reviewMutation.mutate({ item, result: "failed" })} disabled={reviewMutation.isPending || item.operation.status !== "Complete"}><X /> Fail QC</Button><Button className="bg-emerald-600 hover:bg-emerald-700" onClick={() => reviewMutation.mutate({ item, result: "passed" })} disabled={reviewMutation.isPending || item.operation.status !== "Complete"}>{reviewMutation.isPending ? <LoaderCircle className="animate-spin" /> : <Check />} Pass QC</Button></> : item.result === "passed" ? <Button variant="outline" onClick={() => undoReviewMutation.mutate(item)} disabled={undoReviewMutation.isPending}><Clock3 /> Undo QC pass</Button> : <p className="text-xs text-muted-foreground">Complete the rework to request QC again.</p>}</div>
+                    </div>
                   </article>
                 ))}
               </div>
@@ -145,17 +149,17 @@ export function AdminDashboard() {
 
           <div className="overflow-hidden rounded-2xl border bg-card shadow-[0_14px_42px_rgba(15,23,42,.055)]">
             <div className="border-b bg-muted/25 px-4 py-3"><h2 className="font-semibold">User approvals</h2><p className="mt-0.5 text-xs text-muted-foreground">Every new account starts pending with the machinist role.</p></div>
-            <div className="divide-y">
-              {query.data?.users.map((user) => {
+            {query.data?.users.length ? <div className="divide-y">
+              {query.data.users.map((user) => {
                 const role = roleDrafts[user.id] ?? user.role;
                 return (
                   <article key={user.id} className="p-4">
                     <div className="flex items-start justify-between gap-3"><div className="min-w-0"><div className="flex items-center gap-2"><h3 className="truncate font-semibold">{user.name}</h3><Badge variant="outline" className={user.approved ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-200 bg-amber-50 text-amber-800"}>{user.approved ? "Approved" : "Pending"}</Badge></div><p className="mt-1 truncate text-xs text-muted-foreground">{user.email}</p><p className="mt-1 text-[11px] text-muted-foreground">Joined {formatDate(user.createdAt)} · Last sign-in {formatDate(user.lastSignInAt)}</p></div><UserCheck className={cn("mt-1 size-5 shrink-0", user.approved ? "text-emerald-600" : "text-muted-foreground")} /></div>
-                    <div className="mt-3 flex items-center gap-2"><Select value={role} onValueChange={(value) => setRoleDrafts((current) => ({ ...current, [user.id]: (value ?? "machinist") as UserRole }))}><SelectTrigger className="h-9 min-w-0 flex-1"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="machinist">Machinist</SelectItem><SelectItem value="admin">Administrator</SelectItem></SelectContent></Select><Button variant={user.approved ? "outline" : "default"} className="h-9" disabled={userMutation.isPending} onClick={() => userMutation.mutate({ user, role, approved: !user.approved })}>{user.approved ? "Revoke" : "Approve"}</Button>{user.approved && role !== user.role && <Button className="h-9" disabled={userMutation.isPending} onClick={() => userMutation.mutate({ user, role, approved: true })}>Save role</Button>}</div>
+                    <div className="mt-3 flex items-center gap-2"><Select value={role} onValueChange={(value) => setRoleDrafts((current) => ({ ...current, [user.id]: (value ?? "machinist") as UserRole }))}><SelectTrigger className="h-9 min-w-0 flex-1"><SelectValue>{role === "admin" ? "Administrator" : "Machinist"}</SelectValue></SelectTrigger><SelectContent><SelectItem value="machinist">Machinist</SelectItem><SelectItem value="admin">Administrator</SelectItem></SelectContent></Select><Button variant={user.approved ? "outline" : "default"} className="h-9" disabled={userMutation.isPending} onClick={() => userMutation.mutate({ user, role, approved: !user.approved })}>{user.approved ? "Revoke" : "Approve"}</Button>{user.approved && role !== user.role && <Button className="h-9" disabled={userMutation.isPending} onClick={() => userMutation.mutate({ user, role, approved: true })}>Save role</Button>}</div>
                   </article>
                 );
               })}
-            </div>
+            </div> : <div className="grid min-h-60 place-items-center p-6 text-center"><div><Users className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h3 className="font-semibold">No users to manage</h3><p className="mt-1 text-sm text-muted-foreground">Registered accounts will appear here.</p></div></div>}
           </div>
         </div>
       )}

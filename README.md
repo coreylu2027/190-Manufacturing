@@ -7,18 +7,18 @@ Shop-floor workflow for the `V3-26 FRC190 Summer 2026` Baserow database. Onshape
 - Next.js, React, TypeScript, Tailwind CSS, and shadcn/ui
 - AG Grid Community for editable shop-floor tables
 - TanStack Query for cached data and optimistic mutations
-- Supabase Auth for Google and Microsoft sign-in
+- Supabase Auth for email and password sign-in
 - Next.js Route Handlers as the server-only Baserow proxy
 - Vercel deployment
 
 ## Local setup
 
 1. Copy `.env.example` to `.env.local`.
-2. Add a Baserow database token with access to tables `1169282` (Operations) and `1119642` (Production Requirements).
+2. Add a Baserow database token with access to tables `1169282` (Operations), `1119642` (Production Requirements), and `1170619` (Finishing).
 3. Add the Supabase project URL, public anonymous key, and server-only service role key.
 4. Run `supabase/migrations/202609010001_admin_approval_and_qc.sql` in the Supabase SQL editor.
 5. Set `INITIAL_ADMIN_EMAILS` to one or more comma-separated administrator emails. These accounts bootstrap user approval and role assignment.
-6. Enable email/password auth. Google and Azure may remain enabled, with `/auth/callback` as an allowed redirect path.
+6. Enable email/password auth, with `/auth/callback` as an allowed redirect path for email confirmation and password recovery.
 7. Add `/auth/callback` and `/auth/callback?next=/reset-password` to the Supabase redirect allow list for each app origin.
 8. Set `REQUIRE_AUTH=true` after Supabase is configured.
 9. Run `npm run dev`.
@@ -37,9 +37,11 @@ Operations also include whole-number `Claimed Quantity` and `Completed Quantity`
 
 Supported statuses match the live schema: Planned, Ready, In Progress, Blocked, Needs Rework, and Complete.
 
+The Fabrication tab reads active rows from the Finishing table and joins their linked production requirements for part, assembly, status, and file details. A finishing job becomes claimable when its requirement reaches `Ready for Finishing`; claiming records the machinist on the Finishing row, and completing it advances the linked requirement to `Complete`. Release and undo actions reverse those changes.
+
 ## Access and quality control
 
-- New email/password and OAuth accounts enter a pending state.
+- New email/password accounts enter a pending state.
 - Registration and account settings collect a first name and last initial. Shop assignments use the normalized `FirstName L.` display name rather than an email identifier.
 - Any environment connected to live Baserow data requires authentication automatically; demo identities are available only when no Baserow token is configured.
 - An approved administrator assigns either the `machinist` or `admin` role.
