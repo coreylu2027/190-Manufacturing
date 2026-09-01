@@ -10,6 +10,7 @@ export const OPERATION_STATUSES = [
 export type OperationStatus = (typeof OPERATION_STATUSES)[number];
 
 export type DataSource = "baserow" | "demo";
+export type UserRole = "machinist" | "admin";
 
 export interface ManufacturingOperation {
   id: number;
@@ -35,10 +36,36 @@ export interface OperationsResponse {
   operations: ManufacturingOperation[];
   source: DataSource;
   syncedAt: string;
-  user: { name: string; email: string | null } | null;
+  user: { id: string; name: string; email: string | null; role: UserRole; approved: boolean } | null;
 }
 
 export interface OperationPatch {
   status?: OperationStatus;
   machinist?: string;
+}
+
+export interface AdminUserSummary {
+  id: string;
+  email: string;
+  name: string;
+  role: UserRole;
+  approved: boolean;
+  createdAt: string;
+  lastSignInAt: string | null;
+}
+
+export type QualityResult = "pending" | "passed" | "failed";
+
+export interface QualityControlItem {
+  operation: ManufacturingOperation;
+  result: QualityResult;
+  notes: string;
+  reviewedAt: string | null;
+  reviewedBy: string | null;
+}
+
+export interface AdminResponse {
+  users: AdminUserSummary[];
+  qualityControl: QualityControlItem[];
+  source: DataSource;
 }

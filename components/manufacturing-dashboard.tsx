@@ -26,6 +26,7 @@ import {
   PackageCheck,
   RefreshCw,
   Search,
+  ShieldCheck,
   SlidersHorizontal,
   TriangleAlert,
   Wrench,
@@ -36,6 +37,7 @@ import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { AdminDashboard } from "@/components/admin-dashboard";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -76,6 +78,18 @@ import {
 ModuleRegistry.registerModules([AllCommunityModule]);
 
 type QueueView = "available" | "mine" | "all";
+type WorkspaceView = "operations" | "production" | "admin";
+
+interface ProductionRequirement {
+  key: string;
+  partNumber: string;
+  partName: string;
+  assemblyNumber: string;
+  quantity: number;
+  completedOperations: number;
+  totalOperations: number;
+  status: OperationStatus;
+}
 
 const gridTheme = themeQuartz.withParams({
   accentColor: "#3159c6",
@@ -129,6 +143,9 @@ async function fetchOperations(): Promise<OperationsResponse> {
   if (response.status === 401) {
     throw new Error("AUTH_REQUIRED");
   }
+  if (response.status === 403) {
+    throw new Error("APPROVAL_REQUIRED");
+  }
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
     throw new Error(body.error ?? "Unable to load manufacturing operations");
@@ -145,9 +162,141 @@ function formatDate(value: string | null) {
   return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(value));
 }
 
+function requirementStatus(operations: ManufacturingOperation[]): OperationStatus {
+  if (operations.every((operation) => operation.status === "Complete")) return "Complete";
+  if (operations.some((operation) => operation.status === "Blocked")) return "Blocked";
+  if (operations.some((operation) => operation.status === "Needs Rework")) return "Needs Rework";
+  if (operations.some((operation) => operation.status === "In Progress")) return "In Progress";
+  if (operations.some((operation) => operation.status === "Ready")) return "Ready";
+  return "Planned";
+}
+
+function ProductionOverview({
+  operations,
+  isLoading,
+  isError,
+  errorMessage,
+  onRetry,
+}: {
+  operations: ManufacturingOperation[];
+  isLoading: boolean;
+  isError: boolean;
+  errorMessage?: string;
+  onRetry: () => void;
+}) {
+  const requirements = useMemo<ProductionRequirement[]>(() => {
+    const grouped = new Map<string, ManufacturingOperation[]>();
+
+    for (const operation of operations) {
+      const key = `${operation.assemblyNumber}|${operation.partNumber}`;
+      grouped.set(key, [...(grouped.get(key) ?? []), operation]);
+    }
+
+    return [...grouped.entries()]
+      .map(([key, routedOperations]) => {
+        const first = routedOperations[0];
+        return {
+          key,
+          partNumber: first.partNumber,
+          partName: first.partName,
+          assemblyNumber: first.assemblyNumber,
+          quantity: first.quantity,
+          completedOperations: routedOperations.filter((operation) => operation.status === "Complete").length,
+          totalOperations: routedOperations.length,
+          status: requirementStatus(routedOperations),
+        };
+      })
+      .sort((a, b) => a.assemblyNumber.localeCompare(b.assemblyNumber) || a.partNumber.localeCompare(b.partNumber));
+  }, [operations]);
+
+  const summary = useMemo(() => ({
+    total: requirements.length,
+    complete: requirements.filter((requirement) => requirement.status === "Complete").length,
+    active: requirements.filter((requirement) => requirement.status === "In Progress").length,
+    attention: requirements.filter((requirement) => requirement.status === "Blocked" || requirement.status === "Needs Rework").length,
+  }), [requirements]);
+
+  return (
+    <section className="mx-auto max-w-[1800px] px-4 py-5 md:px-7 md:py-7">
+      <div className="mb-5 flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+        <div>
+          <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-primary"><span className="size-2 rounded-full bg-blue-500 shadow-[0_0_0_4px_rgba(59,130,246,.12)]" /> Production overview</div>
+          <h1 className="text-3xl font-bold tracking-[-.035em] md:text-[2.55rem]">Production requirements</h1>
+          <p className="mt-1.5 max-w-2xl text-sm leading-6 text-muted-foreground">Track each part through its routed operations and see what is complete, active, or needs attention.</p>
+        </div>
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          {[
+            { label: "Requirements", value: summary.total, icon: PackageCheck, tone: "text-slate-700 bg-slate-100" },
+            { label: "In progress", value: summary.active, icon: Clock3, tone: "text-blue-700 bg-blue-50" },
+            { label: "Attention", value: summary.attention, icon: TriangleAlert, tone: "text-amber-800 bg-amber-50" },
+            { label: "Complete", value: summary.complete, icon: Check, tone: "text-violet-700 bg-violet-50" },
+          ].map(({ label, value, icon: Icon, tone }) => (
+            <div key={label} className="flex min-w-32 items-center gap-3 rounded-xl border bg-card px-3 py-2.5 shadow-sm">
+              <div className={cn("grid size-8 place-items-center rounded-lg", tone)}><Icon className="size-4" /></div>
+              <div><div className="text-lg font-bold leading-none">{value}</div><div className="mt-1 text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{label}</div></div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="overflow-hidden rounded-2xl border bg-card shadow-[0_14px_42px_rgba(15,23,42,.055)]">
+        <div className="border-b bg-muted/25 px-4 py-3">
+          <h2 className="font-semibold">Routed parts</h2>
+          <p className="mt-0.5 text-xs text-muted-foreground">Grouped by assembly and part number from active manufacturing operations.</p>
+        </div>
+
+        {isLoading ? (
+          <div className="space-y-3 p-5">{Array.from({ length: 7 }).map((_, index) => <Skeleton key={index} className="h-11 w-full" />)}</div>
+        ) : isError ? (
+          <div className="grid min-h-80 place-items-center p-6 text-center"><div><XCircle className="mx-auto mb-3 size-9 text-destructive" /><h2 className="font-semibold">Couldn’t load production requirements</h2><p className="mt-1 max-w-md text-sm text-muted-foreground">{errorMessage}</p><Button className="mt-4" onClick={onRetry}>Try again</Button></div></div>
+        ) : requirements.length === 0 ? (
+          <div className="grid min-h-80 place-items-center p-6 text-center"><div><PackageCheck className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h2 className="font-semibold">No routed parts</h2><p className="mt-1 text-sm text-muted-foreground">Production requirements will appear after operations are added to an active routing.</p></div></div>
+        ) : (
+          <>
+            <div className="hidden overflow-x-auto md:block">
+              <table className="w-full text-left text-sm">
+                <thead className="border-b bg-muted/20 text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
+                  <tr><th className="px-4 py-3">Part</th><th className="px-4 py-3">Description</th><th className="px-4 py-3">Assembly</th><th className="px-4 py-3 text-right">Qty</th><th className="px-4 py-3">Routing progress</th><th className="px-4 py-3">Status</th></tr>
+                </thead>
+                <tbody className="divide-y">
+                  {requirements.map((requirement) => {
+                    const percent = Math.round((requirement.completedOperations / requirement.totalOperations) * 100);
+                    return (
+                      <tr key={requirement.key} className="transition hover:bg-muted/30">
+                        <td className="px-4 py-3 font-mono text-xs font-bold text-primary">{requirement.partNumber}</td>
+                        <td className="px-4 py-3 font-semibold">{requirement.partName}</td>
+                        <td className="px-4 py-3 font-mono text-xs">{requirement.assemblyNumber}</td>
+                        <td className="px-4 py-3 text-right font-semibold">{requirement.quantity}</td>
+                        <td className="min-w-48 px-4 py-3"><div className="mb-1.5 flex justify-between text-xs"><span>{requirement.completedOperations} of {requirement.totalOperations} operations</span><span className="font-semibold">{percent}%</span></div><div className="h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary" style={{ width: `${percent}%` }} /></div></td>
+                        <td className="px-4 py-3"><StatusBadge status={requirement.status} /></td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <div className="divide-y md:hidden">
+              {requirements.map((requirement) => {
+                const percent = Math.round((requirement.completedOperations / requirement.totalOperations) * 100);
+                return (
+                  <article key={requirement.key} className="p-4">
+                    <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary">{requirement.partNumber}</p><h3 className="mt-1 font-semibold">{requirement.partName}</h3><p className="mt-1 font-mono text-[11px] text-muted-foreground">{requirement.assemblyNumber} · Qty {requirement.quantity}</p></div><StatusBadge status={requirement.status} /></div>
+                    <div className="mt-3"><div className="mb-1.5 flex justify-between text-xs text-muted-foreground"><span>{requirement.completedOperations} of {requirement.totalOperations} operations</span><span className="font-semibold text-foreground">{percent}%</span></div><div className="h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary" style={{ width: `${percent}%` }} /></div></div>
+                  </article>
+                );
+              })}
+            </div>
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
+
 export function ManufacturingDashboard() {
   const router = useRouter();
   const queryClient = useQueryClient();
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("operations");
   const [view, setView] = useState<QueueView>("available");
   const [machine, setMachine] = useState("all");
   const [search, setSearch] = useState("");
@@ -158,6 +307,7 @@ export function ManufacturingDashboard() {
 
   useEffect(() => {
     if (query.error instanceof Error && query.error.message === "AUTH_REQUIRED") router.replace("/login");
+    if (query.error instanceof Error && query.error.message === "APPROVAL_REQUIRED") router.replace("/pending");
   }, [query.error, router]);
 
   const mutation = useMutation({
@@ -260,8 +410,32 @@ export function ManufacturingDashboard() {
             <div><p className="text-sm font-bold leading-none">FRC 190</p><p className="mt-1 text-[10px] font-semibold uppercase tracking-[.17em] text-muted-foreground">Manufacturing OS</p></div>
           </div>
           <nav className="hidden h-full items-center gap-1 md:flex">
-            <Button variant="ghost" className="h-10 bg-accent/70 text-primary"><LayoutList /> Operations</Button>
-            <Button variant="ghost" className="h-10 text-muted-foreground"><PackageCheck /> Production</Button>
+            <Button
+              variant="ghost"
+              className={cn("h-10", workspaceView === "operations" ? "bg-accent/70 text-primary" : "text-muted-foreground")}
+              aria-pressed={workspaceView === "operations"}
+              onClick={() => setWorkspaceView("operations")}
+            >
+              <LayoutList /> Operations
+            </Button>
+            <Button
+              variant="ghost"
+              className={cn("h-10", workspaceView === "production" ? "bg-accent/70 text-primary" : "text-muted-foreground")}
+              aria-pressed={workspaceView === "production"}
+              onClick={() => setWorkspaceView("production")}
+            >
+              <PackageCheck /> Production
+            </Button>
+            {query.data?.user?.role === "admin" && (
+              <Button
+                variant="ghost"
+                className={cn("h-10", workspaceView === "admin" ? "bg-accent/70 text-primary" : "text-muted-foreground")}
+                aria-pressed={workspaceView === "admin"}
+                onClick={() => setWorkspaceView("admin")}
+              >
+                <ShieldCheck /> Admin
+              </Button>
+            )}
           </nav>
           <div className="ml-auto flex items-center gap-2">
             <div className={cn("hidden items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium sm:flex", query.data?.source === "baserow" ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-200 bg-amber-50 text-amber-900")}>
@@ -288,7 +462,7 @@ export function ManufacturingDashboard() {
         </div>
       </header>
 
-      <section className="mx-auto max-w-[1800px] px-4 py-5 md:px-7 md:py-7">
+      {workspaceView === "admin" && query.data?.user?.role === "admin" ? <AdminDashboard /> : workspaceView === "operations" ? <section className="mx-auto max-w-[1800px] px-4 py-5 md:px-7 md:py-7">
         <div className="mb-5 flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
           <div>
             <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-primary"><span className="size-2 rounded-full bg-emerald-500 shadow-[0_0_0_4px_rgba(16,185,129,.12)]" /> Shop queue</div>
@@ -371,7 +545,15 @@ export function ManufacturingDashboard() {
           <span>Tip: status and machinist cells are directly editable in the grid.</span>
           <span>Last refreshed {query.data ? formatDate(query.data.syncedAt) : "—"}</span>
         </div>
-      </section>
+      </section> : (
+        <ProductionOverview
+          operations={operations}
+          isLoading={query.isLoading}
+          isError={query.isError}
+          errorMessage={query.error instanceof Error ? query.error.message : undefined}
+          onRetry={() => query.refetch()}
+        />
+      )}
 
       <Sheet open={Boolean(selected)} onOpenChange={(open) => !open && setSelectedId(null)}>
         <SheetContent className="w-full overflow-y-auto sm:max-w-xl">

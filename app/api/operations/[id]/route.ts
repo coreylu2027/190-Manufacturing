@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
+import { getEffectiveAppUser, isAuthRequired } from "@/lib/auth";
 import { patchOperation } from "@/lib/baserow";
-import { getCurrentUser } from "@/lib/supabase/server";
 import { OPERATION_STATUSES } from "@/lib/types";
 
 const patchSchema = z.object({
@@ -11,9 +11,12 @@ const patchSchema = z.object({
 }).refine((value) => value.status !== undefined || value.machinist !== undefined, "No changes supplied");
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const user = await getCurrentUser();
-  if (process.env.REQUIRE_AUTH === "true" && !user) {
+  const user = await getEffectiveAppUser();
+  if (isAuthRequired() && !user) {
     return NextResponse.json({ error: "Authentication required" }, { status: 401 });
+  }
+  if (isAuthRequired() && !user?.approved) {
+    return NextResponse.json({ error: "Account approval required", code: "APPROVAL_REQUIRED" }, { status: 403 });
   }
 
   const { id } = await params;
@@ -23,7 +26,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   const parsed = patchSchema.safeParse(await request.json());
   if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message }, { status: 400 });
 
-  const machinist = user?.user_metadata.full_name ?? user?.user_metadata.name ?? user?.email ?? "Corey Lu";
+  const machinist = user?.name ?? "Corey Lu";
   try {
     const updated = await patchOperation(operationId, parsed.data, machinist);
     return NextResponse.json({ updated });

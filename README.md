@@ -15,10 +15,13 @@ Shop-floor workflow for the `V3-26 FRC190 Summer 2026` Baserow database. Onshape
 
 1. Copy `.env.example` to `.env.local`.
 2. Add a Baserow database token with access to tables `1169282` (Operations) and `1119642` (Production Requirements).
-3. Add the Supabase project URL and public anonymous key.
-4. Enable Google and Azure providers in Supabase, with `/auth/callback` as an allowed redirect path.
-5. Set `REQUIRE_AUTH=true` after Supabase is configured.
-6. Run `npm run dev`.
+3. Add the Supabase project URL, public anonymous key, and server-only service role key.
+4. Run `supabase/migrations/202609010001_admin_approval_and_qc.sql` in the Supabase SQL editor.
+5. Set `INITIAL_ADMIN_EMAILS` to one or more comma-separated administrator emails. These accounts bootstrap user approval and role assignment.
+6. Enable email/password auth. Google and Azure may remain enabled, with `/auth/callback` as an allowed redirect path.
+7. Add `/auth/callback` and `/auth/callback?next=/reset-password` to the Supabase redirect allow list for each app origin.
+8. Set `REQUIRE_AUTH=true` after Supabase is configured.
+9. Run `npm run dev`.
 
 Without a Baserow token, the app intentionally loads realistic demo rows so the full workflow can be reviewed safely. All production credentials remain server-only.
 
@@ -30,6 +33,14 @@ The editable `Status` and `Machinist` cells update the Operations table. Quick a
 - `Completed At` and the signed-in machinist when work is completed.
 
 Supported statuses match the live schema: Planned, Ready, In Progress, Blocked, Needs Rework, and Complete.
+
+## Access and quality control
+
+- New email/password and OAuth accounts enter a pending state.
+- An approved administrator assigns either the `machinist` or `admin` role.
+- Approval and role checks are repeated on protected server routes; hiding the Admin tab is not the security boundary.
+- Completed operations enter the administrator QC queue. Passing records the review; failing records the review and returns the operation to `Needs Rework`.
+- QC reviews are stored in Supabase. Operation status remains stored in Baserow.
 
 ## Vercel
 
