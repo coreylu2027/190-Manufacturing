@@ -13,6 +13,7 @@ interface ProfileRow {
   display_name: string;
   role: "machinist" | "admin";
   approved: boolean;
+  last_seen_at: string | null;
 }
 
 interface ReviewRow {
@@ -40,7 +41,7 @@ export async function GET() {
   try {
     const [{ data: authData, error: authError }, { data: profileData, error: profileError }, { data: reviewData, error: reviewError }, operationData] = await Promise.all([
       admin.auth.admin.listUsers({ page: 1, perPage: 200 }),
-      admin.from("profiles").select("id, display_name, role, approved"),
+      admin.from("profiles").select("id, display_name, role, approved, last_seen_at"),
       admin.from("quality_control").select("operation_id, result, notes, reviewed_by, reviewed_at"),
       getOperations(),
     ]);
@@ -62,7 +63,7 @@ export async function GET() {
         role: bootstrapAdmin ? "admin" : profile?.role ?? "machinist",
         approved: bootstrapAdmin || Boolean(profile?.approved),
         createdAt: user.created_at,
-        lastSignInAt: user.last_sign_in_at ?? null,
+        lastSeenAt: profile?.last_seen_at ?? null,
       };
     }).sort((a, b) => Number(a.approved) - Number(b.approved) || a.name.localeCompare(b.name));
 

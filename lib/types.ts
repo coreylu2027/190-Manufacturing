@@ -124,7 +124,7 @@ export interface AdminUserSummary {
   role: UserRole;
   approved: boolean;
   createdAt: string;
-  lastSignInAt: string | null;
+  lastSeenAt: string | null;
 }
 
 export type QualityResult = "pending" | "passed" | "failed";

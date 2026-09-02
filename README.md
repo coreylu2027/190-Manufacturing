@@ -4,11 +4,11 @@ Shop-floor workflow for the `V3-26 FRC190 Summer 2026` Baserow database. Onshape
 
 ## To-Do List
 
-- [ ] Allow stealing of production tasks
+- [X] Allow stealing of production tasks
 - [ ] Cover edge cases such as: QC -> Finishing -> Tapping
-- [ ] Show material in production requirement
+- [X] Show material in production requirement
 - [ ] Add stock size 
-- [ ] Filter by assembly
+- [X] Filter by assembly
 
 ## Stack
 

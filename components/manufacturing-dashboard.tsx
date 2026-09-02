@@ -9,6 +9,7 @@ import {
 import { AgGridReact } from "ag-grid-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  ArrowUpDown,
   ArrowUpRight,
   Check,
   ChevronRight,
@@ -20,6 +21,7 @@ import {
   Factory,
   FileText,
   LayoutList,
+  ListChecks,
   LoaderCircle,
   MoreHorizontal,
   PackageCheck,
@@ -33,7 +35,7 @@ import {
   Wrench,
   XCircle,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 
@@ -43,6 +45,7 @@ import { FabricationDashboard } from "@/components/fabrication-dashboard";
 import { NotificationInbox } from "@/components/notification-inbox";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -91,6 +94,7 @@ ModuleRegistry.registerModules([AllCommunityModule]);
 
 type QueueView = "available" | "mine" | "all";
 type WorkspaceView = "operations" | "fabrication" | "production" | "admin";
+type ProductionSort = "document" | "part" | "description" | "quantity" | "progress" | "status";
 
 interface ProductionRequirement {
   key: string;
@@ -199,6 +203,10 @@ function isOperationStealable(operation: ManufacturingOperation, user: Operation
     && otherClaimants(operation, user).length > 0;
 }
 
+function isOperationClaimable(operation: ManufacturingOperation) {
+  return ["Ready", "In Progress", "Needs Rework"].includes(operation.status) && operation.availableQuantity > 0;
+}
+
 const quantityActionCopy: Record<OperationQuantityAction, { title: string; button: string; success: string }> = {
   claim: { title: "Claim parts", button: "Claim", success: "Parts claimed" },
   release: { title: "Release claimed parts", button: "Release", success: "Claim released" },
@@ -235,6 +243,9 @@ function ProductionOverview({
   errorMessage?: string;
   onRetry: () => void;
 }) {
+  const [search, setSearch] = useState("");
+  const [status, setStatus] = useState<"all" | OperationStatus>("all");
+  const [sort, setSort] = useState<ProductionSort>("document");
   const requirements = useMemo<ProductionRequirement[]>(() => {
     const grouped = new Map<string, ManufacturingOperation[]>();
 
@@ -243,8 +254,7 @@ function ProductionOverview({
       grouped.set(key, [...(grouped.get(key) ?? []), operation]);
     }
 
-    return [...grouped.entries()]
-      .map(([key, routedOperations]) => {
+    return [...grouped.entries()].map(([key, routedOperations]) => {
         const first = routedOperations[0];
         return {
           key,
@@ -257,9 +267,42 @@ function ProductionOverview({
           totalOperations: routedOperations.length,
           status: requirementStatus(routedOperations),
         };
-      })
-      .sort((a, b) => (a.documentName ?? "").localeCompare(b.documentName ?? "") || a.partNumber.localeCompare(b.partNumber));
+      });
   }, [operations]);
+
+  const visibleRequirements = useMemo(() => {
+    const term = search.trim().toLocaleLowerCase();
+    const statusOrder: Record<OperationStatus, number> = {
+      Blocked: 0,
+      "Needs Rework": 1,
+      "In Progress": 2,
+      Ready: 3,
+      Planned: 4,
+      Complete: 5,
+    };
+    const filtered = requirements.filter((requirement) => {
+      if (status !== "all" && requirement.status !== status) return false;
+      if (term && ![
+        requirement.partNumber,
+        requirement.partName,
+        requirement.assemblyNumber,
+        requirement.documentName,
+      ].join(" ").toLocaleLowerCase().includes(term)) return false;
+      return true;
+    });
+
+    return [...filtered].sort((a, b) => {
+      if (sort === "part") return a.partNumber.localeCompare(b.partNumber);
+      if (sort === "description") return a.partName.localeCompare(b.partName) || a.partNumber.localeCompare(b.partNumber);
+      if (sort === "quantity") return b.quantity - a.quantity || a.partNumber.localeCompare(b.partNumber);
+      if (sort === "progress") {
+        const progressDifference = (b.completedOperations / b.totalOperations) - (a.completedOperations / a.totalOperations);
+        return progressDifference || a.partNumber.localeCompare(b.partNumber);
+      }
+      if (sort === "status") return statusOrder[a.status] - statusOrder[b.status] || a.partNumber.localeCompare(b.partNumber);
+      return (a.documentName ?? "").localeCompare(b.documentName ?? "") || a.partNumber.localeCompare(b.partNumber);
+    });
+  }, [requirements, search, sort, status]);
 
   const summary = useMemo(() => ({
     total: requirements.length,
@@ -292,9 +335,33 @@ function ProductionOverview({
       </div>
 
       <div className="overflow-hidden rounded-2xl border bg-card shadow-[0_14px_42px_rgba(15,23,42,.055)]">
-        <div className="border-b bg-muted/25 px-4 py-3">
-          <h2 className="font-semibold">Routed parts</h2>
-          <p className="mt-0.5 text-xs text-muted-foreground">Grouped by source document and part number from active manufacturing operations.</p>
+        <div className="border-b bg-muted/25 p-3 md:p-4">
+          <div className="flex flex-col gap-3 xl:flex-row xl:items-center">
+            <div className="min-w-52 xl:mr-auto">
+              <h2 className="font-semibold">Routed parts</h2>
+              <p className="mt-0.5 text-xs text-muted-foreground">Grouped by source document and part number.</p>
+            </div>
+            <div className="relative min-w-0 flex-1 xl:max-w-md">
+              <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input value={search} onChange={(event) => setSearch(event.target.value)} className="h-9 bg-card pl-9" placeholder="Search part, assembly, document…" />
+            </div>
+            <Select value={status} onValueChange={(value) => setStatus((value ?? "all") as "all" | OperationStatus)}>
+              <SelectTrigger className="h-9 w-full bg-card xl:w-48"><SlidersHorizontal className="text-muted-foreground" /><SelectValue placeholder="All statuses" /></SelectTrigger>
+              <SelectContent><SelectItem value="all">All statuses</SelectItem>{(["Planned", "Ready", "In Progress", "Blocked", "Needs Rework", "Complete"] as OperationStatus[]).map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
+            </Select>
+            <Select value={sort} onValueChange={(value) => setSort((value ?? "document") as ProductionSort)}>
+              <SelectTrigger className="h-9 w-full bg-card xl:w-52"><ArrowUpDown className="text-muted-foreground" /><SelectValue placeholder="Sort requirements" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="document">Source document</SelectItem>
+                <SelectItem value="part">Part number</SelectItem>
+                <SelectItem value="description">Description</SelectItem>
+                <SelectItem value="quantity">Quantity: high to low</SelectItem>
+                <SelectItem value="progress">Progress: high to low</SelectItem>
+                <SelectItem value="status">Status: attention first</SelectItem>
+              </SelectContent>
+            </Select>
+            <div className="whitespace-nowrap text-xs text-muted-foreground">{visibleRequirements.length} of {requirements.length} shown</div>
+          </div>
         </div>
 
         {isLoading ? (
@@ -303,6 +370,8 @@ function ProductionOverview({
           <div className="grid min-h-80 place-items-center p-6 text-center"><div><XCircle className="mx-auto mb-3 size-9 text-destructive" /><h2 className="font-semibold">Couldn’t load production requirements</h2><p className="mt-1 max-w-md text-sm text-muted-foreground">{errorMessage}</p><Button className="mt-4" onClick={onRetry}>Try again</Button></div></div>
         ) : requirements.length === 0 ? (
           <div className="grid min-h-80 place-items-center p-6 text-center"><div><PackageCheck className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h2 className="font-semibold">No routed parts</h2><p className="mt-1 text-sm text-muted-foreground">Production requirements will appear after operations are added to an active routing.</p></div></div>
+        ) : visibleRequirements.length === 0 ? (
+          <div className="grid min-h-80 place-items-center p-6 text-center"><div><Search className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h2 className="font-semibold">No requirements match</h2><p className="mt-1 text-sm text-muted-foreground">Try another status or clear the search.</p><Button variant="outline" className="mt-4" onClick={() => { setSearch(""); setStatus("all"); }}>Clear filters</Button></div></div>
         ) : (
           <>
             <div className="hidden overflow-x-auto md:block">
@@ -311,7 +380,7 @@ function ProductionOverview({
                   <tr><th className="px-4 py-3">Part</th><th className="px-4 py-3">Description</th><th className="px-4 py-3">Source document</th><th className="px-4 py-3 text-right">Qty</th><th className="px-4 py-3">Routing progress</th><th className="px-4 py-3">Status</th></tr>
                 </thead>
                 <tbody className="divide-y">
-                  {requirements.map((requirement) => {
+                  {visibleRequirements.map((requirement) => {
                     const percent = Math.round((requirement.completedOperations / requirement.totalOperations) * 100);
                     return (
                       <tr key={requirement.key} className="transition hover:bg-muted/30">
@@ -328,7 +397,7 @@ function ProductionOverview({
               </table>
             </div>
             <div className="divide-y md:hidden">
-              {requirements.map((requirement) => {
+              {visibleRequirements.map((requirement) => {
                 const percent = Math.round((requirement.completedOperations / requirement.totalOperations) * 100);
                 return (
                   <article key={requirement.key} className="p-4">
@@ -348,11 +417,14 @@ function ProductionOverview({
 export function ManufacturingDashboard() {
   const router = useRouter();
   const queryClient = useQueryClient();
+  const operationsGridRef = useRef<AgGridReact<ManufacturingOperation>>(null);
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("operations");
   const [view, setView] = useState<QueueView>("available");
   const [machine, setMachine] = useState("all");
   const [sourceDocument, setSourceDocument] = useState("all");
   const [search, setSearch] = useState("");
+  const [bulkClaimIds, setBulkClaimIds] = useState<number[]>([]);
+  const [bulkClaimDialogOpen, setBulkClaimDialogOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [quantityDialog, setQuantityDialog] = useState<{ action: OperationQuantityAction; max: number } | null>(null);
   const [quantityDraft, setQuantityDraft] = useState("1");
@@ -419,6 +491,45 @@ export function ManufacturingDashboard() {
     },
   });
 
+  const bulkClaimMutation = useMutation({
+    mutationFn: async (claims: { id: number; quantity: number }[]) => {
+      const results = await Promise.allSettled(claims.map(async (claim) => {
+        const response = await fetch(`/api/operations/${claim.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "claim", quantity: claim.quantity }),
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(body.error ?? "Claim failed");
+        return { claim, updated: body.updated as Partial<ManufacturingOperation> | undefined };
+      }));
+      const succeeded = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+      const failed = results.length - succeeded.length;
+      if (succeeded.length === 0) {
+        const firstFailure = results.find((result) => result.status === "rejected");
+        throw new Error(firstFailure?.status === "rejected" && firstFailure.reason instanceof Error ? firstFailure.reason.message : "Unable to claim selected operations");
+      }
+      return { succeeded, failed };
+    },
+    onSuccess: ({ succeeded, failed }) => {
+      const updates = new Map(succeeded.map(({ claim, updated }) => [claim.id, updated]));
+      queryClient.setQueryData<OperationsResponse>(["operations"], (current) => current ? {
+        ...current,
+        operations: current.operations.map((operation) => updates.has(operation.id) ? { ...operation, ...updates.get(operation.id) } : operation),
+      } : current);
+      const parts = succeeded.reduce((total, item) => total + item.claim.quantity, 0);
+      if (failed > 0) toast.warning(`Claimed ${parts} ${parts === 1 ? "part" : "parts"} across ${succeeded.length} operations; ${failed} failed.`);
+      else toast.success(`Claimed ${parts} ${parts === 1 ? "part" : "parts"} across ${succeeded.length} operations.`);
+      setBulkClaimDialogOpen(false);
+      setBulkClaimIds([]);
+      operationsGridRef.current?.api.deselectAll();
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to claim selected operations"),
+    onSettled: () => {
+      if (query.data?.source === "baserow") queryClient.invalidateQueries({ queryKey: ["operations"] });
+    },
+  });
+
   const profileMutation = useMutation({
     mutationFn: async () => {
       const response = await fetch("/api/account", {
@@ -454,13 +565,16 @@ export function ManufacturingDashboard() {
       if (sourceDocument === "missing" && operation.documentName) return false;
       if (sourceDocument !== "all" && sourceDocument !== "missing" && operation.documentName !== sourceDocument) return false;
       const allocation = allocationForUser(operation, query.data?.user ?? null);
-      const claimable = ["Ready", "In Progress", "Needs Rework"].includes(operation.status) && operation.availableQuantity > 0;
+      const claimable = isOperationClaimable(operation);
       if (view === "available" && !claimable && !isOperationStealable(operation, query.data?.user ?? null)) return false;
       if (view === "mine" && allocation.claimed === 0) return false;
       if (term && ![operation.partNumber, operation.partName, operation.documentName, operation.material, operation.machine, operation.operationNumber].join(" ").toLowerCase().includes(term)) return false;
       return true;
     });
   }, [machine, operations, query.data?.user, search, sourceDocument, view]);
+
+  const bulkClaimOperations = useMemo(() => operations.filter((operation) => bulkClaimIds.includes(operation.id) && isOperationClaimable(operation)), [bulkClaimIds, operations]);
+  const bulkClaimParts = bulkClaimOperations.reduce((total, operation) => total + operation.availableQuantity, 0);
 
   const stats = useMemo(() => ({
     ready: operations.filter((operation) => ["Ready", "In Progress", "Needs Rework"].includes(operation.status) && operation.availableQuantity > 0).length,
@@ -492,6 +606,15 @@ export function ManufacturingDashboard() {
     }
     setStealDialogOpen(true);
   };
+  const requestBulkClaim = () => {
+    if (bulkClaimOperations.length === 0) return;
+    if (!isShopName(userName)) {
+      openProfile();
+      toast.info("Set your first name and last initial before recording work");
+      return;
+    }
+    setBulkClaimDialogOpen(true);
+  };
   const openProfile = () => {
     const match = userName.match(/^(.+?)\s+([\p{L}])\.$/u);
     setFirstName(match?.[1] ?? userName.split(/\s+/)[0] ?? "");
@@ -512,6 +635,16 @@ export function ManufacturingDashboard() {
     { field: "status", headerName: "STATUS", minWidth: 145, cellRenderer: StatusCell },
     { headerName: "", width: 102, pinned: "right", sortable: false, filter: false, resizable: false, cellRenderer: ActionCell, cellRendererParams: { onOpen: openOperation, user: query.data?.user ?? null } },
   ], [query.data?.user]);
+
+  const rowSelection = useMemo(() => ({
+    mode: "multiRow" as const,
+    checkboxes: true,
+    headerCheckbox: true,
+    selectAll: "all" as const,
+    hideDisabledCheckboxes: false,
+    enableClickSelection: false,
+    isRowSelectable: ({ data }: { data?: ManufacturingOperation }) => Boolean(data && isOperationClaimable(data)),
+  }), []);
 
   return (
     <main className="min-h-screen bg-background text-foreground">
@@ -645,7 +778,12 @@ export function ManufacturingDashboard() {
                 <SelectTrigger className="h-9 w-full bg-card xl:w-56"><FileText className="text-muted-foreground" /><SelectValue placeholder="All source documents" /></SelectTrigger>
                 <SelectContent><SelectItem value="all">All source documents</SelectItem>{sourceDocuments.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}<SelectItem value="missing">Not synced</SelectItem></SelectContent>
               </Select>
-              <div className="flex items-center gap-2 text-xs text-muted-foreground"><SlidersHorizontal className="size-3.5" /> {filtered.length} shown</div>
+              <div className="flex items-center justify-between gap-3 xl:justify-end">
+                <div className="flex items-center gap-2 whitespace-nowrap text-xs text-muted-foreground"><SlidersHorizontal className="size-3.5" /> {filtered.length} shown</div>
+                <Button size="sm" onClick={requestBulkClaim} disabled={bulkClaimOperations.length === 0 || bulkClaimMutation.isPending}>
+                  {bulkClaimMutation.isPending ? <LoaderCircle className="animate-spin" /> : <ListChecks />} Bulk claim{bulkClaimOperations.length > 0 ? ` (${bulkClaimOperations.length})` : ""}
+                </Button>
+              </div>
             </div>
           </div>
 
@@ -659,9 +797,13 @@ export function ManufacturingDashboard() {
             <>
               <div className="hidden h-[min(59vh,680px)] min-h-[430px] md:block">
                 <AgGridReact<ManufacturingOperation>
+                  ref={operationsGridRef}
                   theme={gridTheme}
                   rowData={filtered}
                   columnDefs={columnDefs}
+                  rowSelection={rowSelection}
+                  selectionColumnDef={{ width: 48, pinned: "left", resizable: false }}
+                  onSelectionChanged={({ api }) => setBulkClaimIds(api.getSelectedRows().map((operation) => operation.id))}
                   defaultColDef={{ sortable: true, filter: false, resizable: true }}
                   getRowId={({ data }) => String(data.id)}
                   onRowDoubleClicked={({ data }) => data && openOperation(data)}
@@ -673,12 +815,25 @@ export function ManufacturingDashboard() {
                 />
               </div>
               <div className="divide-y md:hidden">
-                {filtered.map((operation) => (
-                  <button key={operation.id} onClick={() => openOperation(operation)} className="block w-full p-4 text-left transition hover:bg-muted/40">
-                    <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary">{operation.partNumber}</p><h3 className="mt-1 font-semibold">{operation.partName}</h3></div><StatusBadge status={operation.status} /></div>
-                    <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground"><span>{operation.operationNumber}</span><span className="flex items-center gap-1"><Wrench className="size-3" />{operation.machine}</span><span>{operation.completedQuantity}/{operation.quantity} done</span><span>{operation.availableQuantity} available</span></div>
-                  </button>
-                ))}
+                {filtered.map((operation) => {
+                  const claimable = isOperationClaimable(operation);
+                  const checked = bulkClaimIds.includes(operation.id);
+                  return (
+                    <article key={operation.id} className="flex items-start gap-3 p-4 transition hover:bg-muted/40">
+                      <Checkbox
+                        className="mt-1"
+                        checked={checked}
+                        disabled={!claimable}
+                        aria-label={`Select ${operation.partNumber} ${operation.operationNumber} for bulk claim`}
+                        onCheckedChange={(nextChecked) => setBulkClaimIds((current) => nextChecked ? [...new Set([...current, operation.id])] : current.filter((id) => id !== operation.id))}
+                      />
+                      <button onClick={() => openOperation(operation)} className="min-w-0 flex-1 text-left">
+                        <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary">{operation.partNumber}</p><h3 className="mt-1 font-semibold">{operation.partName}</h3></div><StatusBadge status={operation.status} /></div>
+                        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground"><span>{operation.operationNumber}</span><span className="flex items-center gap-1"><Wrench className="size-3" />{operation.machine}</span><span>{operation.completedQuantity}/{operation.quantity} done</span><span>{operation.availableQuantity} available</span></div>
+                      </button>
+                    </article>
+                  );
+                })}
               </div>
             </>
           )}
@@ -809,6 +964,29 @@ export function ManufacturingDashboard() {
               disabled={!selected || mutation.isPending}
             >
               {mutation.isPending && <LoaderCircle className="animate-spin" />} Yes, steal requirement
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={bulkClaimDialogOpen} onOpenChange={setBulkClaimDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <div className="mb-1 grid size-10 place-items-center rounded-full bg-primary/10 text-primary"><ListChecks className="size-5" /></div>
+            <DialogTitle>Claim {bulkClaimOperations.length} operations?</DialogTitle>
+            <DialogDescription>This claims every currently available part on the selected operations. Existing claims and completed quantities are unchanged.</DialogDescription>
+          </DialogHeader>
+          <div className="rounded-xl border bg-muted/30 p-3 text-sm">
+            <p className="font-semibold">{bulkClaimParts} {bulkClaimParts === 1 ? "part" : "parts"} total</p>
+            <p className="mt-1 text-muted-foreground">Across {bulkClaimOperations.length} selected {bulkClaimOperations.length === 1 ? "operation" : "operations"}.</p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBulkClaimDialogOpen(false)}>Cancel</Button>
+            <Button
+              onClick={() => bulkClaimMutation.mutate(bulkClaimOperations.map((operation) => ({ id: operation.id, quantity: operation.availableQuantity })))}
+              disabled={bulkClaimOperations.length === 0 || bulkClaimMutation.isPending}
+            >
+              {bulkClaimMutation.isPending && <LoaderCircle className="animate-spin" />} Claim selected
             </Button>
           </DialogFooter>
         </DialogContent>

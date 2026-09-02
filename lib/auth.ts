@@ -69,6 +69,15 @@ export async function getEffectiveAppUser() {
   return (await getAppUser()) ?? (!isAuthRequired() ? DEMO_ADMIN : null);
 }
 
+export async function recordSiteVisit(userId: string) {
+  const supabase = await createClient();
+  if (!supabase) return;
+  await supabase
+    .from("profiles")
+    .update({ last_seen_at: new Date().toISOString() })
+    .eq("id", userId);
+}
+
 export async function getAdminActor() {
   const user = await getAppUser();
   if (user) return user;
