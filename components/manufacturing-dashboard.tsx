@@ -633,6 +633,7 @@ export function ManufacturingDashboard() {
     { field: "operationNumber", headerName: "OP", width: 90, filter: true },
     { field: "machine", headerName: "MACHINE", minWidth: 175, filter: true },
     { field: "status", headerName: "STATUS", minWidth: 145, cellRenderer: StatusCell },
+    { field: "machinist", headerName: "MACHINIST", minWidth: 180, valueFormatter: ({ value }) => value || "—" },
     { headerName: "", width: 102, pinned: "right", sortable: false, filter: false, resizable: false, cellRenderer: ActionCell, cellRendererParams: { onOpen: openOperation, user: query.data?.user ?? null } },
   ], [query.data?.user]);
 
