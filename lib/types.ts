@@ -28,6 +28,7 @@ export interface ManufacturingOperation {
   partNumber: string;
   partName: string;
   assemblyNumber: string;
+  documentName: string | null;
   quantity: number;
   claimedQuantity: number;
   completedQuantity: number;
@@ -62,6 +63,7 @@ export interface FabricationJob {
   partNumber: string;
   partName: string;
   assemblyNumber: string;
+  documentName: string | null;
   quantity: number;
   color: string;
   status: OperationStatus;

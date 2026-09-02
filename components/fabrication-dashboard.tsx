@@ -186,7 +186,7 @@ export function FabricationDashboard({
       if (color !== "all" && job.color !== color) return false;
       if (view === "available" && job.status !== "Ready") return false;
       if (view === "mine" && !(ownedBy(job, userName) && job.status === "In Progress")) return false;
-      if (term && ![job.partNumber, job.partName, job.assemblyNumber, job.color, job.machinist].join(" ").toLocaleLowerCase().includes(term)) return false;
+      if (term && ![job.partNumber, job.partName, job.documentName, job.color, job.machinist].join(" ").toLocaleLowerCase().includes(term)) return false;
       return true;
     });
   }, [color, jobs, search, userName, view]);
@@ -202,7 +202,7 @@ export function FabricationDashboard({
   const columnDefs = useMemo<ColDef<FabricationJob>[]>(() => [
     { field: "partNumber", headerName: "PART", minWidth: 155, pinned: "left", cellClass: "font-mono font-semibold" },
     { field: "partName", headerName: "DESCRIPTION", minWidth: 230, flex: 1 },
-    { field: "assemblyNumber", headerName: "ASSEMBLY", minWidth: 155 },
+    { field: "documentName", headerName: "SOURCE DOCUMENT", minWidth: 175, valueFormatter: ({ value }) => value || "Not synced" },
     { field: "quantity", headerName: "REQUIRED", width: 105, filter: "agNumberColumnFilter" },
     { field: "color", headerName: "FINISH", minWidth: 125, cellRenderer: FinishCell },
     { field: "status", headerName: "STATUS", minWidth: 145, cellRenderer: StatusCell },
@@ -280,7 +280,7 @@ export function FabricationDashboard({
             <div className="divide-y md:hidden">
               {filtered.map((job) => (
                 <button key={job.id} onClick={() => openJob(job)} className="block w-full p-4 text-left transition hover:bg-muted/40">
-                  <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary">{job.partNumber}</p><h3 className="mt-1 font-semibold">{job.partName}</h3></div><StatusBadge status={job.status} /></div>
+                  <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary">{job.partNumber}</p><h3 className="mt-1 font-semibold">{job.partName}</h3><p className="mt-1 font-mono text-[11px] text-muted-foreground">{job.documentName ?? "Document not synced"}</p></div><StatusBadge status={job.status} /></div>
                   <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground"><span className="flex items-center gap-1"><Paintbrush className="size-3" />{job.color}</span><span>{job.quantity} required</span><span>{job.machinist || "Unclaimed"}</span></div>
                 </button>
               ))}
@@ -306,7 +306,7 @@ export function FabricationDashboard({
                   <div className="grid grid-cols-2 overflow-hidden rounded-xl border">
                     {[
                       ["Finish", selected.color], ["Required", String(selected.quantity)],
-                      ["Assembly", selected.assemblyNumber], ["Machinist", selected.machinist || "Unclaimed"],
+                      ["Source document", selected.documentName || "Not synced"], ["Machinist", selected.machinist || "Unclaimed"],
                       ["Upstream status", selected.requirementStatus], ["Last synced", formatDate(selected.lastSyncedAt)],
                     ].map(([label, value], index) => <div key={label} className={cn("p-3", index % 2 === 0 && "border-r", index < 4 && "border-b")}><p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{label}</p><p className="mt-1 text-sm font-semibold">{value}</p></div>)}
                   </div>

@@ -95,6 +95,21 @@ function firstFile(value: unknown): { url: string; name: string } | null {
   return { url: String(file.url), name: String(name) };
 }
 
+function textValue(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (Array.isArray(value) && value[0] && typeof value[0] === "object" && "value" in value[0]) {
+    return String((value[0] as { value: unknown }).value ?? "").trim();
+  }
+  return "";
+}
+
+function sourceDocumentName(requirement: BaserowRow | undefined): string | null {
+  if (!requirement) return null;
+  return textValue(requirement["Source Document"])
+    || textValue(requirement["Onshape Document"])
+    || null;
+}
+
 function parseRequirement(display: string) {
   const match = display.match(/^(.+?)\s+—\s+(.+?)\s+\[([^\]]+)]$/);
   return {
@@ -197,6 +212,7 @@ export async function getFabricationJobs(): Promise<{ jobs: FabricationJob[]; so
       productionKey: String(row["Production Key"] ?? row.id),
       requirementId,
       ...parsed,
+      documentName: sourceDocumentName(requirement),
       quantity: Math.max(1, Math.floor(Number(row["Required Quantity"] ?? requirement["Required Quantity"] ?? 1))),
       color: selectValue(row["Powder Coat Color"], selectValue(requirement.Finishing, "Unspecified")),
       status: fabricationStatus(requirementStatus, machinist),
@@ -301,6 +317,7 @@ export async function getOperations(): Promise<{ operations: ManufacturingOperat
       id: row.id,
       operationKey: String(row.Operation ?? `${row.id}`),
       ...parsed,
+      documentName: sourceDocumentName(requirement),
       quantity,
       ...quantities,
       operationNumber,

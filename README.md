@@ -50,6 +50,8 @@ Supported statuses match the live schema: Planned, Ready, In Progress, Blocked, 
 
 The Fabrication tab reads active rows from the Finishing table and joins their linked production requirements for part, assembly, status, and file details. A finishing job becomes claimable when its requirement reaches `Ready for Finishing`; claiming records the machinist on the Finishing row, and completing it advances the linked requirement to `Complete`. Release and undo actions reverse those changes.
 
+The shop UI treats the Onshape document name and assembly part number as separate identifiers. It reads the document name from a `Source Document` text field on Production Requirements (with `Onshape Document` supported as a compatibility alias) and displays values such as `A-26C-0001`. The linked `Assembly` value, such as `A-190B-26…`, remains available for internal requirement identity and is not presented as the source document.
+
 ## Access and quality control
 
 - New email/password accounts enter a pending state.
@@ -62,7 +64,7 @@ The Fabrication tab reads active rows from the Finishing table and joins their l
 
 ## Notifications
 
-The reusable notification service in `lib/notifications.ts` stores an in-site alert before attempting email delivery. Delivery state (`pending`, `sent`, `failed`, or `skipped`) and provider details remain attached to the notification so failed email delivery can be diagnosed or retried later. The dashboard presents unread alerts one at a time on the recipient's next visit and marks each read only after it is acknowledged.
+The reusable notification service in `lib/notifications.ts` stores an in-site alert before attempting email delivery. Delivery state (`pending`, `sent`, `failed`, or `skipped`) and provider details remain attached to the notification so failed email delivery can be diagnosed or retried later. The dashboard presents unread alerts one at a time, subscribes to new alerts through Supabase Realtime, and marks each read only after it is acknowledged. The initial unread-alert request remains as a reconnect fallback.
 
 `RESEND_API_KEY` and `NOTIFICATION_EMAIL_FROM` are server-only. Without both values, website alerts still work and email delivery is recorded as skipped.
 

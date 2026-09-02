@@ -97,6 +97,7 @@ interface ProductionRequirement {
   partNumber: string;
   partName: string;
   assemblyNumber: string;
+  documentName: string | null;
   quantity: number;
   completedOperations: number;
   totalOperations: number;
@@ -250,13 +251,14 @@ function ProductionOverview({
           partNumber: first.partNumber,
           partName: first.partName,
           assemblyNumber: first.assemblyNumber,
+          documentName: first.documentName,
           quantity: first.quantity,
           completedOperations: routedOperations.filter((operation) => operation.status === "Complete").length,
           totalOperations: routedOperations.length,
           status: requirementStatus(routedOperations),
         };
       })
-      .sort((a, b) => a.assemblyNumber.localeCompare(b.assemblyNumber) || a.partNumber.localeCompare(b.partNumber));
+      .sort((a, b) => (a.documentName ?? "").localeCompare(b.documentName ?? "") || a.partNumber.localeCompare(b.partNumber));
   }, [operations]);
 
   const summary = useMemo(() => ({
@@ -292,7 +294,7 @@ function ProductionOverview({
       <div className="overflow-hidden rounded-2xl border bg-card shadow-[0_14px_42px_rgba(15,23,42,.055)]">
         <div className="border-b bg-muted/25 px-4 py-3">
           <h2 className="font-semibold">Routed parts</h2>
-          <p className="mt-0.5 text-xs text-muted-foreground">Grouped by assembly and part number from active manufacturing operations.</p>
+          <p className="mt-0.5 text-xs text-muted-foreground">Grouped by source document and part number from active manufacturing operations.</p>
         </div>
 
         {isLoading ? (
@@ -306,7 +308,7 @@ function ProductionOverview({
             <div className="hidden overflow-x-auto md:block">
               <table className="w-full text-left text-sm">
                 <thead className="border-b bg-muted/20 text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
-                  <tr><th className="px-4 py-3">Part</th><th className="px-4 py-3">Description</th><th className="px-4 py-3">Assembly</th><th className="px-4 py-3 text-right">Qty</th><th className="px-4 py-3">Routing progress</th><th className="px-4 py-3">Status</th></tr>
+                  <tr><th className="px-4 py-3">Part</th><th className="px-4 py-3">Description</th><th className="px-4 py-3">Source document</th><th className="px-4 py-3 text-right">Qty</th><th className="px-4 py-3">Routing progress</th><th className="px-4 py-3">Status</th></tr>
                 </thead>
                 <tbody className="divide-y">
                   {requirements.map((requirement) => {
@@ -315,7 +317,7 @@ function ProductionOverview({
                       <tr key={requirement.key} className="transition hover:bg-muted/30">
                         <td className="px-4 py-3 font-mono text-xs font-bold text-primary">{requirement.partNumber}</td>
                         <td className="px-4 py-3 font-semibold">{requirement.partName}</td>
-                        <td className="px-4 py-3 font-mono text-xs">{requirement.assemblyNumber}</td>
+                        <td className="px-4 py-3 font-mono text-xs">{requirement.documentName ?? "Not synced"}</td>
                         <td className="px-4 py-3 text-right font-semibold">{requirement.quantity}</td>
                         <td className="min-w-48 px-4 py-3"><div className="mb-1.5 flex justify-between text-xs"><span>{requirement.completedOperations} of {requirement.totalOperations} operations</span><span className="font-semibold">{percent}%</span></div><div className="h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary" style={{ width: `${percent}%` }} /></div></td>
                         <td className="px-4 py-3"><StatusBadge status={requirement.status} /></td>
@@ -330,7 +332,7 @@ function ProductionOverview({
                 const percent = Math.round((requirement.completedOperations / requirement.totalOperations) * 100);
                 return (
                   <article key={requirement.key} className="p-4">
-                    <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary">{requirement.partNumber}</p><h3 className="mt-1 font-semibold">{requirement.partName}</h3><p className="mt-1 font-mono text-[11px] text-muted-foreground">{requirement.assemblyNumber} · Qty {requirement.quantity}</p></div><StatusBadge status={requirement.status} /></div>
+                    <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary">{requirement.partNumber}</p><h3 className="mt-1 font-semibold">{requirement.partName}</h3><p className="mt-1 font-mono text-[11px] text-muted-foreground">{requirement.documentName ?? "Document not synced"} · Qty {requirement.quantity}</p></div><StatusBadge status={requirement.status} /></div>
                     <div className="mt-3"><div className="mb-1.5 flex justify-between text-xs text-muted-foreground"><span>{requirement.completedOperations} of {requirement.totalOperations} operations</span><span className="font-semibold text-foreground">{percent}%</span></div><div className="h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary" style={{ width: `${percent}%` }} /></div></div>
                   </article>
                 );
@@ -451,7 +453,7 @@ export function ManufacturingDashboard() {
       const claimable = ["Ready", "In Progress", "Needs Rework"].includes(operation.status) && operation.availableQuantity > 0;
       if (view === "available" && !claimable && !isOperationStealable(operation, query.data?.user ?? null)) return false;
       if (view === "mine" && allocation.claimed === 0) return false;
-      if (term && ![operation.partNumber, operation.partName, operation.assemblyNumber, operation.machine, operation.operationNumber].join(" ").toLowerCase().includes(term)) return false;
+      if (term && ![operation.partNumber, operation.partName, operation.documentName, operation.machine, operation.operationNumber].join(" ").toLowerCase().includes(term)) return false;
       return true;
     });
   }, [machine, operations, query.data?.user, search, view]);
@@ -496,7 +498,7 @@ export function ManufacturingDashboard() {
   const columnDefs = useMemo<ColDef<ManufacturingOperation>[]>(() => [
     { field: "partNumber", headerName: "PART", minWidth: 155, pinned: "left", cellClass: "font-mono font-semibold" },
     { field: "partName", headerName: "DESCRIPTION", minWidth: 230, flex: 1 },
-    { field: "assemblyNumber", headerName: "ASSEMBLY", minWidth: 155 },
+    { field: "documentName", headerName: "SOURCE DOCUMENT", minWidth: 175, valueFormatter: ({ value }) => value || "Not synced" },
     { field: "quantity", headerName: "REQUIRED", width: 98, filter: "agNumberColumnFilter" },
     { field: "availableQuantity", headerName: "AVAILABLE", width: 98, filter: "agNumberColumnFilter" },
     { field: "completedQuantity", headerName: "DONE", width: 82, filter: "agNumberColumnFilter" },
@@ -509,7 +511,7 @@ export function ManufacturingDashboard() {
 
   return (
     <main className="min-h-screen bg-background text-foreground">
-      <NotificationInbox enabled={Boolean(query.data?.user?.approved && query.data.user.id !== "demo-admin")} />
+      <NotificationInbox userId={query.data?.user?.approved && query.data.user.id !== "demo-admin" ? query.data.user.id : null} />
       <header className="sticky top-0 z-40 border-b bg-card/95 backdrop-blur">
         <div className="mx-auto flex h-16 max-w-[1800px] items-center gap-5 px-4 md:px-7">
           <div className="flex items-center gap-3 md:min-w-56">
@@ -707,7 +709,7 @@ export function ManufacturingDashboard() {
                       ["Machine", selected.machine], ["Required", String(selected.quantity)],
                       ["Available", String(selected.availableQuantity)], ["Claimed", String(selected.claimedQuantity)],
                       ["Completed", String(selected.completedQuantity)], ["Your claim", String(selectedAllocation.claimed)],
-                      ["Assembly", selected.assemblyNumber], ["Machinist", selected.machinist || "Unclaimed"],
+                      ["Source document", selected.documentName || "Not synced"], ["Machinist", selected.machinist || "Unclaimed"],
                       ["Started", formatDate(selected.startedAt)], ["Finished", formatDate(selected.completedAt)],
                     ].map(([label, value], index) => <div key={label} className={cn("p-3", index % 2 === 0 && "border-r", index < 8 && "border-b")}><p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{label}</p><p className="mt-1 text-sm font-semibold">{value}</p></div>)}
                   </div>
