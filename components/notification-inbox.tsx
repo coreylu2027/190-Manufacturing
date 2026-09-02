@@ -2,7 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { BellRing, LoaderCircle } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -53,51 +53,71 @@ function notificationFromRecord(record: Record<string, unknown>): AppNotificatio
 
 export function NotificationInbox({ userId }: { userId: string | null }) {
   const queryClient = useQueryClient();
+  const [realtimeUserId, setRealtimeUserId] = useState<string | null>(null);
   const query = useQuery({
     queryKey: ["notifications"],
     queryFn: fetchNotifications,
     enabled: Boolean(userId),
     staleTime: 0,
     refetchOnMount: "always",
+    refetchOnWindowFocus: true,
+    refetchInterval: userId && realtimeUserId !== userId ? 10_000 : false,
   });
 
   useEffect(() => {
     if (!userId) return;
     const supabase = createClient();
     if (!supabase) return;
+    let cancelled = false;
+    let channel: ReturnType<typeof supabase.channel> | null = null;
 
-    const channel = supabase
-      .channel(`notifications:${userId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "notifications",
-          filter: `recipient_id=eq.${userId}`,
-        },
-        (payload) => {
-          const notification = notificationFromRecord(payload.new);
-          if (!notification) return;
-          queryClient.setQueryData<NotificationsResponse>(["notifications"], (existing) => {
-            if (existing?.notifications.some((item) => item.id === notification.id)) return existing;
-            return {
-              notifications: [...(existing?.notifications ?? []), notification]
-                .sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
-            };
-          });
-        },
-      )
-      .subscribe((status, error) => {
-        if (status === "SUBSCRIBED") {
-          queryClient.invalidateQueries({ queryKey: ["notifications"] });
-        } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
-          console.error("Notification realtime subscription failed", error);
-        }
-      });
+    const subscribe = async () => {
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+      if (sessionError || !session) {
+        console.error("Notification realtime authentication failed", sessionError);
+        return;
+      }
+      await supabase.realtime.setAuth(session.access_token);
+      if (cancelled) return;
+
+      channel = supabase
+        .channel(`notifications:${userId}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "INSERT",
+            schema: "public",
+            table: "notifications",
+            filter: `recipient_id=eq.${userId}`,
+          },
+          (payload) => {
+            const notification = notificationFromRecord(payload.new);
+            if (!notification) return;
+            queryClient.setQueryData<NotificationsResponse>(["notifications"], (existing) => {
+              if (existing?.notifications.some((item) => item.id === notification.id)) return existing;
+              return {
+                notifications: [...(existing?.notifications ?? []), notification]
+                  .sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
+              };
+            });
+          },
+        )
+        .subscribe((status, error) => {
+          if (cancelled) return;
+          if (status === "SUBSCRIBED") {
+            setRealtimeUserId(userId);
+            queryClient.invalidateQueries({ queryKey: ["notifications"] });
+          } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
+            setRealtimeUserId((connectedUserId) => connectedUserId === userId ? null : connectedUserId);
+            if (status !== "CLOSED") console.error("Notification realtime subscription failed", error);
+          }
+        });
+    };
+    void subscribe();
 
     return () => {
-      void supabase.removeChannel(channel);
+      cancelled = true;
+      if (channel) void supabase.removeChannel(channel);
     };
   }, [queryClient, userId]);
 
