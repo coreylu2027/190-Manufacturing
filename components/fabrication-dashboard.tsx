@@ -215,7 +215,7 @@ export function FabricationDashboard({
       <div className="mb-5 flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
         <div>
           <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-primary"><span className="size-2 rounded-full bg-fuchsia-500 shadow-[0_0_0_4px_rgba(217,70,239,.12)]" /> Finishing queue</div>
-          <h1 className="text-3xl font-bold tracking-[-.035em] md:text-[2.55rem]">Fabrication & finishing</h1>
+          <h1 className="text-3xl font-bold tracking-[-.035em] md:text-[2.55rem]">Finishing</h1>
           <p className="mt-1.5 max-w-2xl text-sm leading-6 text-muted-foreground">Claim parts that have passed QC, confirm the specified powder-coat color, and record completed finishing work.</p>
         </div>
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">

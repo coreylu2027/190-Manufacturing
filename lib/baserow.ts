@@ -16,6 +16,7 @@ type BaserowRow = Record<string, unknown> & { id: number };
 
 const OPERATIONS_TABLE_ID = process.env.BASEROW_OPERATIONS_TABLE_ID ?? "1169282";
 const REQUIREMENTS_TABLE_ID = process.env.BASEROW_REQUIREMENTS_TABLE_ID ?? "1119642";
+const PARTS_TABLE_ID = process.env.BASEROW_PARTS_TABLE_ID ?? "1119641";
 const FINISHING_TABLE_ID = process.env.BASEROW_FINISHING_TABLE_ID ?? "1170619";
 const API_URL = (process.env.BASEROW_API_URL ?? "https://api.baserow.io").replace(/\/$/, "");
 const DEMO_STATE = new Map(DEMO_OPERATIONS.map((operation) => [operation.id, {
@@ -297,15 +298,19 @@ export async function applyFabricationAction(id: number, action: FabricationActi
 export async function getOperations(): Promise<{ operations: ManufacturingOperation[]; source: "baserow" | "demo" }> {
   if (!hasBaserowCredentials()) return { operations: [...DEMO_STATE.values()], source: "demo" };
 
-  const [operationRows, requirementRows] = await Promise.all([
+  const [operationRows, requirementRows, partRows] = await Promise.all([
     listAllRows(OPERATIONS_TABLE_ID),
     listAllRows(REQUIREMENTS_TABLE_ID),
+    listAllRows(PARTS_TABLE_ID),
   ]);
   const requirements = new Map(requirementRows.map((row) => [row.id, row]));
+  const parts = new Map(partRows.map((row) => [row.id, row]));
 
   const operations = operationRows.map((row): ManufacturingOperation => {
     const requirementId = linkedId(row["Production Requirement"]);
     const requirement = requirementId ? requirements.get(requirementId) : undefined;
+    const partId = linkedId(requirement?.Part);
+    const part = partId ? parts.get(partId) : undefined;
     const parsed = parseRequirement(linkedValue(row["Production Requirement"]));
     const operationNumber = selectValue(row["Operation Number"], "OP1") as ManufacturingOperation["operationNumber"];
     const status = selectValue(row.Status, "Planned") as OperationStatus;
@@ -318,6 +323,7 @@ export async function getOperations(): Promise<{ operations: ManufacturingOperat
       operationKey: String(row.Operation ?? `${row.id}`),
       ...parsed,
       documentName: sourceDocumentName(requirement),
+      material: textValue(part?.Material) || null,
       quantity,
       ...quantities,
       operationNumber,

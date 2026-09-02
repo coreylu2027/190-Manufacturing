@@ -29,6 +29,7 @@ export interface ManufacturingOperation {
   partName: string;
   assemblyNumber: string;
   documentName: string | null;
+  material: string | null;
   quantity: number;
   claimedQuantity: number;
   completedQuantity: number;

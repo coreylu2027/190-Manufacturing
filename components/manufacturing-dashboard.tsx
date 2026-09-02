@@ -351,6 +351,7 @@ export function ManufacturingDashboard() {
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("operations");
   const [view, setView] = useState<QueueView>("available");
   const [machine, setMachine] = useState("all");
+  const [sourceDocument, setSourceDocument] = useState("all");
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [quantityDialog, setQuantityDialog] = useState<{ action: OperationQuantityAction; max: number } | null>(null);
@@ -444,19 +445,22 @@ export function ManufacturingDashboard() {
   const selectedAllocation = selected ? allocationForUser(selected, query.data?.user ?? null) : { claimed: 0, completed: 0 };
   const selectedOtherClaimants = selected ? otherClaimants(selected, query.data?.user ?? null) : [];
   const machines = useMemo(() => [...new Set(operations.map((operation) => operation.machine))].sort(), [operations]);
+  const sourceDocuments = useMemo(() => [...new Set(operations.flatMap((operation) => operation.documentName ? [operation.documentName] : []))].sort(), [operations]);
 
   const filtered = useMemo(() => {
     const term = search.trim().toLowerCase();
     return operations.filter((operation) => {
       if (machine !== "all" && operation.machine !== machine) return false;
+      if (sourceDocument === "missing" && operation.documentName) return false;
+      if (sourceDocument !== "all" && sourceDocument !== "missing" && operation.documentName !== sourceDocument) return false;
       const allocation = allocationForUser(operation, query.data?.user ?? null);
       const claimable = ["Ready", "In Progress", "Needs Rework"].includes(operation.status) && operation.availableQuantity > 0;
       if (view === "available" && !claimable && !isOperationStealable(operation, query.data?.user ?? null)) return false;
       if (view === "mine" && allocation.claimed === 0) return false;
-      if (term && ![operation.partNumber, operation.partName, operation.documentName, operation.machine, operation.operationNumber].join(" ").toLowerCase().includes(term)) return false;
+      if (term && ![operation.partNumber, operation.partName, operation.documentName, operation.material, operation.machine, operation.operationNumber].join(" ").toLowerCase().includes(term)) return false;
       return true;
     });
-  }, [machine, operations, query.data?.user, search, view]);
+  }, [machine, operations, query.data?.user, search, sourceDocument, view]);
 
   const stats = useMemo(() => ({
     ready: operations.filter((operation) => ["Ready", "In Progress", "Needs Rework"].includes(operation.status) && operation.availableQuantity > 0).length,
@@ -498,6 +502,7 @@ export function ManufacturingDashboard() {
   const columnDefs = useMemo<ColDef<ManufacturingOperation>[]>(() => [
     { field: "partNumber", headerName: "PART", minWidth: 155, pinned: "left", cellClass: "font-mono font-semibold" },
     { field: "partName", headerName: "DESCRIPTION", minWidth: 230, flex: 1 },
+    { field: "material", headerName: "MATERIAL", minWidth: 165, valueFormatter: ({ value }) => value || "Unspecified" },
     { field: "documentName", headerName: "SOURCE DOCUMENT", minWidth: 175, valueFormatter: ({ value }) => value || "Not synced" },
     { field: "quantity", headerName: "REQUIRED", width: 98, filter: "agNumberColumnFilter" },
     { field: "availableQuantity", headerName: "AVAILABLE", width: 98, filter: "agNumberColumnFilter" },
@@ -505,7 +510,6 @@ export function ManufacturingDashboard() {
     { field: "operationNumber", headerName: "OP", width: 90, filter: true },
     { field: "machine", headerName: "MACHINE", minWidth: 175, filter: true },
     { field: "status", headerName: "STATUS", minWidth: 145, cellRenderer: StatusCell },
-    { field: "machinist", headerName: "MACHINIST", minWidth: 180, valueFormatter: ({ value }) => value || "—" },
     { headerName: "", width: 102, pinned: "right", sortable: false, filter: false, resizable: false, cellRenderer: ActionCell, cellRendererParams: { onOpen: openOperation, user: query.data?.user ?? null } },
   ], [query.data?.user]);
 
@@ -531,10 +535,10 @@ export function ManufacturingDashboard() {
               variant="ghost"
               className={cn("h-10", workspaceView === "fabrication" ? "bg-accent/70 text-primary" : "text-muted-foreground")}
               aria-pressed={workspaceView === "fabrication"}
-              aria-label="Fabrication"
+              aria-label="Finishing"
               onClick={() => setWorkspaceView("fabrication")}
             >
-              <Paintbrush /><span className="hidden lg:inline">Fabrication</span>
+              <Paintbrush /><span className="hidden lg:inline">Finishing</span>
             </Button>
             <Button
               variant="ghost"
@@ -588,7 +592,7 @@ export function ManufacturingDashboard() {
         <nav className={cn("grid gap-1 border-t px-3 py-1.5 md:hidden", query.data?.user?.role === "admin" ? "grid-cols-4" : "grid-cols-3")}>
           {[
             { id: "operations" as const, label: "Operations", icon: LayoutList },
-            { id: "fabrication" as const, label: "Fabrication", icon: Paintbrush },
+            { id: "fabrication" as const, label: "Finishing", icon: Paintbrush },
             { id: "production" as const, label: "Production", icon: PackageCheck },
             ...(query.data?.user?.role === "admin" ? [{ id: "admin" as const, label: "Admin", icon: ShieldCheck }] : []),
           ].map(({ id, label, icon: Icon }) => (
@@ -637,6 +641,10 @@ export function ManufacturingDashboard() {
                 <SelectTrigger className="h-9 w-full bg-card xl:w-56"><Wrench className="text-muted-foreground" /><SelectValue placeholder="All machines" /></SelectTrigger>
                 <SelectContent><SelectItem value="all">All machines</SelectItem>{machines.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
               </Select>
+              <Select value={sourceDocument} onValueChange={(value) => setSourceDocument(value ?? "all")}>
+                <SelectTrigger className="h-9 w-full bg-card xl:w-56"><FileText className="text-muted-foreground" /><SelectValue placeholder="All source documents" /></SelectTrigger>
+                <SelectContent><SelectItem value="all">All source documents</SelectItem>{sourceDocuments.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}<SelectItem value="missing">Not synced</SelectItem></SelectContent>
+              </Select>
               <div className="flex items-center gap-2 text-xs text-muted-foreground"><SlidersHorizontal className="size-3.5" /> {filtered.length} shown</div>
             </div>
           </div>
@@ -646,7 +654,7 @@ export function ManufacturingDashboard() {
           ) : query.isError ? (
             <div className="grid min-h-80 place-items-center p-6 text-center"><div><XCircle className="mx-auto mb-3 size-9 text-destructive" /><h2 className="font-semibold">Couldn’t load the queue</h2><p className="mt-1 max-w-md text-sm text-muted-foreground">{query.error.message}</p><Button className="mt-4" onClick={() => query.refetch()}>Try again</Button></div></div>
           ) : filtered.length === 0 ? (
-            <div className="grid min-h-80 place-items-center p-6 text-center"><div><PackageCheck className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h2 className="font-semibold">No operations match</h2><p className="mt-1 text-sm text-muted-foreground">Try another machine or clear the search.</p><Button variant="outline" className="mt-4" onClick={() => { setMachine("all"); setSearch(""); setView("all"); }}>Clear filters</Button></div></div>
+            <div className="grid min-h-80 place-items-center p-6 text-center"><div><PackageCheck className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h2 className="font-semibold">No operations match</h2><p className="mt-1 text-sm text-muted-foreground">Try another machine or source document, or clear the search.</p><Button variant="outline" className="mt-4" onClick={() => { setMachine("all"); setSourceDocument("all"); setSearch(""); setView("all"); }}>Clear filters</Button></div></div>
           ) : (
             <>
               <div className="hidden h-[min(59vh,680px)] min-h-[430px] md:block">

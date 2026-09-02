@@ -13,6 +13,7 @@ const shared = {
   stepName: null,
   onshapeUrl: "https://frc190.onshape.com",
   documentName: "A-26C-0001",
+  material: "6061-T6 Aluminum",
   machinist: "",
   startedAt: null,
   completedAt: null,
