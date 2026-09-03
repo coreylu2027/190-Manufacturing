@@ -1,7 +1,7 @@
 import "server-only";
 
 import { DEMO_FABRICATION_JOBS, DEMO_OPERATIONS } from "@/lib/demo-data";
-import { planRequirementWorkflow, validateCamAction } from "@/lib/manufacturing-workflow";
+import { deduplicateOperations, planRequirementWorkflow, validateCamAction } from "@/lib/manufacturing-workflow";
 import type {
   FabricationAction,
   FabricationJob,
@@ -403,10 +403,11 @@ export async function getOperations(): Promise<{ operations: ManufacturingOperat
     };
   });
 
-  const camByTarget = new Map(parsedOperations
+  const canonicalOperations = deduplicateOperations(parsedOperations.filter((operation) => operation.activeInRouting));
+  const camByTarget = new Map(canonicalOperations
     .filter((operation) => operation.workType === "CAM" && operation.requirementId)
     .map((operation) => [`${operation.requirementId}|${operation.operationNumber}`, operation]));
-  const operations: ManufacturingOperation[] = parsedOperations.map(({ requirementId, ...operation }) => {
+  const operations: ManufacturingOperation[] = canonicalOperations.map(({ requirementId, ...operation }) => {
     if (operation.workType !== "Manufacturing" || !requirementId) return operation;
     const cam = camByTarget.get(`${requirementId}|${operation.operationNumber}`);
     return cam ? {
@@ -420,7 +421,7 @@ export async function getOperations(): Promise<{ operations: ManufacturingOperat
     } : operation;
   });
 
-  return { operations: operations.filter((operation) => operation.activeInRouting), source: "baserow" };
+  return { operations, source: "baserow" };
 }
 
 async function reconcileRequirementWorkflow(requirementId: number) {
@@ -431,11 +432,16 @@ async function reconcileRequirementWorkflow(requirementId: number) {
   const relatedRows = operationRows.filter((row) => linkedId(row["Production Requirement"]) === requirementId);
   const plan = planRequirementWorkflow(relatedRows.map((row) => ({
     id: row.id,
+    operationKey: String(row.Operation ?? row.id),
     operationNumber: selectValue(row["Operation Number"], "OP1"),
     machine: selectValue(row.Machine, "Unassigned"),
     workType: operationWorkType(row),
     status: selectValue(row.Status, "Planned") as OperationStatus,
     active: Boolean(row["Active in Routing"]),
+    claimedQuantity: Number(row["Claimed Quantity"] ?? 0),
+    completedQuantity: Number(row["Completed Quantity"] ?? 0),
+    startedAt: row["Started At"] ? String(row["Started At"]) : null,
+    completedAt: row["Completed At"] ? String(row["Completed At"]) : null,
   })), selectValue(requirement.Status, "Needs Triage"));
 
   await Promise.all(plan.operationPatches.map((patch) => patchRow(OPERATIONS_TABLE_ID, patch.id, { Status: patch.status })));

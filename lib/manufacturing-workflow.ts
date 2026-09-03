@@ -12,11 +12,16 @@ export type WorkflowOperationStatus =
 
 export interface WorkflowOperation {
   id: number;
+  operationKey?: string;
   operationNumber: string;
   machine: string;
   workType: OperationWorkType;
   status: WorkflowOperationStatus;
   active: boolean;
+  claimedQuantity?: number;
+  completedQuantity?: number;
+  startedAt?: string | null;
+  completedAt?: string | null;
 }
 
 export interface WorkflowStatusPatch {
@@ -50,6 +55,53 @@ function operationIndex(operationNumber: string) {
   return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
 }
 
+const STATUS_PRIORITY: Record<WorkflowOperationStatus, number> = {
+  Planned: 0,
+  Ready: 1,
+  Blocked: 2,
+  "In Progress": 3,
+  Complete: 4,
+  "Needs Rework": 5,
+};
+
+type CanonicalOperation = Pick<WorkflowOperation, "id" | "operationKey" | "workType" | "status">
+  & Partial<Pick<WorkflowOperation, "claimedQuantity" | "completedQuantity" | "startedAt" | "completedAt">>;
+
+function canonicalOperationScore(operation: CanonicalOperation) {
+  return [
+    operation.completedQuantity ?? 0,
+    operation.claimedQuantity ?? 0,
+    operation.completedAt ? 1 : 0,
+    operation.startedAt ? 1 : 0,
+    STATUS_PRIORITY[operation.status],
+  ] as const;
+}
+
+function preferCanonicalOperation<T extends CanonicalOperation>(left: T, right: T) {
+  const leftScore = canonicalOperationScore(left);
+  const rightScore = canonicalOperationScore(right);
+  for (let index = 0; index < leftScore.length; index += 1) {
+    if (leftScore[index] !== rightScore[index]) return leftScore[index] > rightScore[index] ? left : right;
+  }
+  return left.id <= right.id ? left : right;
+}
+
+/**
+ * Collapses accidental copies of the same deterministic operation row. Rows at
+ * the same route stage remain independent when their operation keys differ.
+ */
+export function deduplicateOperations<T extends CanonicalOperation>(operations: readonly T[]): T[] {
+  const unique = new Map<string, T>();
+  for (const operation of operations) {
+    const key = operation.operationKey
+      ? `${operation.workType}|${operation.operationKey}`
+      : `${operation.workType}|row:${operation.id}`;
+    const current = unique.get(key);
+    unique.set(key, current ? preferCanonicalOperation(current, operation) : operation);
+  }
+  return [...unique.values()];
+}
+
 export function requiresCam(machine: string) {
   return (CAM_REQUIRED_MACHINES as readonly string[]).includes(machine);
 }
@@ -77,7 +129,7 @@ export function planRequirementWorkflow(
   operations: readonly WorkflowOperation[],
   currentRequirementStatus = "Needs Triage",
 ): WorkflowPlan {
-  const active = operations.filter((operation) => operation.active);
+  const active = deduplicateOperations(operations.filter((operation) => operation.active));
   const manufacturing = active
     .filter((operation) => operation.workType === "Manufacturing")
     .sort((a, b) => operationIndex(a.operationNumber) - operationIndex(b.operationNumber));

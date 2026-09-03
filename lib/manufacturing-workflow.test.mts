@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  deduplicateOperations,
   planRequirementWorkflow,
   validateCamAction,
   type WorkflowOperation,
@@ -81,6 +82,29 @@ test("duplicate physical rows at the same operation number unlock in parallel", 
     { id: 1, status: "Ready" },
     { id: 2, status: "Ready" },
   ]);
+});
+
+test("exact duplicate operation keys collapse to one canonical task", () => {
+  const duplicate = operation({ id: 2, operationNumber: "OP1", machine: "Bandsaw", operationKey: "part|OP1" });
+  const original = operation({ id: 1, operationNumber: "OP1", machine: "Bandsaw", operationKey: "part|OP1" });
+  assert.deepEqual(deduplicateOperations([duplicate, original]).map(({ id }) => id), [1]);
+
+  const plan = planRequirementWorkflow([duplicate, original]);
+  assert.deepEqual(plan.operationPatches, [{ id: 1, status: "Ready" }]);
+});
+
+test("canonical duplicate selection preserves the row with recorded work", () => {
+  const original = operation({ id: 1, operationNumber: "OP1", machine: "Bandsaw", operationKey: "part|OP1" });
+  const worked = operation({
+    id: 2,
+    operationNumber: "OP1",
+    machine: "Bandsaw",
+    operationKey: "part|OP1",
+    status: "In Progress",
+    claimedQuantity: 1,
+    startedAt: "2026-09-03T12:00:00.000Z",
+  });
+  assert.deepEqual(deduplicateOperations([original, worked]).map(({ id }) => id), [2]);
 });
 
 test("a route without OP1 remains in triage", () => {
