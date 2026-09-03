@@ -82,6 +82,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
+import { mergeVisibleSelection } from "@/lib/bulk-selection";
 import { isShopName } from "@/lib/profile-name";
 import { cn } from "@/lib/utils";
 import {
@@ -547,7 +548,10 @@ export function ManufacturingDashboard() {
           body: JSON.stringify({
             action,
             quantity: item.quantity,
-            ...(action === "complete" && item.workType === "CAM" ? { programPath, notes } : {}),
+            ...(action === "complete" && item.workType === "CAM" ? {
+              ...(programPath ? { programPath } : {}),
+              notes,
+            } : {}),
           }),
         });
         const body = await response.json().catch(() => ({}));
@@ -648,6 +652,21 @@ export function ManufacturingDashboard() {
         ? "Mark complete"
         : "Bulk action";
 
+  useEffect(() => {
+    const api = operationsGridRef.current?.api;
+    if (!api) return;
+
+    const selectedIds = new Set(bulkSelectedIds);
+    const toSelect: Parameters<typeof api.setNodesSelected>[0]["nodes"] = [];
+    const toDeselect: Parameters<typeof api.setNodesSelected>[0]["nodes"] = [];
+    api.forEachNode((node) => {
+      if (!node.data) return;
+      (selectedIds.has(node.data.id) ? toSelect : toDeselect).push(node);
+    });
+    if (toSelect.length > 0) api.setNodesSelected({ nodes: toSelect, newValue: true, source: "api" });
+    if (toDeselect.length > 0) api.setNodesSelected({ nodes: toDeselect, newValue: false, source: "api" });
+  }, [bulkSelectedIds, filtered]);
+
   const stats = useMemo(() => ({
     ready: operations.filter((operation) => ["Ready", "In Progress", "Needs Rework"].includes(operation.status) && operation.availableQuantity > 0).length,
     active: operations.filter((operation) => operation.status === "In Progress").length,
@@ -678,13 +697,14 @@ export function ManufacturingDashboard() {
   };
   const completeCam = () => {
     if (!selected || selected.workType !== "CAM") return;
-    if (!camProgramPath.trim()) {
-      toast.error("Enter the shared-drive program path before completing CAM");
-      return;
-    }
     mutation.mutate({
       id: selected.id,
-      patch: { action: "complete", quantity: 1, programPath: camProgramPath.trim(), notes: camNotes.trim() },
+      patch: {
+        action: "complete",
+        quantity: 1,
+        ...(camProgramPath.trim() ? { programPath: camProgramPath.trim() } : {}),
+        notes: camNotes.trim(),
+      },
       workType: "CAM",
     });
   };
@@ -717,8 +737,6 @@ export function ManufacturingDashboard() {
   };
   const changeQueueView = (nextView: QueueView) => {
     setView(nextView);
-    setBulkSelectedIds([]);
-    operationsGridRef.current?.api.deselectAll();
   };
   const openProfile = () => {
     const match = userName.match(/^(.+?)\s+([\p{L}])\.$/u);
@@ -916,7 +934,15 @@ export function ManufacturingDashboard() {
                   columnDefs={columnDefs}
                   rowSelection={rowSelection}
                   selectionColumnDef={{ width: 48, pinned: "left", resizable: false }}
-                  onSelectionChanged={({ api }) => setBulkSelectedIds(api.getSelectedRows().map((operation) => operation.id))}
+                  onSelectionChanged={({ api, source }) => {
+                    if (["api", "rowDataChanged", "gridInitializing", "selectableChanged"].includes(source)) return;
+                    const selectedVisibleIds = api.getSelectedRows().map((operation) => operation.id);
+                    setBulkSelectedIds((current) => mergeVisibleSelection(
+                      current,
+                      filtered.map((operation) => operation.id),
+                      selectedVisibleIds,
+                    ));
+                  }}
                   defaultColDef={{ sortable: true, filter: false, resizable: true }}
                   getRowId={({ data }) => String(data.id)}
                   onRowDoubleClicked={({ data }) => data && openOperation(data)}
@@ -1084,12 +1110,12 @@ export function ManufacturingDashboard() {
           <form onSubmit={(event) => { event.preventDefault(); completeCam(); }}>
             <DialogHeader>
               <DialogTitle>Complete {selected ? operationLabel(selected) : "CAM"}</DialogTitle>
-              <DialogDescription>Record the shared-drive program location so the machine operator can retrieve the approved CAM output.</DialogDescription>
+              <DialogDescription>Optionally record the shared-drive program location so the machine operator can retrieve the approved CAM output.</DialogDescription>
             </DialogHeader>
             <div className="my-5 space-y-4">
               <div>
-                <label className="mb-1.5 block text-xs font-semibold" htmlFor="cam-program-path">Shared-drive program path</label>
-                <Input id="cam-program-path" value={camProgramPath} onChange={(event) => setCamProgramPath(event.target.value)} placeholder="\\\\server\\manufacturing\\program.nc" maxLength={1024} required autoFocus />
+                <label className="mb-1.5 block text-xs font-semibold" htmlFor="cam-program-path">Shared-drive program path <span className="font-normal text-muted-foreground">(optional)</span></label>
+                <Input id="cam-program-path" value={camProgramPath} onChange={(event) => setCamProgramPath(event.target.value)} placeholder="\\\\server\\manufacturing\\program.nc" maxLength={1024} autoFocus />
                 <p className="mt-1.5 text-xs text-muted-foreground">UNC and mapped-drive paths are accepted. The app stores and copies the path without trying to open it.</p>
               </div>
               <div>
@@ -1097,7 +1123,7 @@ export function ManufacturingDashboard() {
                 <textarea id="cam-notes" value={camNotes} onChange={(event) => setCamNotes(event.target.value)} maxLength={5000} placeholder="Workholding, tooling, post-processor, or setup details…" className="min-h-28 w-full resize-y rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring focus:ring-3 focus:ring-ring/50" />
               </div>
             </div>
-            <DialogFooter><Button type="button" variant="outline" onClick={() => setCamCompletionOpen(false)}>Cancel</Button><Button type="submit" disabled={mutation.isPending || !camProgramPath.trim()}>{mutation.isPending && <LoaderCircle className="animate-spin" />}Complete CAM</Button></DialogFooter>
+            <DialogFooter><Button type="button" variant="outline" onClick={() => setCamCompletionOpen(false)}>Cancel</Button><Button type="submit" disabled={mutation.isPending}>{mutation.isPending && <LoaderCircle className="animate-spin" />}Complete CAM</Button></DialogFooter>
           </form>
         </DialogContent>
       </Dialog>
@@ -1159,9 +1185,9 @@ export function ManufacturingDashboard() {
               {bulkCamCount > 0 && (
                 <div className="space-y-4 rounded-xl border p-4">
                   <div>
-                    <label className="mb-1.5 block text-xs font-semibold" htmlFor="bulk-cam-program-path">Shared-drive program path</label>
-                    <Input id="bulk-cam-program-path" value={bulkCamProgramPath} onChange={(event) => setBulkCamProgramPath(event.target.value)} placeholder="\\\\server\\manufacturing\\program.nc" maxLength={1024} required autoFocus />
-                    <p className="mt-1.5 text-xs text-muted-foreground">Applied to all {bulkCamCount} selected CAM {bulkCamCount === 1 ? "task" : "tasks"}.</p>
+                    <label className="mb-1.5 block text-xs font-semibold" htmlFor="bulk-cam-program-path">Shared-drive program path <span className="font-normal text-muted-foreground">(optional)</span></label>
+                    <Input id="bulk-cam-program-path" value={bulkCamProgramPath} onChange={(event) => setBulkCamProgramPath(event.target.value)} placeholder="\\\\server\\manufacturing\\program.nc" maxLength={1024} autoFocus />
+                    <p className="mt-1.5 text-xs text-muted-foreground">If provided, applied to all {bulkCamCount} selected CAM {bulkCamCount === 1 ? "task" : "tasks"}.</p>
                   </div>
                   <div>
                     <label className="mb-1.5 block text-xs font-semibold" htmlFor="bulk-cam-notes">Setup notes <span className="font-normal text-muted-foreground">(optional)</span></label>
@@ -1172,7 +1198,7 @@ export function ManufacturingDashboard() {
             </div>
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => setBulkActionDialogOpen(false)}>Cancel</Button>
-              <Button type="submit" disabled={bulkItems.length === 0 || !bulkAction || bulkActionMutation.isPending || (bulkCamCount > 0 && !bulkCamProgramPath.trim())}>
+              <Button type="submit" disabled={bulkItems.length === 0 || !bulkAction || bulkActionMutation.isPending}>
                 {bulkActionMutation.isPending && <LoaderCircle className="animate-spin" />} {bulkAction === "claim" ? "Claim selected" : "Mark selected complete"}
               </Button>
             </DialogFooter>

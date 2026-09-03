@@ -109,13 +109,9 @@ export function requiresCam(machine: string) {
 export function validateCamAction(input: {
   action: "claim" | "release" | "complete" | "undo_complete";
   quantity: number;
-  programPath?: string;
   targetStarted?: boolean;
 }) {
   if (input.quantity !== 1) throw new Error("CAM is a single task");
-  if (input.action === "complete" && !input.programPath?.trim()) {
-    throw new Error("Enter the shared-drive program path before completing CAM");
-  }
   if (input.action === "undo_complete" && input.targetStarted) {
     throw new Error("CAM cannot be reopened after the target machine operation has started");
   }

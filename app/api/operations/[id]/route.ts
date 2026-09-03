@@ -100,7 +100,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to update operation";
     const status = message.includes("cannot be reopened") ? 409
-      : message.includes("program path") || message.includes("single task") ? 400
+      : message.includes("single task") ? 400
         : 502;
     return NextResponse.json({ error: message }, { status });
   }

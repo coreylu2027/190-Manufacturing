@@ -131,10 +131,9 @@ test("completed manufacturing advances to QC while downstream lifecycle states a
   assert.equal(planRequirementWorkflow(rows, "Complete").requirementStatus, "Complete");
 });
 
-test("CAM actions require one task unit and a program path on completion", () => {
+test("CAM actions require one task unit while the program path remains optional", () => {
   assert.throws(() => validateCamAction({ action: "claim", quantity: 2 }), /single task/);
-  assert.throws(() => validateCamAction({ action: "complete", quantity: 1, programPath: "   " }), /program path/);
-  assert.doesNotThrow(() => validateCamAction({ action: "complete", quantity: 1, programPath: "\\\\shop\\cam\\part.nc" }));
+  assert.doesNotThrow(() => validateCamAction({ action: "complete", quantity: 1 }));
 });
 
 test("CAM cannot be reopened after its target starts", () => {
