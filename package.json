@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --experimental-strip-types --test lib/manufacturing-workflow.test.mts",
+    "test": "node --experimental-strip-types --test lib/manufacturing-workflow.test.mts lib/bulk-selection.test.mts",
     "cam:migrate": "node --experimental-strip-types scripts/migrate-cam-workflow.mts"
   },
   "dependencies": {

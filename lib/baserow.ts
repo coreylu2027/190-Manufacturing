@@ -464,13 +464,6 @@ export async function patchOperation(id: number, patch: OperationPatch, machinis
 
   const operation = await getRow(OPERATIONS_TABLE_ID, id);
   const workType = operationWorkType(operation);
-  if (
-    workType === "CAM"
-    && patch.status === "Complete"
-    && !textValue(operation["CAM Program Path"])
-  ) {
-    throw new Error("Enter the shared-drive program path before completing CAM");
-  }
   const body: Record<string, unknown> = {};
   if (patch.status) body.Status = patch.status;
   if (patch.machinist !== undefined) body.Machinist = patch.machinist;
@@ -527,7 +520,7 @@ export async function applyQuantityAction(
   if (!hasBaserowCredentials()) {
     const operation = DEMO_STATE.get(id);
     if (!operation) throw new Error("Operation not found");
-    if (operation.workType === "CAM") validateCamAction({ action, quantity, programPath: camHandoff?.programPath });
+    if (operation.workType === "CAM") validateCamAction({ action, quantity });
     if (operation.workType === "CAM" && action === "undo_complete") {
       const target = [...DEMO_STATE.values()].find((candidate) =>
         candidate.workType === "Manufacturing"
@@ -576,7 +569,9 @@ export async function applyQuantityAction(
       startedAt: action === "claim" && !operation.startedAt ? timestamp : operation.startedAt,
       completedAt: status === "Complete" ? timestamp : null,
       camProgramPath: operation.workType === "CAM" && action === "complete"
-        ? camHandoff?.programPath?.trim() ?? operation.camProgramPath
+        ? camHandoff?.programPath === undefined
+          ? operation.camProgramPath
+          : camHandoff.programPath.trim() || null
         : operation.camProgramPath,
       camNotes: operation.workType === "CAM" && action === "complete"
         ? camHandoff?.notes?.trim() ?? ""
@@ -594,7 +589,7 @@ export async function applyQuantityAction(
   const requiredQuantity = Math.max(1, Math.floor(Number(requirement["Required Quantity"] ?? 1)));
   const workType = operationWorkType(operation);
   const taskQuantity = taskQuantityForRow(operation, requiredQuantity);
-  if (workType === "CAM") validateCamAction({ action, quantity, programPath: camHandoff?.programPath });
+  if (workType === "CAM") validateCamAction({ action, quantity });
   const currentStatus = selectValue(operation.Status, "Planned") as OperationStatus;
   const current = quantitiesForRow(operation, taskQuantity, currentStatus);
   const allocations = current.allocations.map((allocation) => ({ ...allocation }));
@@ -668,7 +663,9 @@ export async function applyQuantityAction(
   };
   if (action === "claim" && !operation["Started At"]) operationPatch["Started At"] = timestamp;
   if (workType === "CAM" && action === "complete") {
-    operationPatch["CAM Program Path"] = camHandoff?.programPath?.trim();
+    if (camHandoff?.programPath !== undefined) {
+      operationPatch["CAM Program Path"] = camHandoff.programPath.trim();
+    }
     operationPatch["CAM Notes"] = camHandoff?.notes?.trim() ?? "";
   }
   await patchRow(OPERATIONS_TABLE_ID, id, operationPatch);
@@ -690,7 +687,9 @@ export async function applyQuantityAction(
     startedAt: operationPatch["Started At"] ?? operation["Started At"] ?? null,
     completedAt: operationPatch["Completed At"],
     camProgramPath: workType === "CAM" && action === "complete"
-      ? camHandoff?.programPath?.trim() ?? null
+      ? camHandoff?.programPath === undefined
+        ? textValue(operation["CAM Program Path"]) || null
+        : camHandoff.programPath.trim() || null
       : textValue(operation["CAM Program Path"]) || null,
     camNotes: workType === "CAM" && action === "complete"
       ? camHandoff?.notes?.trim() ?? ""

@@ -54,8 +54,8 @@ Haas CNC and Shop Sabre CNC operations have a separate, claimable CAM task at
 the same operation number. For example, a Haas OP2 is paired with `CAM for
 OP2`; CAM may proceed while OP1 manufacturing is underway, but the Haas work
 does not become ready until both prerequisites are complete. CAM is one task
-regardless of part quantity and requires a shared-drive program path when it is
-completed. It does not enter manufacturing QC.
+regardless of part quantity and accepts an optional shared-drive program path
+when it is completed. It does not enter manufacturing QC.
 
 The Operations table stores `Work Type`, `CAM Program Path`, and `CAM Notes`.
 Run `npm run cam:migrate` to preview the Baserow-only reconciliation. The
