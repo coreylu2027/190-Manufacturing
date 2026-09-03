@@ -69,7 +69,7 @@ export async function GET() {
 
     const reviews = new Map((reviewData as ReviewRow[]).map((review) => [review.operation_id, review]));
     const qualityControl: QualityControlItem[] = operationData.operations
-      .filter((operation) => operation.status === "Complete" || reviews.has(operation.id))
+      .filter((operation) => operation.workType === "Manufacturing" && (operation.status === "Complete" || reviews.has(operation.id)))
       .map((operation) => {
         const review = reviews.get(operation.id);
         const completedAfterReview = Boolean(

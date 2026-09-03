@@ -48,6 +48,20 @@ When all remaining parts are already claimed by someone else, the claim action b
 
 Supported statuses match the live schema: Planned, Ready, In Progress, Blocked, Needs Rework, and Complete.
 
+### CAM prerequisites
+
+Haas CNC and Shop Sabre CNC operations have a separate, claimable CAM task at
+the same operation number. For example, a Haas OP2 is paired with `CAM for
+OP2`; CAM may proceed while OP1 manufacturing is underway, but the Haas work
+does not become ready until both prerequisites are complete. CAM is one task
+regardless of part quantity and requires a shared-drive program path when it is
+completed. It does not enter manufacturing QC.
+
+The Operations table stores `Work Type`, `CAM Program Path`, and `CAM Notes`.
+Run `npm run cam:migrate` to preview the Baserow-only reconciliation. The
+initial destructive reset requires the explicit `--apply --reset-all` flags.
+The command does not call Onshape APIs.
+
 The Fabrication tab reads active rows from the Finishing table and joins their linked production requirements for part, assembly, status, and file details. A finishing job becomes claimable when its requirement reaches `Ready for Finishing`; claiming records the machinist on the Finishing row, and completing it advances the linked requirement to `Complete`. Release and undo actions reverse those changes.
 
 The shop UI treats the Onshape document name and assembly part number as separate identifiers. It reads the document name from a `Source Document` text field on Production Requirements (with `Onshape Document` supported as a compatibility alias) and displays values such as `A-26C-0001`. The linked `Assembly` value, such as `A-190B-26…`, remains available for internal requirement identity and is not presented as the source document.

@@ -1,6 +1,7 @@
 import "server-only";
 
 import { DEMO_FABRICATION_JOBS, DEMO_OPERATIONS } from "@/lib/demo-data";
+import { planRequirementWorkflow, validateCamAction } from "@/lib/manufacturing-workflow";
 import type {
   FabricationAction,
   FabricationJob,
@@ -9,6 +10,7 @@ import type {
   OperationPatch,
   OperationQuantityAction,
   OperationStatus,
+  OperationWorkType,
   QualityResult,
 } from "@/lib/types";
 
@@ -24,6 +26,49 @@ const DEMO_STATE = new Map(DEMO_OPERATIONS.map((operation) => [operation.id, {
   allocations: operation.allocations.map((allocation) => ({ ...allocation })),
 }]));
 const DEMO_FABRICATION_STATE = new Map(DEMO_FABRICATION_JOBS.map((job) => [job.id, { ...job }]));
+
+function reconcileDemoWorkflow(target: ManufacturingOperation) {
+  const related = [...DEMO_STATE.values()].filter((operation) =>
+    operation.assemblyNumber === target.assemblyNumber && operation.partNumber === target.partNumber,
+  );
+  const plan = planRequirementWorkflow(related.map((operation) => ({
+    id: operation.id,
+    operationNumber: operation.operationNumber,
+    machine: operation.machine,
+    workType: operation.workType,
+    status: operation.status,
+    active: operation.activeInRouting,
+  })));
+  for (const patch of plan.operationPatches) {
+    const operation = DEMO_STATE.get(patch.id);
+    if (!operation) continue;
+    DEMO_STATE.set(patch.id, {
+      ...operation,
+      status: patch.status,
+      availableQuantity: patch.status === "Ready"
+        ? Math.max(0, operation.taskQuantity - operation.claimedQuantity - operation.completedQuantity)
+        : 0,
+    });
+  }
+  const refreshed = [...DEMO_STATE.values()].filter((operation) =>
+    operation.assemblyNumber === target.assemblyNumber && operation.partNumber === target.partNumber,
+  );
+  for (const operation of refreshed) {
+    if (operation.workType !== "Manufacturing") continue;
+    const cam = refreshed.find((candidate) =>
+      candidate.workType === "CAM" && candidate.operationNumber === operation.operationNumber,
+    );
+    DEMO_STATE.set(operation.id, {
+      ...operation,
+      camDependency: cam ? {
+        operationId: cam.id,
+        status: cam.status,
+        programPath: cam.camProgramPath,
+        notes: cam.camNotes,
+      } : null,
+    });
+  }
+}
 
 export function hasBaserowCredentials() {
   return Boolean(process.env.BASEROW_API_TOKEN);
@@ -73,6 +118,14 @@ function selectValue(value: unknown, fallback = ""): string {
   return typeof value === "object" && value !== null && "value" in value
     ? String((value as { value: unknown }).value ?? fallback)
     : fallback;
+}
+
+function operationWorkType(row: BaserowRow): OperationWorkType {
+  return selectValue(row["Work Type"], "Manufacturing") === "CAM" ? "CAM" : "Manufacturing";
+}
+
+function taskQuantityForRow(row: BaserowRow, requiredQuantity: number) {
+  return operationWorkType(row) === "CAM" ? 1 : requiredQuantity;
 }
 
 function linkedId(value: unknown): number | null {
@@ -306,7 +359,7 @@ export async function getOperations(): Promise<{ operations: ManufacturingOperat
   const requirements = new Map(requirementRows.map((row) => [row.id, row]));
   const parts = new Map(partRows.map((row) => [row.id, row]));
 
-  const operations = operationRows.map((row): ManufacturingOperation => {
+  const parsedOperations = operationRows.map((row) => {
     const requirementId = linkedId(row["Production Requirement"]);
     const requirement = requirementId ? requirements.get(requirementId) : undefined;
     const partId = linkedId(requirement?.Part);
@@ -315,24 +368,32 @@ export async function getOperations(): Promise<{ operations: ManufacturingOperat
     const operationNumber = selectValue(row["Operation Number"], "OP1") as ManufacturingOperation["operationNumber"];
     const status = selectValue(row.Status, "Planned") as OperationStatus;
     const quantity = Number(requirement?.["Required Quantity"] ?? 1);
-    const quantities = quantitiesForRow(row, quantity, status);
+    const workType = operationWorkType(row);
+    const taskQuantity = taskQuantityForRow(row, quantity);
+    const quantities = quantitiesForRow(row, taskQuantity, status);
     const drawingPdf = firstFile(requirement?.["Drawing PDF"]);
     const stepFile = firstFile(requirement?.["STEP File"]);
     return {
+      requirementId,
       id: row.id,
       operationKey: String(row.Operation ?? `${row.id}`),
       ...parsed,
       documentName: sourceDocumentName(requirement),
       material: textValue(part?.Material) || null,
       quantity,
+      taskQuantity,
       ...quantities,
       operationNumber,
+      workType,
       machine: selectValue(row.Machine, "Unassigned"),
       status,
       machinist: String(row.Machinist ?? ""),
       startedAt: row["Started At"] ? String(row["Started At"]) : null,
       completedAt: row["Completed At"] ? String(row["Completed At"]) : null,
       activeInRouting: Boolean(row["Active in Routing"]),
+      camProgramPath: textValue(row["CAM Program Path"]) || null,
+      camNotes: textValue(row["CAM Notes"]),
+      camDependency: null,
       drawingUrl: linkedValue(requirement?.Drawing) || null,
       drawingPdfUrl: drawingPdf?.url ?? null,
       drawingPdfName: drawingPdf?.name ?? null,
@@ -342,7 +403,46 @@ export async function getOperations(): Promise<{ operations: ManufacturingOperat
     };
   });
 
+  const camByTarget = new Map(parsedOperations
+    .filter((operation) => operation.workType === "CAM" && operation.requirementId)
+    .map((operation) => [`${operation.requirementId}|${operation.operationNumber}`, operation]));
+  const operations: ManufacturingOperation[] = parsedOperations.map(({ requirementId, ...operation }) => {
+    if (operation.workType !== "Manufacturing" || !requirementId) return operation;
+    const cam = camByTarget.get(`${requirementId}|${operation.operationNumber}`);
+    return cam ? {
+      ...operation,
+      camDependency: {
+        operationId: cam.id,
+        status: cam.status,
+        programPath: cam.camProgramPath,
+        notes: cam.camNotes,
+      },
+    } : operation;
+  });
+
   return { operations: operations.filter((operation) => operation.activeInRouting), source: "baserow" };
+}
+
+async function reconcileRequirementWorkflow(requirementId: number) {
+  const [requirement, operationRows] = await Promise.all([
+    getRow(REQUIREMENTS_TABLE_ID, requirementId),
+    listAllRows(OPERATIONS_TABLE_ID),
+  ]);
+  const relatedRows = operationRows.filter((row) => linkedId(row["Production Requirement"]) === requirementId);
+  const plan = planRequirementWorkflow(relatedRows.map((row) => ({
+    id: row.id,
+    operationNumber: selectValue(row["Operation Number"], "OP1"),
+    machine: selectValue(row.Machine, "Unassigned"),
+    workType: operationWorkType(row),
+    status: selectValue(row.Status, "Planned") as OperationStatus,
+    active: Boolean(row["Active in Routing"]),
+  })), selectValue(requirement.Status, "Needs Triage"));
+
+  await Promise.all(plan.operationPatches.map((patch) => patchRow(OPERATIONS_TABLE_ID, patch.id, { Status: patch.status })));
+  if (selectValue(requirement.Status, "Needs Triage") !== plan.requirementStatus) {
+    await patchRow(REQUIREMENTS_TABLE_ID, requirementId, { Status: plan.requirementStatus });
+  }
+  return plan;
 }
 
 export async function patchOperation(id: number, patch: OperationPatch, machinist: string) {
@@ -358,17 +458,26 @@ export async function patchOperation(id: number, patch: OperationPatch, machinis
       completedAt: patch.status === "Complete" ? timestamp : operation.completedAt,
     };
     DEMO_STATE.set(id, updated);
-    return updated;
+    reconcileDemoWorkflow(updated);
+    return DEMO_STATE.get(id) ?? updated;
   }
 
   const operation = await getRow(OPERATIONS_TABLE_ID, id);
+  const workType = operationWorkType(operation);
+  if (
+    workType === "CAM"
+    && patch.status === "Complete"
+    && !textValue(operation["CAM Program Path"])
+  ) {
+    throw new Error("Enter the shared-drive program path before completing CAM");
+  }
   const body: Record<string, unknown> = {};
   if (patch.status) body.Status = patch.status;
   if (patch.machinist !== undefined) body.Machinist = patch.machinist;
   if ((patch.status === "In Progress" || patch.status === "Complete") && patch.machinist === undefined) body.Machinist = machinist;
   if (patch.status === "In Progress") body["Started At"] = new Date().toISOString();
   if (patch.status === "Complete") body["Completed At"] = new Date().toISOString();
-  if (patch.status === "Needs Rework") {
+  if (patch.status === "Needs Rework" && workType === "Manufacturing") {
     const requirementId = linkedId(operation["Production Requirement"]);
     if (requirementId) {
       const requirement = await getRow(REQUIREMENTS_TABLE_ID, requirementId);
@@ -392,29 +501,16 @@ export async function patchOperation(id: number, patch: OperationPatch, machinis
   const requirementId = linkedId(operation["Production Requirement"]);
   if (requirementId) {
     const requirementPatch: Record<string, unknown> = {};
-    if (patch.machinist !== undefined) requirementPatch.Machinist = patch.machinist;
-    if ((patch.status === "In Progress" || patch.status === "Complete") && patch.machinist === undefined) {
+    if (workType === "Manufacturing" && patch.machinist !== undefined) requirementPatch.Machinist = patch.machinist;
+    if (workType === "Manufacturing" && (patch.status === "In Progress" || patch.status === "Complete") && patch.machinist === undefined) {
       requirementPatch.Machinist = machinist;
     }
-
-    if (patch.status === "In Progress") {
-      requirementPatch.Status = "On Machine";
-    } else if (patch.status === "Needs Rework") {
-      requirementPatch.Status = "Needs Rework";
-    } else if (patch.status === "Complete") {
-      const operations = await listAllRows(OPERATIONS_TABLE_ID);
-      const relatedActiveOperations = operations.filter((row) =>
-        linkedId(row["Production Requirement"]) === requirementId && Boolean(row["Active in Routing"]),
-      );
-      const allOperationsComplete = relatedActiveOperations.every((row) =>
-        row.id === id || selectValue(row.Status, "Planned") === "Complete",
-      );
-      requirementPatch.Status = allOperationsComplete ? "Ready for QC" : "On Machine";
-      if (allOperationsComplete) requirementPatch["QC Outcome"] = "Not Inspected";
-    }
-
     if (Object.keys(requirementPatch).length > 0) {
       await patchRow(REQUIREMENTS_TABLE_ID, requirementId, requirementPatch);
+    }
+    const plan = await reconcileRequirementWorkflow(requirementId);
+    if (plan.requirementStatus === "Ready for QC") {
+      await patchRow(REQUIREMENTS_TABLE_ID, requirementId, { "QC Outcome": "Not Inspected" });
     }
   }
   return body;
@@ -425,11 +521,24 @@ export async function applyQuantityAction(
   action: OperationQuantityAction,
   quantity: number,
   actor: { id: string; name: string },
+  camHandoff?: { programPath?: string; notes?: string },
 ) {
   if (!Number.isInteger(quantity) || quantity < 1) throw new Error("Quantity must be a positive whole number");
   if (!hasBaserowCredentials()) {
     const operation = DEMO_STATE.get(id);
     if (!operation) throw new Error("Operation not found");
+    if (operation.workType === "CAM") validateCamAction({ action, quantity, programPath: camHandoff?.programPath });
+    if (operation.workType === "CAM" && action === "undo_complete") {
+      const target = [...DEMO_STATE.values()].find((candidate) =>
+        candidate.workType === "Manufacturing"
+        && candidate.assemblyNumber === operation.assemblyNumber
+        && candidate.partNumber === operation.partNumber
+        && candidate.operationNumber === operation.operationNumber,
+      );
+      if (target && (target.status === "In Progress" || target.status === "Complete" || target.startedAt)) {
+        validateCamAction({ action, quantity, targetStarted: true });
+      }
+    }
     const allocations = operation.allocations.map((allocation) => ({ ...allocation }));
     let actorAllocation = allocations.find((allocation) => allocation.userId === actor.id);
     if (!actorAllocation) {
@@ -454,21 +563,28 @@ export async function applyQuantityAction(
     const activeAllocations = allocations.filter((allocation) => allocation.claimed > 0 || allocation.completed > 0);
     const claimedQuantity = activeAllocations.reduce((sum, allocation) => sum + allocation.claimed, 0);
     const completedQuantity = activeAllocations.reduce((sum, allocation) => sum + allocation.completed, 0);
-    const status: OperationStatus = completedQuantity >= operation.quantity ? "Complete" : claimedQuantity > 0 ? "In Progress" : "Ready";
+    const status: OperationStatus = completedQuantity >= operation.taskQuantity ? "Complete" : claimedQuantity > 0 ? "In Progress" : "Ready";
     const timestamp = new Date().toISOString();
     const updated = {
       id,
       status,
-      machinist: machinistSummary(activeAllocations, operation.quantity),
+      machinist: machinistSummary(activeAllocations, operation.taskQuantity),
       claimedQuantity,
       completedQuantity,
-      availableQuantity: Math.max(0, operation.quantity - claimedQuantity - completedQuantity),
+      availableQuantity: Math.max(0, operation.taskQuantity - claimedQuantity - completedQuantity),
       allocations: activeAllocations,
       startedAt: action === "claim" && !operation.startedAt ? timestamp : operation.startedAt,
       completedAt: status === "Complete" ? timestamp : null,
+      camProgramPath: operation.workType === "CAM" && action === "complete"
+        ? camHandoff?.programPath?.trim() ?? operation.camProgramPath
+        : operation.camProgramPath,
+      camNotes: operation.workType === "CAM" && action === "complete"
+        ? camHandoff?.notes?.trim() ?? ""
+        : operation.camNotes,
     };
     DEMO_STATE.set(id, { ...operation, ...updated });
-    return updated;
+    reconcileDemoWorkflow({ ...operation, ...updated });
+    return DEMO_STATE.get(id) ?? updated;
   }
 
   const operation = await getRow(OPERATIONS_TABLE_ID, id);
@@ -476,9 +592,27 @@ export async function applyQuantityAction(
   if (!requirementId) throw new Error("Operation is not linked to a production requirement");
   const requirement = await getRow(REQUIREMENTS_TABLE_ID, requirementId);
   const requiredQuantity = Math.max(1, Math.floor(Number(requirement["Required Quantity"] ?? 1)));
+  const workType = operationWorkType(operation);
+  const taskQuantity = taskQuantityForRow(operation, requiredQuantity);
+  if (workType === "CAM") validateCamAction({ action, quantity, programPath: camHandoff?.programPath });
   const currentStatus = selectValue(operation.Status, "Planned") as OperationStatus;
-  const current = quantitiesForRow(operation, requiredQuantity, currentStatus);
+  const current = quantitiesForRow(operation, taskQuantity, currentStatus);
   const allocations = current.allocations.map((allocation) => ({ ...allocation }));
+
+  if (workType === "CAM" && action === "undo_complete") {
+    const operationRows = await listAllRows(OPERATIONS_TABLE_ID);
+    const target = operationRows.find((candidate) =>
+      linkedId(candidate["Production Requirement"]) === requirementId
+      && operationWorkType(candidate) === "Manufacturing"
+      && selectValue(candidate["Operation Number"], "OP1") === selectValue(operation["Operation Number"], "OP1"),
+    );
+    if (target && (
+      ["In Progress", "Complete"].includes(selectValue(target.Status, "Planned"))
+      || Boolean(target["Started At"])
+    )) {
+      validateCamAction({ action, quantity, targetStarted: true });
+    }
+  }
 
   let actorAllocation = allocations.find((allocation) => allocation.userId === actor.id);
   if (!actorAllocation) {
@@ -517,13 +651,13 @@ export async function applyQuantityAction(
   const activeAllocations = allocations.filter((allocation) => allocation.claimed > 0 || allocation.completed > 0);
   const claimedQuantity = activeAllocations.reduce((sum, allocation) => sum + allocation.claimed, 0);
   const completedQuantity = activeAllocations.reduce((sum, allocation) => sum + allocation.completed, 0);
-  const nextStatus: OperationStatus = completedQuantity >= requiredQuantity
+  const nextStatus: OperationStatus = completedQuantity >= taskQuantity
     ? "Complete"
     : claimedQuantity > 0
       ? "In Progress"
       : "Ready";
   const timestamp = new Date().toISOString();
-  const summary = machinistSummary(activeAllocations, requiredQuantity);
+  const summary = machinistSummary(activeAllocations, taskQuantity);
   const operationPatch: Record<string, unknown> = {
     Status: nextStatus,
     Machinist: summary,
@@ -533,26 +667,17 @@ export async function applyQuantityAction(
     "Completed At": nextStatus === "Complete" ? timestamp : null,
   };
   if (action === "claim" && !operation["Started At"]) operationPatch["Started At"] = timestamp;
-  await patchRow(OPERATIONS_TABLE_ID, id, operationPatch);
-
-  const operationRows = await listAllRows(OPERATIONS_TABLE_ID);
-  const relatedActiveOperations = operationRows.filter((row) =>
-    linkedId(row["Production Requirement"]) === requirementId && Boolean(row["Active in Routing"]),
-  );
-  const allOperationsComplete = relatedActiveOperations.every((row) =>
-    row.id === id ? nextStatus === "Complete" : selectValue(row.Status, "Planned") === "Complete",
-  );
-  const requirementPatch: Record<string, unknown> = { Machinist: summary };
-  if (allOperationsComplete) {
-    requirementPatch.Status = "Ready for QC";
-    requirementPatch["QC Outcome"] = "Not Inspected";
-  } else if (claimedQuantity > 0 || completedQuantity > 0) {
-    requirementPatch.Status = "On Machine";
-    if (action === "undo_complete") requirementPatch["QC Outcome"] = "Not Inspected";
-  } else {
-    requirementPatch.Status = "Ready for Manufacturing";
+  if (workType === "CAM" && action === "complete") {
+    operationPatch["CAM Program Path"] = camHandoff?.programPath?.trim();
+    operationPatch["CAM Notes"] = camHandoff?.notes?.trim() ?? "";
   }
-  await patchRow(REQUIREMENTS_TABLE_ID, requirementId, requirementPatch);
+  await patchRow(OPERATIONS_TABLE_ID, id, operationPatch);
+  if (workType === "Manufacturing") {
+    const requirementPatch: Record<string, unknown> = { Machinist: summary };
+    if (action === "undo_complete") requirementPatch["QC Outcome"] = "Not Inspected";
+    await patchRow(REQUIREMENTS_TABLE_ID, requirementId, requirementPatch);
+  }
+  await reconcileRequirementWorkflow(requirementId);
 
   return {
     id,
@@ -560,10 +685,16 @@ export async function applyQuantityAction(
     machinist: summary,
     claimedQuantity,
     completedQuantity,
-    availableQuantity: Math.max(0, requiredQuantity - claimedQuantity - completedQuantity),
+    availableQuantity: Math.max(0, taskQuantity - claimedQuantity - completedQuantity),
     allocations: activeAllocations,
     startedAt: operationPatch["Started At"] ?? operation["Started At"] ?? null,
     completedAt: operationPatch["Completed At"],
+    camProgramPath: workType === "CAM" && action === "complete"
+      ? camHandoff?.programPath?.trim() ?? null
+      : textValue(operation["CAM Program Path"]) || null,
+    camNotes: workType === "CAM" && action === "complete"
+      ? camHandoff?.notes?.trim() ?? ""
+      : textValue(operation["CAM Notes"]),
   };
 }
 
@@ -578,6 +709,7 @@ export interface StolenOperationContext {
   partNumber: string;
   partName: string;
   operationNumber: ManufacturingOperation["operationNumber"];
+  workType: OperationWorkType;
 }
 
 export async function stealOperationClaim(
@@ -618,7 +750,7 @@ export async function stealOperationClaim(
     const updated = {
       id,
       status: "In Progress" as OperationStatus,
-      machinist: machinistSummary(activeAllocations, operation.quantity),
+      machinist: machinistSummary(activeAllocations, operation.taskQuantity),
       claimedQuantity: activeAllocations.reduce((sum, allocation) => sum + allocation.claimed, 0),
       completedQuantity: activeAllocations.reduce((sum, allocation) => sum + allocation.completed, 0),
       availableQuantity: 0,
@@ -627,14 +759,16 @@ export async function stealOperationClaim(
       completedAt: null,
     };
     DEMO_STATE.set(id, { ...operation, ...updated });
+    reconcileDemoWorkflow({ ...operation, ...updated });
     return {
-      updated,
+      updated: DEMO_STATE.get(id) ?? updated,
       displaced,
       context: {
         operationId: id,
         partNumber: operation.partNumber,
         partName: operation.partName,
         operationNumber: operation.operationNumber,
+        workType: operation.workType,
       } satisfies StolenOperationContext,
     };
   }
@@ -644,12 +778,14 @@ export async function stealOperationClaim(
   if (!requirementId) throw new Error("Operation is not linked to a production requirement");
   const requirement = await getRow(REQUIREMENTS_TABLE_ID, requirementId);
   const requiredQuantity = Math.max(1, Math.floor(Number(requirement["Required Quantity"] ?? 1)));
+  const workType = operationWorkType(operation);
+  const taskQuantity = taskQuantityForRow(operation, requiredQuantity);
   const currentStatus = selectValue(operation.Status, "Planned") as OperationStatus;
   if (!["Ready", "In Progress", "Needs Rework"].includes(currentStatus)) {
     throw new Error("This production requirement cannot be stolen right now");
   }
 
-  const current = quantitiesForRow(operation, requiredQuantity, currentStatus);
+  const current = quantitiesForRow(operation, taskQuantity, currentStatus);
   if (current.availableQuantity > 0) throw new Error("Claim the remaining available parts instead");
   const allocations = current.allocations.map((allocation) => ({ ...allocation }));
   const legacyActorAllocation = allocations.find((allocation) =>
@@ -676,7 +812,7 @@ export async function stealOperationClaim(
   const activeAllocations = allocations.filter((allocation) => allocation.claimed > 0 || allocation.completed > 0);
   const claimedQuantity = activeAllocations.reduce((sum, allocation) => sum + allocation.claimed, 0);
   const completedQuantity = activeAllocations.reduce((sum, allocation) => sum + allocation.completed, 0);
-  const summary = machinistSummary(activeAllocations, requiredQuantity);
+  const summary = machinistSummary(activeAllocations, taskQuantity);
   const timestamp = new Date().toISOString();
   const operationPatch = {
     Status: "In Progress",
@@ -688,7 +824,10 @@ export async function stealOperationClaim(
     "Completed At": null,
   };
   await patchRow(OPERATIONS_TABLE_ID, id, operationPatch);
-  await patchRow(REQUIREMENTS_TABLE_ID, requirementId, { Status: "On Machine", Machinist: summary });
+  if (workType === "Manufacturing") {
+    await patchRow(REQUIREMENTS_TABLE_ID, requirementId, { Machinist: summary });
+  }
+  await reconcileRequirementWorkflow(requirementId);
 
   const parsed = parseRequirement(linkedValue(operation["Production Requirement"]));
   const operationNumber = selectValue(operation["Operation Number"], "OP1") as ManufacturingOperation["operationNumber"];
@@ -699,13 +838,13 @@ export async function stealOperationClaim(
       machinist: summary,
       claimedQuantity,
       completedQuantity,
-      availableQuantity: Math.max(0, requiredQuantity - claimedQuantity - completedQuantity),
+      availableQuantity: Math.max(0, taskQuantity - claimedQuantity - completedQuantity),
       allocations: activeAllocations,
       startedAt: operationPatch["Started At"],
       completedAt: null,
     },
     displaced,
-    context: { operationId: id, ...parsed, operationNumber } satisfies StolenOperationContext,
+    context: { operationId: id, ...parsed, operationNumber, workType } satisfies StolenOperationContext,
   };
 }
 
@@ -722,8 +861,9 @@ export async function renameMachinistAllocations(userId: string, oldName: string
     const requirementId = linkedId(operation["Production Requirement"]);
     const requirement = requirementId ? requirements.get(requirementId) : undefined;
     const requiredQuantity = Math.max(1, Math.floor(Number(requirement?.["Required Quantity"] ?? 1)));
+    const taskQuantity = taskQuantityForRow(operation, requiredQuantity);
     const status = selectValue(operation.Status, "Planned") as OperationStatus;
-    const current = quantitiesForRow(operation, requiredQuantity, status);
+    const current = quantitiesForRow(operation, taskQuantity, status);
     let changed = false;
     const allocations = current.allocations.map((allocation) => {
       if (allocation.userId === userId || (
@@ -737,7 +877,7 @@ export async function renameMachinistAllocations(userId: string, oldName: string
     });
     if (!changed) return;
 
-    const summary = machinistSummary(allocations, requiredQuantity);
+    const summary = machinistSummary(allocations, taskQuantity);
     await patchRow(OPERATIONS_TABLE_ID, operation.id, {
       Machinist: summary,
       "Quantity Ledger": JSON.stringify(allocations),
@@ -756,6 +896,7 @@ export async function patchQualityOutcome(operationId: number, result: Exclude<Q
   if (!hasBaserowCredentials()) return { result };
 
   const operation = await getRow(OPERATIONS_TABLE_ID, operationId);
+  if (operationWorkType(operation) !== "Manufacturing") throw new Error("CAM tasks do not enter manufacturing QC");
   const requirementId = linkedId(operation["Production Requirement"]);
   if (!requirementId) throw new Error("Operation is not linked to a production requirement");
 
@@ -777,6 +918,7 @@ export async function clearPassedQualityOutcome(operationId: number) {
   if (!hasBaserowCredentials()) return;
 
   const operation = await getRow(OPERATIONS_TABLE_ID, operationId);
+  if (operationWorkType(operation) !== "Manufacturing") throw new Error("CAM tasks do not enter manufacturing QC");
   if (selectValue(operation.Status, "Planned") !== "Complete") {
     throw new Error("Only a passed QC review on completed work can be undone");
   }

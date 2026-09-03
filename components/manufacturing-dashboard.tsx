@@ -14,9 +14,11 @@ import {
   Check,
   ChevronRight,
   CircleDot,
+  ClipboardCopy,
   Clock3,
   Cloud,
   CloudOff,
+  Code2,
   Download,
   Factory,
   FileText,
@@ -87,12 +89,14 @@ import {
   type OperationActionPatch,
   type OperationQuantityAction,
   type OperationStatus,
+  type OperationWorkType,
   type OperationsResponse,
 } from "@/lib/types";
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
 type QueueView = "available" | "mine" | "all";
+type WorkTypeFilter = "all" | OperationWorkType;
 type WorkspaceView = "operations" | "fabrication" | "production" | "admin";
 type ProductionSort = "document" | "part" | "description" | "quantity" | "progress" | "status";
 
@@ -105,6 +109,10 @@ interface ProductionRequirement {
   quantity: number;
   completedOperations: number;
   totalOperations: number;
+  completedCamTasks: number;
+  totalCamTasks: number;
+  completedManufacturingOperations: number;
+  totalManufacturingOperations: number;
   status: OperationStatus;
 }
 
@@ -181,6 +189,10 @@ function formatDate(value: string | null) {
   return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(value));
 }
 
+function operationLabel(operation: Pick<ManufacturingOperation, "operationNumber" | "workType">) {
+  return operation.workType === "CAM" ? `CAM for ${operation.operationNumber}` : operation.operationNumber;
+}
+
 function allocationForUser(operation: ManufacturingOperation, user: OperationsResponse["user"]) {
   if (!user) return { claimed: 0, completed: 0 };
   return operation.allocations.find((allocation) => allocation.userId === user.id)
@@ -205,6 +217,18 @@ function isOperationStealable(operation: ManufacturingOperation, user: Operation
 
 function isOperationClaimable(operation: ManufacturingOperation) {
   return ["Ready", "In Progress", "Needs Rework"].includes(operation.status) && operation.availableQuantity > 0;
+}
+
+type BulkAction = Extract<OperationQuantityAction, "claim" | "complete">;
+
+function bulkActionPlan(operation: ManufacturingOperation, user: OperationsResponse["user"], view: QueueView) {
+  const claimedQuantity = allocationForUser(operation, user).claimed;
+  const claimable = isOperationClaimable(operation);
+  if (view === "available") return claimable ? { action: "claim" as const, quantity: operation.availableQuantity } : null;
+  if (view === "mine") return claimedQuantity > 0 ? { action: "complete" as const, quantity: claimedQuantity } : null;
+  if (operation.status === "Ready" && claimable) return { action: "claim" as const, quantity: operation.availableQuantity };
+  if (claimedQuantity > 0) return { action: "complete" as const, quantity: claimedQuantity };
+  return claimable ? { action: "claim" as const, quantity: operation.availableQuantity } : null;
 }
 
 const quantityActionCopy: Record<OperationQuantityAction, { title: string; button: string; success: string }> = {
@@ -265,6 +289,10 @@ function ProductionOverview({
           quantity: first.quantity,
           completedOperations: routedOperations.filter((operation) => operation.status === "Complete").length,
           totalOperations: routedOperations.length,
+          completedCamTasks: routedOperations.filter((operation) => operation.workType === "CAM" && operation.status === "Complete").length,
+          totalCamTasks: routedOperations.filter((operation) => operation.workType === "CAM").length,
+          completedManufacturingOperations: routedOperations.filter((operation) => operation.workType === "Manufacturing" && operation.status === "Complete").length,
+          totalManufacturingOperations: routedOperations.filter((operation) => operation.workType === "Manufacturing").length,
           status: requirementStatus(routedOperations),
         };
       });
@@ -388,7 +416,7 @@ function ProductionOverview({
                         <td className="px-4 py-3 font-semibold">{requirement.partName}</td>
                         <td className="px-4 py-3 font-mono text-xs">{requirement.documentName ?? "Not synced"}</td>
                         <td className="px-4 py-3 text-right font-semibold">{requirement.quantity}</td>
-                        <td className="min-w-48 px-4 py-3"><div className="mb-1.5 flex justify-between text-xs"><span>{requirement.completedOperations} of {requirement.totalOperations} operations</span><span className="font-semibold">{percent}%</span></div><div className="h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary" style={{ width: `${percent}%` }} /></div></td>
+                        <td className="min-w-56 px-4 py-3"><div className="mb-1.5 flex justify-between text-xs"><span>Mfg {requirement.completedManufacturingOperations}/{requirement.totalManufacturingOperations}{requirement.totalCamTasks > 0 ? ` · CAM ${requirement.completedCamTasks}/${requirement.totalCamTasks}` : ""}</span><span className="font-semibold">{percent}%</span></div><div className="h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary" style={{ width: `${percent}%` }} /></div></td>
                         <td className="px-4 py-3"><StatusBadge status={requirement.status} /></td>
                       </tr>
                     );
@@ -402,7 +430,7 @@ function ProductionOverview({
                 return (
                   <article key={requirement.key} className="p-4">
                     <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary">{requirement.partNumber}</p><h3 className="mt-1 font-semibold">{requirement.partName}</h3><p className="mt-1 font-mono text-[11px] text-muted-foreground">{requirement.documentName ?? "Document not synced"} · Qty {requirement.quantity}</p></div><StatusBadge status={requirement.status} /></div>
-                    <div className="mt-3"><div className="mb-1.5 flex justify-between text-xs text-muted-foreground"><span>{requirement.completedOperations} of {requirement.totalOperations} operations</span><span className="font-semibold text-foreground">{percent}%</span></div><div className="h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary" style={{ width: `${percent}%` }} /></div></div>
+                    <div className="mt-3"><div className="mb-1.5 flex justify-between text-xs text-muted-foreground"><span>Mfg {requirement.completedManufacturingOperations}/{requirement.totalManufacturingOperations}{requirement.totalCamTasks > 0 ? ` · CAM ${requirement.completedCamTasks}/${requirement.totalCamTasks}` : ""}</span><span className="font-semibold text-foreground">{percent}%</span></div><div className="h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary" style={{ width: `${percent}%` }} /></div></div>
                   </article>
                 );
               })}
@@ -420,14 +448,20 @@ export function ManufacturingDashboard() {
   const operationsGridRef = useRef<AgGridReact<ManufacturingOperation>>(null);
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("operations");
   const [view, setView] = useState<QueueView>("available");
+  const [workType, setWorkType] = useState<WorkTypeFilter>("all");
   const [machine, setMachine] = useState("all");
   const [sourceDocument, setSourceDocument] = useState("all");
   const [search, setSearch] = useState("");
-  const [bulkClaimIds, setBulkClaimIds] = useState<number[]>([]);
-  const [bulkClaimDialogOpen, setBulkClaimDialogOpen] = useState(false);
+  const [bulkSelectedIds, setBulkSelectedIds] = useState<number[]>([]);
+  const [bulkActionDialogOpen, setBulkActionDialogOpen] = useState(false);
+  const [bulkCamProgramPath, setBulkCamProgramPath] = useState("");
+  const [bulkCamNotes, setBulkCamNotes] = useState("");
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [quantityDialog, setQuantityDialog] = useState<{ action: OperationQuantityAction; max: number } | null>(null);
   const [quantityDraft, setQuantityDraft] = useState("1");
+  const [camCompletionOpen, setCamCompletionOpen] = useState(false);
+  const [camProgramPath, setCamProgramPath] = useState("");
+  const [camNotes, setCamNotes] = useState("");
   const [stealDialogOpen, setStealDialogOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [firstName, setFirstName] = useState("");
@@ -442,7 +476,7 @@ export function ManufacturingDashboard() {
   }, [query.error, router]);
 
   const mutation = useMutation({
-    mutationFn: async ({ id, patch }: { id: number; patch: OperationActionPatch; suppressUndo?: boolean }) => {
+    mutationFn: async ({ id, patch }: { id: number; patch: OperationActionPatch; suppressUndo?: boolean; workType?: OperationWorkType }) => {
       const response = await fetch(`/api/operations/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -473,58 +507,78 @@ export function ManufacturingDashboard() {
       } else {
         const quantityPatch = variables.patch;
         const copy = quantityActionCopy[quantityPatch.action];
-        toast.success(`${copy.success}: ${quantityPatch.quantity}`, variables.suppressUndo ? undefined : {
+        const unitLabel = variables.workType === "CAM" ? "CAM task" : `${quantityPatch.quantity} ${quantityPatch.quantity === 1 ? "part" : "parts"}`;
+        toast.success(`${copy.success}: ${unitLabel}`, variables.suppressUndo || variables.workType === "CAM" ? undefined : {
           action: {
             label: "Undo",
             onClick: () => mutation.mutate({
               id: variables.id,
               patch: { action: inverseQuantityAction[quantityPatch.action], quantity: quantityPatch.quantity },
               suppressUndo: true,
+              workType: variables.workType,
             }),
           },
         });
       }
       setQuantityDialog(null);
+      setCamCompletionOpen(false);
     },
     onSettled: () => {
-      if (query.data?.source === "baserow") queryClient.invalidateQueries({ queryKey: ["operations"] });
+      queryClient.invalidateQueries({ queryKey: ["operations"] });
     },
   });
 
-  const bulkClaimMutation = useMutation({
-    mutationFn: async (claims: { id: number; quantity: number }[]) => {
-      const results = await Promise.allSettled(claims.map(async (claim) => {
-        const response = await fetch(`/api/operations/${claim.id}`, {
+  const bulkActionMutation = useMutation({
+    mutationFn: async ({
+      action,
+      items,
+      programPath,
+      notes,
+    }: {
+      action: BulkAction;
+      items: { id: number; quantity: number; workType: OperationWorkType }[];
+      programPath: string;
+      notes: string;
+    }) => {
+      const results = await Promise.allSettled(items.map(async (item) => {
+        const response = await fetch(`/api/operations/${item.id}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "claim", quantity: claim.quantity }),
+          body: JSON.stringify({
+            action,
+            quantity: item.quantity,
+            ...(action === "complete" && item.workType === "CAM" ? { programPath, notes } : {}),
+          }),
         });
         const body = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(body.error ?? "Claim failed");
-        return { claim, updated: body.updated as Partial<ManufacturingOperation> | undefined };
+        if (!response.ok) throw new Error(body.error ?? (action === "claim" ? "Claim failed" : "Completion failed"));
+        return { item, updated: body.updated as Partial<ManufacturingOperation> | undefined };
       }));
       const succeeded = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
       const failed = results.length - succeeded.length;
       if (succeeded.length === 0) {
         const firstFailure = results.find((result) => result.status === "rejected");
-        throw new Error(firstFailure?.status === "rejected" && firstFailure.reason instanceof Error ? firstFailure.reason.message : "Unable to claim selected operations");
+        throw new Error(firstFailure?.status === "rejected" && firstFailure.reason instanceof Error
+          ? firstFailure.reason.message
+          : `Unable to ${action} selected operations`);
       }
-      return { succeeded, failed };
+      return { action, succeeded, failed };
     },
-    onSuccess: ({ succeeded, failed }) => {
-      const updates = new Map(succeeded.map(({ claim, updated }) => [claim.id, updated]));
+    onSuccess: ({ action, succeeded, failed }) => {
+      const updates = new Map(succeeded.map(({ item, updated }) => [item.id, updated]));
       queryClient.setQueryData<OperationsResponse>(["operations"], (current) => current ? {
         ...current,
         operations: current.operations.map((operation) => updates.has(operation.id) ? { ...operation, ...updates.get(operation.id) } : operation),
       } : current);
-      const parts = succeeded.reduce((total, item) => total + item.claim.quantity, 0);
-      if (failed > 0) toast.warning(`Claimed ${parts} ${parts === 1 ? "part" : "parts"} across ${succeeded.length} operations; ${failed} failed.`);
-      else toast.success(`Claimed ${parts} ${parts === 1 ? "part" : "parts"} across ${succeeded.length} operations.`);
-      setBulkClaimDialogOpen(false);
-      setBulkClaimIds([]);
+      const workUnits = succeeded.reduce((total, result) => total + result.item.quantity, 0);
+      const actionLabel = action === "claim" ? "Claimed" : "Completed";
+      if (failed > 0) toast.warning(`${actionLabel} ${workUnits} ${workUnits === 1 ? "work unit" : "work units"} across ${succeeded.length} operations; ${failed} failed.`);
+      else toast.success(`${actionLabel} ${workUnits} ${workUnits === 1 ? "work unit" : "work units"} across ${succeeded.length} operations.`);
+      setBulkActionDialogOpen(false);
+      setBulkSelectedIds([]);
       operationsGridRef.current?.api.deselectAll();
     },
-    onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to claim selected operations"),
+    onError: (error, variables) => toast.error(error instanceof Error ? error.message : `Unable to ${variables.action} selected operations`),
     onSettled: () => {
       if (query.data?.source === "baserow") queryClient.invalidateQueries({ queryKey: ["operations"] });
     },
@@ -561,6 +615,7 @@ export function ManufacturingDashboard() {
   const filtered = useMemo(() => {
     const term = search.trim().toLowerCase();
     return operations.filter((operation) => {
+      if (workType !== "all" && operation.workType !== workType) return false;
       if (machine !== "all" && operation.machine !== machine) return false;
       if (sourceDocument === "missing" && operation.documentName) return false;
       if (sourceDocument !== "all" && sourceDocument !== "missing" && operation.documentName !== sourceDocument) return false;
@@ -568,13 +623,30 @@ export function ManufacturingDashboard() {
       const claimable = isOperationClaimable(operation);
       if (view === "available" && !claimable && !isOperationStealable(operation, query.data?.user ?? null)) return false;
       if (view === "mine" && allocation.claimed === 0) return false;
-      if (term && ![operation.partNumber, operation.partName, operation.documentName, operation.material, operation.machine, operation.operationNumber].join(" ").toLowerCase().includes(term)) return false;
+      if (term && ![operation.partNumber, operation.partName, operation.documentName, operation.material, operation.machine, operation.operationNumber, operation.workType, operation.camProgramPath].join(" ").toLowerCase().includes(term)) return false;
       return true;
     });
-  }, [machine, operations, query.data?.user, search, sourceDocument, view]);
+  }, [machine, operations, query.data?.user, search, sourceDocument, view, workType]);
 
-  const bulkClaimOperations = useMemo(() => operations.filter((operation) => bulkClaimIds.includes(operation.id) && isOperationClaimable(operation)), [bulkClaimIds, operations]);
-  const bulkClaimParts = bulkClaimOperations.reduce((total, operation) => total + operation.availableQuantity, 0);
+  const bulkItems = useMemo(() => operations.flatMap((operation) => {
+    if (!bulkSelectedIds.includes(operation.id)) return [];
+    const plan = bulkActionPlan(operation, query.data?.user ?? null, view);
+    return plan ? [{ operation, ...plan }] : [];
+  }), [bulkSelectedIds, operations, query.data?.user, view]);
+  const selectedBulkActions = new Set(bulkItems.map((item) => item.action));
+  const bulkAction = selectedBulkActions.size === 1 ? [...selectedBulkActions][0] : null;
+  const hasMixedBulkActions = selectedBulkActions.size > 1;
+  const bulkWorkUnits = bulkItems.reduce((total, item) => total + item.quantity, 0);
+  const bulkCamCount = bulkAction === "complete"
+    ? bulkItems.filter(({ operation }) => operation.workType === "CAM").length
+    : 0;
+  const bulkButtonLabel = hasMixedBulkActions
+    ? "Mixed selection"
+    : bulkAction === "claim" || (!bulkAction && view === "available")
+      ? "Bulk claim"
+      : bulkAction === "complete" || (!bulkAction && view === "mine")
+        ? "Mark complete"
+        : "Bulk action";
 
   const stats = useMemo(() => ({
     ready: operations.filter((operation) => ["Ready", "In Progress", "Needs Rework"].includes(operation.status) && operation.availableQuantity > 0).length,
@@ -586,7 +658,7 @@ export function ManufacturingDashboard() {
   const openOperation = (operation: ManufacturingOperation) => setSelectedId(operation.id);
   const runQuantityAction = (action: OperationQuantityAction, quantity: number) => {
     if (!selected) return;
-    mutation.mutate({ id: selected.id, patch: { action, quantity } });
+    mutation.mutate({ id: selected.id, patch: { action, quantity }, workType: selected.workType });
   };
   const requestQuantityAction = (action: OperationQuantityAction, max: number) => {
     if (!isShopName(userName)) {
@@ -594,9 +666,35 @@ export function ManufacturingDashboard() {
       toast.info("Set your first name and last initial before recording work");
       return;
     }
+    if (selected?.workType === "CAM" && action === "complete") {
+      setCamProgramPath(selected.camProgramPath ?? "");
+      setCamNotes(selected.camNotes);
+      setCamCompletionOpen(true);
+      return;
+    }
     if (max <= 1) return runQuantityAction(action, 1);
     setQuantityDraft(String(max));
     setQuantityDialog({ action, max });
+  };
+  const completeCam = () => {
+    if (!selected || selected.workType !== "CAM") return;
+    if (!camProgramPath.trim()) {
+      toast.error("Enter the shared-drive program path before completing CAM");
+      return;
+    }
+    mutation.mutate({
+      id: selected.id,
+      patch: { action: "complete", quantity: 1, programPath: camProgramPath.trim(), notes: camNotes.trim() },
+      workType: "CAM",
+    });
+  };
+  const copyProgramPath = async (programPath: string) => {
+    try {
+      await navigator.clipboard.writeText(programPath);
+      toast.success("Program path copied");
+    } catch {
+      toast.error("Unable to copy the program path");
+    }
   };
   const requestSteal = () => {
     if (!isShopName(userName)) {
@@ -606,14 +704,21 @@ export function ManufacturingDashboard() {
     }
     setStealDialogOpen(true);
   };
-  const requestBulkClaim = () => {
-    if (bulkClaimOperations.length === 0) return;
+  const requestBulkAction = () => {
+    if (bulkItems.length === 0 || !bulkAction) return;
     if (!isShopName(userName)) {
       openProfile();
       toast.info("Set your first name and last initial before recording work");
       return;
     }
-    setBulkClaimDialogOpen(true);
+    setBulkCamProgramPath("");
+    setBulkCamNotes("");
+    setBulkActionDialogOpen(true);
+  };
+  const changeQueueView = (nextView: QueueView) => {
+    setView(nextView);
+    setBulkSelectedIds([]);
+    operationsGridRef.current?.api.deselectAll();
   };
   const openProfile = () => {
     const match = userName.match(/^(.+?)\s+([\p{L}])\.$/u);
@@ -627,10 +732,11 @@ export function ManufacturingDashboard() {
     { field: "partName", headerName: "DESCRIPTION", minWidth: 230, flex: 1 },
     { field: "material", headerName: "MATERIAL", minWidth: 165, valueFormatter: ({ value }) => value || "Unspecified" },
     { field: "documentName", headerName: "SOURCE DOCUMENT", minWidth: 175, valueFormatter: ({ value }) => value || "Not synced" },
-    { field: "quantity", headerName: "REQUIRED", width: 98, filter: "agNumberColumnFilter" },
+    { field: "taskQuantity", headerName: "REQUIRED", width: 98, filter: "agNumberColumnFilter" },
     { field: "availableQuantity", headerName: "AVAILABLE", width: 98, filter: "agNumberColumnFilter" },
     { field: "completedQuantity", headerName: "DONE", width: 82, filter: "agNumberColumnFilter" },
-    { field: "operationNumber", headerName: "OP", width: 90, filter: true },
+    { field: "operationNumber", headerName: "OP", width: 125, filter: true, valueFormatter: ({ data, value }) => data ? operationLabel(data) : value },
+    { field: "workType", headerName: "TYPE", width: 128, filter: true },
     { field: "machine", headerName: "MACHINE", minWidth: 175, filter: true },
     { field: "status", headerName: "STATUS", minWidth: 145, cellRenderer: StatusCell },
     { field: "machinist", headerName: "MACHINIST", minWidth: 180, valueFormatter: ({ value }) => value || "—" },
@@ -644,8 +750,10 @@ export function ManufacturingDashboard() {
     selectAll: "all" as const,
     hideDisabledCheckboxes: false,
     enableClickSelection: false,
-    isRowSelectable: ({ data }: { data?: ManufacturingOperation }) => Boolean(data && isOperationClaimable(data)),
-  }), []);
+    isRowSelectable: ({ data }: { data?: ManufacturingOperation }) => Boolean(
+      data && bulkActionPlan(data, query.data?.user ?? null, view),
+    ),
+  }), [query.data?.user, view]);
 
   return (
     <main className="min-h-screen bg-background text-foreground">
@@ -762,7 +870,7 @@ export function ManufacturingDashboard() {
             <div className="flex flex-col gap-3 xl:flex-row xl:items-center">
               <div className="flex w-full overflow-x-auto rounded-lg bg-muted p-1 xl:w-auto">
                 {([{ id: "available", label: "Available" }, { id: "mine", label: "My work" }, { id: "all", label: "All operations" }] as const).map((item) => (
-                  <Button key={item.id} size="sm" variant="ghost" onClick={() => setView(item.id)} className={cn("min-w-fit", view === item.id && "bg-card text-foreground shadow-sm hover:bg-card")}>
+                  <Button key={item.id} size="sm" variant="ghost" onClick={() => changeQueueView(item.id)} className={cn("min-w-fit", view === item.id && "bg-card text-foreground shadow-sm hover:bg-card")}>
                     {item.label}{item.id === "available" && <span className="ml-1 rounded bg-emerald-100 px-1.5 text-[10px] font-bold text-emerald-800">{stats.ready}</span>}
                   </Button>
                 ))}
@@ -771,6 +879,10 @@ export function ManufacturingDashboard() {
                 <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
                 <Input value={search} onChange={(event) => setSearch(event.target.value)} className="h-9 bg-card pl-9" placeholder="Search part, assembly, operation…" />
               </div>
+              <Select value={workType} onValueChange={(value) => setWorkType((value ?? "all") as WorkTypeFilter)}>
+                <SelectTrigger className="h-9 w-full bg-card xl:w-48"><Code2 className="text-muted-foreground" /><SelectValue placeholder="All work types" /></SelectTrigger>
+                <SelectContent><SelectItem value="all">All work types</SelectItem><SelectItem value="Manufacturing">Manufacturing</SelectItem><SelectItem value="CAM">CAM</SelectItem></SelectContent>
+              </Select>
               <Select value={machine} onValueChange={(value) => setMachine(value ?? "all")}>
                 <SelectTrigger className="h-9 w-full bg-card xl:w-56"><Wrench className="text-muted-foreground" /><SelectValue placeholder="All machines" /></SelectTrigger>
                 <SelectContent><SelectItem value="all">All machines</SelectItem>{machines.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
@@ -781,8 +893,8 @@ export function ManufacturingDashboard() {
               </Select>
               <div className="flex items-center justify-between gap-3 xl:justify-end">
                 <div className="flex items-center gap-2 whitespace-nowrap text-xs text-muted-foreground"><SlidersHorizontal className="size-3.5" /> {filtered.length} shown</div>
-                <Button size="sm" onClick={requestBulkClaim} disabled={bulkClaimOperations.length === 0 || bulkClaimMutation.isPending}>
-                  {bulkClaimMutation.isPending ? <LoaderCircle className="animate-spin" /> : <ListChecks />} Bulk claim{bulkClaimOperations.length > 0 ? ` (${bulkClaimOperations.length})` : ""}
+                <Button size="sm" onClick={requestBulkAction} disabled={bulkItems.length === 0 || !bulkAction || bulkActionMutation.isPending} title={hasMixedBulkActions ? "Select only claimable work or only work assigned to you" : undefined}>
+                  {bulkActionMutation.isPending ? <LoaderCircle className="animate-spin" /> : <ListChecks />} {bulkButtonLabel}{bulkItems.length > 0 ? ` (${bulkItems.length})` : ""}
                 </Button>
               </div>
             </div>
@@ -793,7 +905,7 @@ export function ManufacturingDashboard() {
           ) : query.isError ? (
             <div className="grid min-h-80 place-items-center p-6 text-center"><div><XCircle className="mx-auto mb-3 size-9 text-destructive" /><h2 className="font-semibold">Couldn’t load the queue</h2><p className="mt-1 max-w-md text-sm text-muted-foreground">{query.error.message}</p><Button className="mt-4" onClick={() => query.refetch()}>Try again</Button></div></div>
           ) : filtered.length === 0 ? (
-            <div className="grid min-h-80 place-items-center p-6 text-center"><div><PackageCheck className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h2 className="font-semibold">No operations match</h2><p className="mt-1 text-sm text-muted-foreground">Try another machine or source document, or clear the search.</p><Button variant="outline" className="mt-4" onClick={() => { setMachine("all"); setSourceDocument("all"); setSearch(""); setView("all"); }}>Clear filters</Button></div></div>
+            <div className="grid min-h-80 place-items-center p-6 text-center"><div><PackageCheck className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h2 className="font-semibold">No operations match</h2><p className="mt-1 text-sm text-muted-foreground">Try another work type, machine, or source document, or clear the search.</p><Button variant="outline" className="mt-4" onClick={() => { setWorkType("all"); setMachine("all"); setSourceDocument("all"); setSearch(""); setView("all"); }}>Clear filters</Button></div></div>
           ) : (
             <>
               <div className="hidden h-[min(59vh,680px)] min-h-[430px] md:block">
@@ -804,7 +916,7 @@ export function ManufacturingDashboard() {
                   columnDefs={columnDefs}
                   rowSelection={rowSelection}
                   selectionColumnDef={{ width: 48, pinned: "left", resizable: false }}
-                  onSelectionChanged={({ api }) => setBulkClaimIds(api.getSelectedRows().map((operation) => operation.id))}
+                  onSelectionChanged={({ api }) => setBulkSelectedIds(api.getSelectedRows().map((operation) => operation.id))}
                   defaultColDef={{ sortable: true, filter: false, resizable: true }}
                   getRowId={({ data }) => String(data.id)}
                   onRowDoubleClicked={({ data }) => data && openOperation(data)}
@@ -817,20 +929,20 @@ export function ManufacturingDashboard() {
               </div>
               <div className="divide-y md:hidden">
                 {filtered.map((operation) => {
-                  const claimable = isOperationClaimable(operation);
-                  const checked = bulkClaimIds.includes(operation.id);
+                  const plan = bulkActionPlan(operation, query.data?.user ?? null, view);
+                  const checked = bulkSelectedIds.includes(operation.id);
                   return (
                     <article key={operation.id} className="flex items-start gap-3 p-4 transition hover:bg-muted/40">
                       <Checkbox
                         className="mt-1"
                         checked={checked}
-                        disabled={!claimable}
-                        aria-label={`Select ${operation.partNumber} ${operation.operationNumber} for bulk claim`}
-                        onCheckedChange={(nextChecked) => setBulkClaimIds((current) => nextChecked ? [...new Set([...current, operation.id])] : current.filter((id) => id !== operation.id))}
+                        disabled={!plan}
+                        aria-label={`Select ${operation.partNumber} ${operationLabel(operation)} to ${plan?.action === "claim" ? "claim" : "mark complete"}`}
+                        onCheckedChange={(nextChecked) => setBulkSelectedIds((current) => nextChecked ? [...new Set([...current, operation.id])] : current.filter((id) => id !== operation.id))}
                       />
                       <button onClick={() => openOperation(operation)} className="min-w-0 flex-1 text-left">
                         <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary">{operation.partNumber}</p><h3 className="mt-1 font-semibold">{operation.partName}</h3></div><StatusBadge status={operation.status} /></div>
-                        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground"><span>{operation.operationNumber}</span><span className="flex items-center gap-1"><Wrench className="size-3" />{operation.machine}</span><span>{operation.completedQuantity}/{operation.quantity} done</span><span>{operation.availableQuantity} available</span></div>
+                        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground"><span>{operationLabel(operation)}</span><Badge variant="outline">{operation.workType}</Badge><span className="flex items-center gap-1"><Wrench className="size-3" />{operation.machine}</span><span>{operation.completedQuantity}/{operation.taskQuantity} done</span><span>{operation.availableQuantity} available</span></div>
                       </button>
                     </article>
                   );
@@ -840,7 +952,7 @@ export function ManufacturingDashboard() {
           )}
         </div>
         <div className="mt-3 flex flex-col gap-1 text-[11px] text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
-          <span>Open an operation to claim, release, complete, or undo quantities.</span>
+          <span>Open a manufacturing or CAM operation to claim, release, complete, or undo work.</span>
           <span>Last refreshed {query.data ? formatDate(query.data.syncedAt) : "—"}</span>
         </div>
       </section> : workspaceView === "fabrication" ? (
@@ -860,8 +972,8 @@ export function ManufacturingDashboard() {
           {selected && (
             <>
               <SheetHeader className="border-b p-6 pr-14">
-                <div className="mb-2 flex items-center gap-2"><StatusBadge status={selected.status} /><Badge variant="outline">{selected.operationNumber}</Badge></div>
-                <SheetTitle className="text-2xl font-bold tracking-tight">{selected.partName}</SheetTitle>
+                <div className="mb-2 flex items-center gap-2"><StatusBadge status={selected.status} /><Badge variant="outline">{operationLabel(selected)}</Badge><Badge variant="outline">{selected.workType}</Badge></div>
+                <SheetTitle className="text-2xl font-bold tracking-tight">{selected.workType === "CAM" ? `CAM — ${selected.partName}` : selected.partName}</SheetTitle>
                 <SheetDescription className="font-mono text-xs font-semibold text-primary">{selected.partNumber}</SheetDescription>
               </SheetHeader>
 
@@ -870,14 +982,37 @@ export function ManufacturingDashboard() {
                   <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Operation details</h3>
                   <div className="grid grid-cols-2 overflow-hidden rounded-xl border">
                     {[
-                      ["Machine", selected.machine], ["Required", String(selected.quantity)],
+                      [selected.workType === "CAM" ? "Target machine" : "Machine", selected.machine], ["Work", operationLabel(selected)],
+                      ["Part quantity", String(selected.quantity)], ["Task quantity", String(selected.taskQuantity)],
                       ["Available", String(selected.availableQuantity)], ["Claimed", String(selected.claimedQuantity)],
                       ["Completed", String(selected.completedQuantity)], ["Your claim", String(selectedAllocation.claimed)],
                       ["Source document", selected.documentName || "Not synced"], ["Machinist", selected.machinist || "Unclaimed"],
                       ["Started", formatDate(selected.startedAt)], ["Finished", formatDate(selected.completedAt)],
-                    ].map(([label, value], index) => <div key={label} className={cn("p-3", index % 2 === 0 && "border-r", index < 8 && "border-b")}><p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{label}</p><p className="mt-1 text-sm font-semibold">{value}</p></div>)}
+                    ].map(([label, value], index, details) => <div key={label} className={cn("p-3", index % 2 === 0 && "border-r", index < details.length - 2 && "border-b")}><p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{label}</p><p className="mt-1 text-sm font-semibold">{value}</p></div>)}
                   </div>
                 </section>
+
+                {(selected.workType === "CAM" || selected.camDependency) && (
+                  <section>
+                    <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">CAM handoff</h3>
+                    <div className="space-y-3 rounded-xl border bg-muted/20 p-4">
+                      {selected.workType === "Manufacturing" && selected.camDependency && (
+                        <div className="flex flex-wrap items-center gap-2"><StatusBadge status={selected.camDependency.status} /><span className="text-xs text-muted-foreground">CAM for {selected.operationNumber}</span></div>
+                      )}
+                      {(selected.workType === "CAM" ? selected.camProgramPath : selected.camDependency?.programPath) ? (
+                        <div>
+                          <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Shared-drive program path</p>
+                          <div className="mt-1.5 flex items-start gap-2"><code className="min-w-0 flex-1 break-all rounded-lg bg-background p-2.5 text-xs">{selected.workType === "CAM" ? selected.camProgramPath : selected.camDependency?.programPath}</code><Button size="icon" variant="outline" aria-label="Copy program path" onClick={() => copyProgramPath((selected.workType === "CAM" ? selected.camProgramPath : selected.camDependency?.programPath) ?? "")}><ClipboardCopy /></Button></div>
+                        </div>
+                      ) : (
+                        <p className="text-sm text-muted-foreground">No program path has been recorded yet.</p>
+                      )}
+                      {(selected.workType === "CAM" ? selected.camNotes : selected.camDependency?.notes) && (
+                        <div><p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Setup notes</p><p className="mt-1 whitespace-pre-wrap text-sm">{selected.workType === "CAM" ? selected.camNotes : selected.camDependency?.notes}</p></div>
+                      )}
+                    </div>
+                  </section>
+                )}
 
                 <section>
                   <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Routing progress</h3>
@@ -909,12 +1044,12 @@ export function ManufacturingDashboard() {
               </div>
 
               <SheetFooter className="sticky bottom-0 border-t bg-card/95 p-4 backdrop-blur">
-                {["Ready", "In Progress", "Needs Rework"].includes(selected.status) && selected.availableQuantity > 0 && <Button size="lg" className="h-11" onClick={() => requestQuantityAction("claim", selected.availableQuantity)} disabled={mutation.isPending}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <CircleDot />} Claim {selected.availableQuantity === 1 ? "part" : "parts"}</Button>}
-                {isOperationStealable(selected, query.data?.user ?? null) && <Button size="lg" variant="destructive" className="h-11" onClick={requestSteal} disabled={mutation.isPending}><TriangleAlert /> Steal production requirement</Button>}
+                {["Ready", "In Progress", "Needs Rework"].includes(selected.status) && selected.availableQuantity > 0 && <Button size="lg" className="h-11" onClick={() => requestQuantityAction("claim", selected.availableQuantity)} disabled={mutation.isPending}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <CircleDot />} {selected.workType === "CAM" ? "Claim CAM task" : `Claim ${selected.availableQuantity === 1 ? "part" : "parts"}`}</Button>}
+                {isOperationStealable(selected, query.data?.user ?? null) && <Button size="lg" variant="destructive" className="h-11" onClick={requestSteal} disabled={mutation.isPending}><TriangleAlert /> Steal {selected.workType === "CAM" ? "CAM task" : "production requirement"}</Button>}
                 {selectedAllocation.claimed > 0 && <Button size="lg" className="h-11 bg-emerald-600 hover:bg-emerald-700" onClick={() => requestQuantityAction("complete", selectedAllocation.claimed)} disabled={mutation.isPending}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <Check />} Mark complete</Button>}
                 {selectedAllocation.claimed > 0 && <Button variant="outline" onClick={() => requestQuantityAction("release", selectedAllocation.claimed)} disabled={mutation.isPending}><RotateCcw /> Release claim</Button>}
                 {selectedAllocation.completed > 0 && <Button variant="outline" onClick={() => requestQuantityAction("undo_complete", selectedAllocation.completed)} disabled={mutation.isPending}><RotateCcw /> Undo completion</Button>}
-                {selected.status === "Complete" && <div className="flex items-center justify-center gap-2 rounded-xl bg-emerald-50 p-3 text-sm font-semibold text-emerald-800"><Check className="size-4" /> {selected.completedQuantity} of {selected.quantity} completed by {selected.machinist || "machinist"}</div>}
+                {selected.status === "Complete" && <div className="flex items-center justify-center gap-2 rounded-xl bg-emerald-50 p-3 text-sm font-semibold text-emerald-800"><Check className="size-4" /> {selected.workType === "CAM" ? "CAM completed" : `${selected.completedQuantity} of ${selected.taskQuantity} completed`} by {selected.machinist || "machinist"}</div>}
                 <Button variant="outline" onClick={() => setSelectedId(null)}>Close</Button>
               </SheetFooter>
             </>
@@ -944,11 +1079,34 @@ export function ManufacturingDashboard() {
         </DialogContent>
       </Dialog>
 
+      <Dialog open={camCompletionOpen} onOpenChange={setCamCompletionOpen}>
+        <DialogContent>
+          <form onSubmit={(event) => { event.preventDefault(); completeCam(); }}>
+            <DialogHeader>
+              <DialogTitle>Complete {selected ? operationLabel(selected) : "CAM"}</DialogTitle>
+              <DialogDescription>Record the shared-drive program location so the machine operator can retrieve the approved CAM output.</DialogDescription>
+            </DialogHeader>
+            <div className="my-5 space-y-4">
+              <div>
+                <label className="mb-1.5 block text-xs font-semibold" htmlFor="cam-program-path">Shared-drive program path</label>
+                <Input id="cam-program-path" value={camProgramPath} onChange={(event) => setCamProgramPath(event.target.value)} placeholder="\\\\server\\manufacturing\\program.nc" maxLength={1024} required autoFocus />
+                <p className="mt-1.5 text-xs text-muted-foreground">UNC and mapped-drive paths are accepted. The app stores and copies the path without trying to open it.</p>
+              </div>
+              <div>
+                <label className="mb-1.5 block text-xs font-semibold" htmlFor="cam-notes">Setup notes <span className="font-normal text-muted-foreground">(optional)</span></label>
+                <textarea id="cam-notes" value={camNotes} onChange={(event) => setCamNotes(event.target.value)} maxLength={5000} placeholder="Workholding, tooling, post-processor, or setup details…" className="min-h-28 w-full resize-y rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring focus:ring-3 focus:ring-ring/50" />
+              </div>
+            </div>
+            <DialogFooter><Button type="button" variant="outline" onClick={() => setCamCompletionOpen(false)}>Cancel</Button><Button type="submit" disabled={mutation.isPending || !camProgramPath.trim()}>{mutation.isPending && <LoaderCircle className="animate-spin" />}Complete CAM</Button></DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={stealDialogOpen} onOpenChange={setStealDialogOpen}>
         <DialogContent>
           <DialogHeader>
             <div className="mb-1 grid size-10 place-items-center rounded-full bg-destructive/10 text-destructive"><TriangleAlert className="size-5" /></div>
-            <DialogTitle>Steal this production requirement?</DialogTitle>
+            <DialogTitle>Steal this {selected?.workType === "CAM" ? "CAM task" : "production requirement"}?</DialogTitle>
             <DialogDescription>
               This immediately transfers the claimed work from {selectedOtherClaimants.map((claimant) => claimant.name).join(", ") || "the current claimant"} to you. They will receive a website alert and an email. Completed work will not change.
             </DialogDescription>
@@ -970,26 +1128,55 @@ export function ManufacturingDashboard() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={bulkClaimDialogOpen} onOpenChange={setBulkClaimDialogOpen}>
+      <Dialog open={bulkActionDialogOpen} onOpenChange={setBulkActionDialogOpen}>
         <DialogContent>
-          <DialogHeader>
-            <div className="mb-1 grid size-10 place-items-center rounded-full bg-primary/10 text-primary"><ListChecks className="size-5" /></div>
-            <DialogTitle>Claim {bulkClaimOperations.length} operations?</DialogTitle>
-            <DialogDescription>This claims every currently available part on the selected operations. Existing claims and completed quantities are unchanged.</DialogDescription>
-          </DialogHeader>
-          <div className="rounded-xl border bg-muted/30 p-3 text-sm">
-            <p className="font-semibold">{bulkClaimParts} {bulkClaimParts === 1 ? "part" : "parts"} total</p>
-            <p className="mt-1 text-muted-foreground">Across {bulkClaimOperations.length} selected {bulkClaimOperations.length === 1 ? "operation" : "operations"}.</p>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setBulkClaimDialogOpen(false)}>Cancel</Button>
-            <Button
-              onClick={() => bulkClaimMutation.mutate(bulkClaimOperations.map((operation) => ({ id: operation.id, quantity: operation.availableQuantity })))}
-              disabled={bulkClaimOperations.length === 0 || bulkClaimMutation.isPending}
-            >
-              {bulkClaimMutation.isPending && <LoaderCircle className="animate-spin" />} Claim selected
-            </Button>
-          </DialogFooter>
+          <form onSubmit={(event) => {
+            event.preventDefault();
+            if (!bulkAction) return;
+            bulkActionMutation.mutate({
+              action: bulkAction,
+              items: bulkItems.map(({ operation, quantity }) => ({
+                id: operation.id,
+                quantity,
+                workType: operation.workType,
+              })),
+              programPath: bulkCamProgramPath.trim(),
+              notes: bulkCamNotes.trim(),
+            });
+          }}>
+            <DialogHeader>
+              <div className="mb-1 grid size-10 place-items-center rounded-full bg-primary/10 text-primary"><ListChecks className="size-5" /></div>
+              <DialogTitle>{bulkAction === "claim" ? "Claim" : "Complete"} {bulkItems.length} operations?</DialogTitle>
+              <DialogDescription>{bulkAction === "claim"
+                ? "This claims every currently available work unit on the selected operations."
+                : "This marks all work you currently have claimed on the selected operations as complete."}</DialogDescription>
+            </DialogHeader>
+            <div className="my-5 space-y-4">
+              <div className="rounded-xl border bg-muted/30 p-3 text-sm">
+                <p className="font-semibold">{bulkWorkUnits} {bulkWorkUnits === 1 ? "work unit" : "work units"} total</p>
+                <p className="mt-1 text-muted-foreground">Across {bulkItems.length} selected {bulkItems.length === 1 ? "operation" : "operations"}.</p>
+              </div>
+              {bulkCamCount > 0 && (
+                <div className="space-y-4 rounded-xl border p-4">
+                  <div>
+                    <label className="mb-1.5 block text-xs font-semibold" htmlFor="bulk-cam-program-path">Shared-drive program path</label>
+                    <Input id="bulk-cam-program-path" value={bulkCamProgramPath} onChange={(event) => setBulkCamProgramPath(event.target.value)} placeholder="\\\\server\\manufacturing\\program.nc" maxLength={1024} required autoFocus />
+                    <p className="mt-1.5 text-xs text-muted-foreground">Applied to all {bulkCamCount} selected CAM {bulkCamCount === 1 ? "task" : "tasks"}.</p>
+                  </div>
+                  <div>
+                    <label className="mb-1.5 block text-xs font-semibold" htmlFor="bulk-cam-notes">Setup notes <span className="font-normal text-muted-foreground">(optional)</span></label>
+                    <textarea id="bulk-cam-notes" value={bulkCamNotes} onChange={(event) => setBulkCamNotes(event.target.value)} maxLength={5000} placeholder="Workholding, tooling, post-processor, or setup details…" className="min-h-24 w-full resize-y rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring focus:ring-3 focus:ring-ring/50" />
+                  </div>
+                </div>
+              )}
+            </div>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setBulkActionDialogOpen(false)}>Cancel</Button>
+              <Button type="submit" disabled={bulkItems.length === 0 || !bulkAction || bulkActionMutation.isPending || (bulkCamCount > 0 && !bulkCamProgramPath.trim())}>
+                {bulkActionMutation.isPending && <LoaderCircle className="animate-spin" />} {bulkAction === "claim" ? "Claim selected" : "Mark selected complete"}
+              </Button>
+            </DialogFooter>
+          </form>
         </DialogContent>
       </Dialog>
 

@@ -14,9 +14,14 @@ const shared = {
   onshapeUrl: "https://frc190.onshape.com",
   documentName: "A-26C-0001",
   material: "6061-T6 Aluminum",
+  taskQuantity: 0,
+  workType: "Manufacturing" as const,
   machinist: "",
   startedAt: null,
   completedAt: null,
+  camProgramPath: null,
+  camNotes: "",
+  camDependency: null,
 } as const;
 
 const DEMO_OPERATION_ROWS: ManufacturingOperation[] = [
@@ -36,26 +41,52 @@ const DEMO_OPERATION_ROWS: ManufacturingOperation[] = [
   { ...shared, id: 14, operationKey: "P-190B-260629|OP1", partNumber: "P-190B-260629", partName: "Second Kicker Shaft", assemblyNumber: "A-190B-261061", quantity: 1, operationNumber: "OP1", machine: "Lathe", status: "Needs Rework" },
   { ...shared, id: 15, operationKey: "P-190B-260633|OP1", partNumber: "P-190B-260633", partName: "Kicker Gearbox Plate A", assemblyNumber: "A-190B-261061", quantity: 1, operationNumber: "OP1", machine: "Haas CNC", status: "In Progress", machinist: "Demo Machinist", startedAt: "2026-09-01T13:42:00.000Z" },
   { ...shared, id: 16, operationKey: "P-190B-260640|OP1", partNumber: "P-190B-260640", partName: "Completed QC Sample", assemblyNumber: "A-190B-261061", quantity: 1, operationNumber: "OP1", machine: "Haas CNC", status: "Complete", machinist: "Demo Machinist", startedAt: "2026-09-01T12:15:00.000Z", completedAt: "2026-09-01T13:05:00.000Z" },
+  { ...shared, id: 17, operationKey: "P-190B-260650|OP2|CAM", partNumber: "P-190B-260650", partName: "Flywheel", assemblyNumber: "A-190B-261131", quantity: 2, operationNumber: "OP2", workType: "CAM", machine: "Haas CNC", status: "Ready" },
+  { ...shared, id: 18, operationKey: "P-190B-260621|OP1|CAM", partNumber: "P-190B-260621", partName: "Inner Kicker Arm Plate — Right", assemblyNumber: "A-190B-261061", quantity: 1, operationNumber: "OP1", workType: "CAM", machine: "Shop Sabre CNC", status: "Ready" },
+  { ...shared, id: 19, operationKey: "P-190B-260633|OP1|CAM", partNumber: "P-190B-260633", partName: "Kicker Gearbox Plate A", assemblyNumber: "A-190B-261061", quantity: 1, operationNumber: "OP1", workType: "CAM", machine: "Haas CNC", status: "Ready" },
+  { ...shared, id: 20, operationKey: "P-190B-260640|OP1|CAM", partNumber: "P-190B-260640", partName: "Completed QC Sample", assemblyNumber: "A-190B-261061", quantity: 1, operationNumber: "OP1", workType: "CAM", machine: "Haas CNC", status: "Ready" },
 ];
 
-export const DEMO_OPERATIONS: ManufacturingOperation[] = DEMO_OPERATION_ROWS.map((operation) => {
+const DEMO_OPERATIONS_WITH_QUANTITIES: ManufacturingOperation[] = DEMO_OPERATION_ROWS.map((operation) => {
+  const taskQuantity = operation.workType === "CAM" ? 1 : operation.quantity;
   if (operation.status === "Complete") {
     return {
       ...operation,
-      completedQuantity: operation.quantity,
-      allocations: [{ userId: "demo-admin", name: "Demo M.", claimed: 0, completed: operation.quantity }],
+      taskQuantity,
+      completedQuantity: taskQuantity,
+      allocations: [{ userId: "demo-admin", name: "Demo M.", claimed: 0, completed: taskQuantity }],
       machinist: "Demo M.",
     };
   }
   if (operation.status === "In Progress") {
     return {
       ...operation,
-      claimedQuantity: operation.quantity,
-      allocations: [{ userId: "demo-machinist", name: "Demo M.", claimed: operation.quantity, completed: 0 }],
+      taskQuantity,
+      claimedQuantity: taskQuantity,
+      allocations: [{ userId: "demo-machinist", name: "Demo M.", claimed: taskQuantity, completed: 0 }],
       machinist: "Demo M.",
     };
   }
-  return { ...operation, availableQuantity: operation.status === "Ready" ? operation.quantity : 0 };
+  return { ...operation, taskQuantity, availableQuantity: operation.status === "Ready" ? taskQuantity : 0 };
+});
+
+export const DEMO_OPERATIONS: ManufacturingOperation[] = DEMO_OPERATIONS_WITH_QUANTITIES.map((operation) => {
+  if (operation.workType !== "Manufacturing") return operation;
+  const cam = DEMO_OPERATIONS_WITH_QUANTITIES.find((candidate) =>
+    candidate.workType === "CAM"
+    && candidate.assemblyNumber === operation.assemblyNumber
+    && candidate.partNumber === operation.partNumber
+    && candidate.operationNumber === operation.operationNumber,
+  );
+  return cam ? {
+    ...operation,
+    camDependency: {
+      operationId: cam.id,
+      status: cam.status,
+      programPath: cam.camProgramPath,
+      notes: cam.camNotes,
+    },
+  } : operation;
 });
 
 export const DEMO_FABRICATION_JOBS: FabricationJob[] = [

@@ -11,6 +11,7 @@ export type OperationStatus = (typeof OPERATION_STATUSES)[number];
 
 export type DataSource = "baserow" | "demo";
 export type UserRole = "machinist" | "admin";
+export type OperationWorkType = "Manufacturing" | "CAM";
 export type OperationQuantityAction = "claim" | "release" | "complete" | "undo_complete";
 export type OperationAction = OperationQuantityAction | "steal";
 export type FabricationAction = "claim" | "release" | "complete" | "undo_complete";
@@ -22,6 +23,13 @@ export interface OperationAllocation {
   completed: number;
 }
 
+export interface CamDependency {
+  operationId: number;
+  status: OperationStatus;
+  programPath: string | null;
+  notes: string;
+}
+
 export interface ManufacturingOperation {
   id: number;
   operationKey: string;
@@ -31,17 +39,22 @@ export interface ManufacturingOperation {
   documentName: string | null;
   material: string | null;
   quantity: number;
+  taskQuantity: number;
   claimedQuantity: number;
   completedQuantity: number;
   availableQuantity: number;
   allocations: OperationAllocation[];
   operationNumber: "OP1" | "OP2" | "OP3" | "OP4";
+  workType: OperationWorkType;
   machine: string;
   status: OperationStatus;
   machinist: string;
   startedAt: string | null;
   completedAt: string | null;
   activeInRouting: boolean;
+  camProgramPath: string | null;
+  camNotes: string;
+  camDependency: CamDependency | null;
   drawingUrl: string | null;
   drawingPdfUrl: string | null;
   drawingPdfName: string | null;
@@ -99,6 +112,8 @@ export interface OperationPatch {
 export interface OperationQuantityPatch {
   action: OperationQuantityAction;
   quantity: number;
+  programPath?: string;
+  notes?: string;
 }
 
 export interface OperationStealPatch {

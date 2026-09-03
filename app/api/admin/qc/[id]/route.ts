@@ -26,6 +26,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     const operationData = await getOperations();
     const operation = operationData.operations.find((item) => item.id === operationId);
     if (!operation) return NextResponse.json({ error: "Operation not found" }, { status: 404 });
+    if (operation.workType !== "Manufacturing") return NextResponse.json({ error: "CAM tasks do not enter manufacturing QC" }, { status: 409 });
     if (operation.status !== "Complete") return NextResponse.json({ error: "Only completed operations can be reviewed" }, { status: 409 });
 
     const admin = createAdminClient();

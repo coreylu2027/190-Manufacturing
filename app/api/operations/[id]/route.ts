@@ -15,6 +15,12 @@ const patchSchema = z.object({
 const quantityActionSchema = z.object({
   action: z.enum(["claim", "release", "complete", "undo_complete"]),
   quantity: z.number().int().positive(),
+  programPath: z.string().trim().max(1024).optional(),
+  notes: z.string().trim().max(5000).optional(),
+}).superRefine((value, context) => {
+  if (value.action !== "complete" && (value.programPath !== undefined || value.notes !== undefined)) {
+    context.addIssue({ code: "custom", message: "CAM handoff details are only accepted when completing work" });
+  }
 });
 
 const stealActionSchema = z.object({
@@ -47,18 +53,22 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     }
     if ("action" in parsed.data && parsed.data.action === "steal") {
       const stolen = await stealOperationClaim(operationId, { id: user?.id ?? "demo-admin", name: machinist });
+      const operationLabel = stolen.context.workType === "CAM"
+        ? `CAM for ${stolen.context.operationNumber}`
+        : stolen.context.operationNumber;
       const recipients = stolen.displaced.filter((claimant) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(claimant.userId));
       const deliveries = await Promise.all(recipients.map((claimant) => createNotification({
         recipientId: claimant.userId,
         type: "production_requirement_stolen",
         title: "Your production requirement was stolen",
-        message: `${machinist} took over ${claimant.quantity} claimed ${claimant.quantity === 1 ? "part" : "parts"} for ${stolen.context.partNumber} — ${stolen.context.partName} (${stolen.context.operationNumber}). Completed work was not changed.`,
-        emailSubject: `Claim taken over: ${stolen.context.partNumber} ${stolen.context.operationNumber}`,
+        message: `${machinist} took over ${claimant.quantity} claimed ${claimant.quantity === 1 ? "work unit" : "work units"} for ${stolen.context.partNumber} — ${stolen.context.partName} (${operationLabel}). Completed work was not changed.`,
+        emailSubject: `Claim taken over: ${stolen.context.partNumber} ${operationLabel}`,
         data: {
           operationId: stolen.context.operationId,
           partNumber: stolen.context.partNumber,
           partName: stolen.context.partName,
           operationNumber: stolen.context.operationNumber,
+          workType: stolen.context.workType,
           quantity: claimant.quantity,
           stolenByUserId: user?.id ?? "demo-admin",
           stolenByName: machinist,
@@ -81,10 +91,17 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       ? await applyQuantityAction(operationId, parsed.data.action, parsed.data.quantity, {
           id: user?.id ?? "demo-admin",
           name: machinist,
+        }, {
+          programPath: parsed.data.programPath,
+          notes: parsed.data.notes,
         })
       : await patchOperation(operationId, parsed.data, machinist);
     return NextResponse.json({ updated });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to update operation" }, { status: 502 });
+    const message = error instanceof Error ? error.message : "Unable to update operation";
+    const status = message.includes("cannot be reopened") ? 409
+      : message.includes("program path") || message.includes("single task") ? 400
+        : 502;
+    return NextResponse.json({ error: message }, { status });
   }
 }
