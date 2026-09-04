@@ -34,6 +34,7 @@ export interface ManufacturingOperation {
   id: number;
   operationKey: string;
   partNumber: string;
+  revision: string | null;
   partName: string;
   assemblyNumber: string;
   documentName: string | null;
