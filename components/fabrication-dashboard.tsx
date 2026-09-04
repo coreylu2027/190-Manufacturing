@@ -73,24 +73,9 @@ function StatusCell({ value }: { value: OperationStatus }) {
   return <div className="flex h-full items-center"><StatusBadge status={value} /></div>;
 }
 
-function QcOutcomeBadge({ outcome }: { outcome: string }) {
-  return (
-    <Badge
-      variant="outline"
-      className={cn(
-        "font-semibold",
-        outcome === "Passed" && "border-emerald-200 bg-emerald-100 text-emerald-800",
-        outcome === "Failed" && "border-rose-200 bg-rose-100 text-rose-800",
-        outcome !== "Passed" && outcome !== "Failed" && "border-slate-200 bg-slate-100 text-slate-700",
-      )}
-    >
-      {outcome}
-    </Badge>
-  );
-}
-
-function QcOutcomeCell({ value }: { value: string }) {
-  return <div className="flex h-full items-center"><QcOutcomeBadge outcome={value} /></div>;
+function QcNotesCell({ value }: { value: string }) {
+  const notes = value || "No inspection notes";
+  return <div className="flex h-full min-w-0 items-center"><span className={cn("truncate", !value && "text-muted-foreground") } title={notes}>{notes}</span></div>;
 }
 
 function FinishCell({ value }: { value: string }) {
@@ -206,7 +191,7 @@ export function FabricationDashboard({
       if (color !== "all" && job.color !== color) return false;
       if (view === "available" && job.status !== "Ready") return false;
       if (view === "mine" && !(ownedBy(job, userName) && job.status === "In Progress")) return false;
-      if (term && ![job.partNumber, job.partName, job.documentName, job.color, job.qcOutcome, job.machinist].join(" ").toLocaleLowerCase().includes(term)) return false;
+      if (term && ![job.partNumber, job.partName, job.documentName, job.color, job.qcNotes, job.machinist].join(" ").toLocaleLowerCase().includes(term)) return false;
       return true;
     });
   }, [color, jobs, search, userName, view]);
@@ -225,7 +210,7 @@ export function FabricationDashboard({
     { field: "documentName", headerName: "SOURCE DOCUMENT", minWidth: 175, valueFormatter: ({ value }) => value || "Not synced" },
     { field: "quantity", headerName: "REQUIRED", width: 105, filter: "agNumberColumnFilter" },
     { field: "color", headerName: "FINISH", minWidth: 125, cellRenderer: FinishCell },
-    { field: "qcOutcome", headerName: "QC OUTCOME", minWidth: 145, cellRenderer: QcOutcomeCell },
+    { field: "qcNotes", headerName: "QC NOTES", minWidth: 240, flex: 1, cellRenderer: QcNotesCell },
     { field: "status", headerName: "STATUS", minWidth: 145, cellRenderer: StatusCell },
     { field: "machinist", headerName: "MACHINIST", minWidth: 180, valueFormatter: ({ value }) => value || "—" },
     { headerName: "", width: 102, pinned: "right", sortable: false, filter: false, resizable: false, cellRenderer: ActionCell, cellRendererParams: { onOpen: openJob } },
@@ -302,7 +287,8 @@ export function FabricationDashboard({
               {filtered.map((job) => (
                 <button key={job.id} onClick={() => openJob(job)} className="block w-full p-4 text-left transition hover:bg-muted/40">
                   <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary">{job.partNumber}</p><h3 className="mt-1 font-semibold">{job.partName}</h3><p className="mt-1 font-mono text-[11px] text-muted-foreground">{job.documentName ?? "Document not synced"}</p></div><StatusBadge status={job.status} /></div>
-                  <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground"><span className="flex items-center gap-1"><Paintbrush className="size-3" />{job.color}</span><QcOutcomeBadge outcome={job.qcOutcome} /><span>{job.quantity} required</span><span>{job.machinist || "Unclaimed"}</span></div>
+                  <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground"><span className="flex items-center gap-1"><Paintbrush className="size-3" />{job.color}</span><span>{job.quantity} required</span><span>{job.machinist || "Unclaimed"}</span></div>
+                  <p className={cn("mt-2 line-clamp-2 text-xs", job.qcNotes ? "text-foreground" : "text-muted-foreground")}>QC notes: {job.qcNotes || "No inspection notes"}</p>
                 </button>
               ))}
             </div>
@@ -316,7 +302,7 @@ export function FabricationDashboard({
           {selected && (
             <>
               <SheetHeader className="border-b p-6 pr-14">
-                <div className="mb-2 flex flex-wrap items-center gap-2"><StatusBadge status={selected.status} /><QcOutcomeBadge outcome={selected.qcOutcome} /><Badge variant="outline" className="gap-1.5"><span className={cn("size-2 rounded-full", selected.color.toLocaleLowerCase() === "red" ? "bg-red-600" : "bg-slate-900")} />{selected.color}</Badge></div>
+                <div className="mb-2 flex flex-wrap items-center gap-2"><StatusBadge status={selected.status} /><Badge variant="outline" className="gap-1.5"><span className={cn("size-2 rounded-full", selected.color.toLocaleLowerCase() === "red" ? "bg-red-600" : "bg-slate-900")} />{selected.color}</Badge></div>
                 <SheetTitle className="text-2xl font-bold tracking-tight">{selected.partName}</SheetTitle>
                 <SheetDescription className="font-mono text-xs font-semibold text-primary">{selected.partNumber}</SheetDescription>
               </SheetHeader>
@@ -327,11 +313,17 @@ export function FabricationDashboard({
                   <div className="grid grid-cols-2 overflow-hidden rounded-xl border">
                     {[
                       ["Finish", selected.color], ["Required", String(selected.quantity)],
-                      ["QC outcome", selected.qcOutcome], ["Upstream status", selected.requirementStatus],
-                      ["Source document", selected.documentName || "Not synced"], ["Machinist", selected.machinist || "Unclaimed"],
-                      ["Last synced", formatDate(selected.lastSyncedAt)],
-                    ].map(([label, value], index) => <div key={label} className={cn("p-3", index % 2 === 0 && index < 6 && "border-r", index < 6 && "border-b", label === "Last synced" && "col-span-2")}><p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{label}</p><p className="mt-1 text-sm font-semibold">{value}</p></div>)}
+                      ["Upstream status", selected.requirementStatus], ["Source document", selected.documentName || "Not synced"],
+                      ["Machinist", selected.machinist || "Unclaimed"], ["Last synced", formatDate(selected.lastSyncedAt)],
+                    ].map(([label, value], index) => <div key={label} className={cn("p-3", index % 2 === 0 && "border-r", index < 4 && "border-b")}><p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{label}</p><p className="mt-1 text-sm font-semibold">{value}</p></div>)}
                   </div>
+                </section>
+
+                <section>
+                  <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">QC inspection notes</h3>
+                  <p className={cn("whitespace-pre-wrap rounded-xl border p-4 text-sm leading-6", selected.qcNotes ? "bg-emerald-50/60 text-foreground" : "border-dashed bg-muted/30 text-muted-foreground")}>
+                    {selected.qcNotes || "No inspection notes were recorded."}
+                  </p>
                 </section>
 
                 <section>

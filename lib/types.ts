@@ -82,7 +82,7 @@ export interface FabricationJob {
   documentName: string | null;
   quantity: number;
   color: string;
-  qcOutcome: string;
+  qcNotes: string;
   status: OperationStatus;
   requirementStatus: string;
   machinist: string;

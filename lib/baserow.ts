@@ -252,12 +252,19 @@ function fabricationStatus(requirementStatus: string, machinist: string): Manufa
   return "Planned";
 }
 
-export async function getFabricationJobs(): Promise<{ jobs: FabricationJob[]; source: "baserow" | "demo" }> {
-  if (!hasBaserowCredentials()) return { jobs: [...DEMO_FABRICATION_STATE.values()], source: "demo" };
+export async function getFabricationJobs(): Promise<{
+  jobs: FabricationJob[];
+  source: "baserow" | "demo";
+  qualityOperationLinks: { operationId: number; requirementId: number }[];
+}> {
+  if (!hasBaserowCredentials()) {
+    return { jobs: [...DEMO_FABRICATION_STATE.values()], source: "demo", qualityOperationLinks: [] };
+  }
 
-  const [finishingRows, requirementRows] = await Promise.all([
+  const [finishingRows, requirementRows, operationRows] = await Promise.all([
     listAllRows(FINISHING_TABLE_ID),
     listAllRows(REQUIREMENTS_TABLE_ID),
+    listAllRows(OPERATIONS_TABLE_ID),
   ]);
   const requirements = new Map(requirementRows.map((row) => [row.id, row]));
 
@@ -279,7 +286,7 @@ export async function getFabricationJobs(): Promise<{ jobs: FabricationJob[]; so
       documentName: sourceDocumentName(requirement),
       quantity: Math.max(1, Math.floor(Number(row["Required Quantity"] ?? requirement["Required Quantity"] ?? 1))),
       color: selectValue(row["Powder Coat Color"], selectValue(requirement.Finishing, "Unspecified")),
-      qcOutcome: selectValue(requirement["QC Outcome"], "Not Inspected"),
+      qcNotes: "",
       status: fabricationStatus(requirementStatus, machinist),
       requirementStatus,
       machinist,
@@ -294,7 +301,16 @@ export async function getFabricationJobs(): Promise<{ jobs: FabricationJob[]; so
     }];
   });
 
-  return { jobs: jobs.filter((job) => job.active), source: "baserow" };
+  const activeJobs = jobs.filter((job) => job.active);
+  const finishingRequirementIds = new Set(activeJobs.map((job) => job.requirementId));
+  const qualityOperationLinks = operationRows.flatMap((row) => {
+    const requirementId = linkedId(row["Production Requirement"]);
+    return requirementId && finishingRequirementIds.has(requirementId) && operationWorkType(row) === "Manufacturing"
+      ? [{ operationId: row.id, requirementId }]
+      : [];
+  });
+
+  return { jobs: activeJobs, source: "baserow", qualityOperationLinks };
 }
 
 export async function applyFabricationAction(id: number, action: FabricationAction, actor: { name: string }) {
