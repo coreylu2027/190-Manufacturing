@@ -8,6 +8,7 @@ import {
 } from "ag-grid-community";
 import { AgGridReact } from "ag-grid-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import Link from "next/link";
 import {
   ArrowUpDown,
   ArrowUpRight,
@@ -85,6 +86,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { mergeVisibleSelection } from "@/lib/bulk-selection";
 import { isShopName } from "@/lib/profile-name";
 import { cn } from "@/lib/utils";
+import { WORKSPACE_ROUTES, type WorkspaceView } from "@/lib/workspace-routes";
 import {
   type ManufacturingOperation,
   type OperationActionPatch,
@@ -98,7 +100,6 @@ ModuleRegistry.registerModules([AllCommunityModule]);
 
 type QueueView = "available" | "mine" | "all";
 type WorkTypeFilter = "all" | OperationWorkType;
-type WorkspaceView = "operations" | "fabrication" | "production" | "admin";
 type ProductionSort = "document" | "part" | "description" | "quantity" | "progress" | "status";
 
 interface ProductionRequirement {
@@ -443,11 +444,10 @@ function ProductionOverview({
   );
 }
 
-export function ManufacturingDashboard() {
+export function ManufacturingDashboard({ workspaceView }: { workspaceView: WorkspaceView }) {
   const router = useRouter();
   const queryClient = useQueryClient();
   const operationsGridRef = useRef<AgGridReact<ManufacturingOperation>>(null);
-  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("operations");
   const [view, setView] = useState<QueueView>("available");
   const [workType, setWorkType] = useState<WorkTypeFilter>("all");
   const [machine, setMachine] = useState("all");
@@ -786,25 +786,25 @@ export function ManufacturingDashboard() {
             <Button
               variant="ghost"
               className={cn("h-10", workspaceView === "operations" ? "bg-accent/70 text-primary" : "text-muted-foreground")}
-              aria-pressed={workspaceView === "operations"}
-              onClick={() => setWorkspaceView("operations")}
+              aria-current={workspaceView === "operations" ? "page" : undefined}
+              render={<Link href={WORKSPACE_ROUTES.operations} />}
             >
               <LayoutList /><span className="hidden lg:inline">Operations</span>
             </Button>
             <Button
               variant="ghost"
               className={cn("h-10", workspaceView === "fabrication" ? "bg-accent/70 text-primary" : "text-muted-foreground")}
-              aria-pressed={workspaceView === "fabrication"}
+              aria-current={workspaceView === "fabrication" ? "page" : undefined}
               aria-label="Finishing"
-              onClick={() => setWorkspaceView("fabrication")}
+              render={<Link href={WORKSPACE_ROUTES.fabrication} />}
             >
               <Paintbrush /><span className="hidden lg:inline">Finishing</span>
             </Button>
             <Button
               variant="ghost"
               className={cn("h-10", workspaceView === "production" ? "bg-accent/70 text-primary" : "text-muted-foreground")}
-              aria-pressed={workspaceView === "production"}
-              onClick={() => setWorkspaceView("production")}
+              aria-current={workspaceView === "production" ? "page" : undefined}
+              render={<Link href={WORKSPACE_ROUTES.production} />}
             >
               <PackageCheck /><span className="hidden lg:inline">Production</span>
             </Button>
@@ -812,8 +812,8 @@ export function ManufacturingDashboard() {
               <Button
                 variant="ghost"
                 className={cn("h-10", workspaceView === "admin" ? "bg-accent/70 text-primary" : "text-muted-foreground")}
-                aria-pressed={workspaceView === "admin"}
-                onClick={() => setWorkspaceView("admin")}
+                aria-current={workspaceView === "admin" ? "page" : undefined}
+                render={<Link href={WORKSPACE_ROUTES.admin} />}
               >
                 <ShieldCheck /><span className="hidden lg:inline">Admin</span>
               </Button>
@@ -856,12 +856,12 @@ export function ManufacturingDashboard() {
             { id: "production" as const, label: "Production", icon: PackageCheck },
             ...(query.data?.user?.role === "admin" ? [{ id: "admin" as const, label: "Admin", icon: ShieldCheck }] : []),
           ].map(({ id, label, icon: Icon }) => (
-            <Button key={id} size="sm" variant="ghost" className={cn("min-w-0 gap-1 px-1 text-[11px]", workspaceView === id ? "bg-accent/70 text-primary" : "text-muted-foreground")} aria-pressed={workspaceView === id} onClick={() => setWorkspaceView(id)}><Icon />{label}</Button>
+            <Button key={id} size="sm" variant="ghost" className={cn("min-w-0 gap-1 px-1 text-[11px]", workspaceView === id ? "bg-accent/70 text-primary" : "text-muted-foreground")} aria-current={workspaceView === id ? "page" : undefined} render={<Link href={WORKSPACE_ROUTES[id]} />}><Icon />{label}</Button>
           ))}
         </nav>
       </header>
 
-      {workspaceView === "admin" && query.data?.user?.role === "admin" ? <AdminDashboard /> : workspaceView === "operations" ? <section className="mx-auto max-w-[1800px] px-4 py-5 md:px-7 md:py-7">
+      {workspaceView === "admin" ? <AdminDashboard /> : workspaceView === "operations" ? <section className="mx-auto max-w-[1800px] px-4 py-5 md:px-7 md:py-7">
         <div className="mb-5 flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
           <div>
             <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-primary"><span className="size-2 rounded-full bg-emerald-500 shadow-[0_0_0_4px_rgba(16,185,129,.12)]" /> Shop queue</div>
