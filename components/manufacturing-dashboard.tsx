@@ -841,6 +841,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
               variant="ghost"
               className={cn("h-10", workspaceView === "operations" ? "bg-accent/70 text-primary" : "text-muted-foreground")}
               aria-current={workspaceView === "operations" ? "page" : undefined}
+              nativeButton={false}
               render={<Link href={WORKSPACE_ROUTES.operations} />}
             >
               <LayoutList /><span className="hidden lg:inline">Operations</span>
@@ -850,6 +851,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
               className={cn("h-10", workspaceView === "fabrication" ? "bg-accent/70 text-primary" : "text-muted-foreground")}
               aria-current={workspaceView === "fabrication" ? "page" : undefined}
               aria-label="Finishing"
+              nativeButton={false}
               render={<Link href={WORKSPACE_ROUTES.fabrication} />}
             >
               <Paintbrush /><span className="hidden lg:inline">Finishing</span>
@@ -858,6 +860,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
               variant="ghost"
               className={cn("h-10", workspaceView === "production" ? "bg-accent/70 text-primary" : "text-muted-foreground")}
               aria-current={workspaceView === "production" ? "page" : undefined}
+              nativeButton={false}
               render={<Link href={WORKSPACE_ROUTES.production} />}
             >
               <PackageCheck /><span className="hidden lg:inline">Production</span>
@@ -867,6 +870,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                 variant="ghost"
                 className={cn("h-10", workspaceView === "admin" ? "bg-accent/70 text-primary" : "text-muted-foreground")}
                 aria-current={workspaceView === "admin" ? "page" : undefined}
+                nativeButton={false}
                 render={<Link href={WORKSPACE_ROUTES.admin} />}
               >
                 <ShieldCheck /><span className="hidden lg:inline">Admin</span>
@@ -910,7 +914,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
             { id: "production" as const, label: "Production", icon: PackageCheck },
             ...(query.data?.user?.role === "admin" ? [{ id: "admin" as const, label: "Admin", icon: ShieldCheck }] : []),
           ].map(({ id, label, icon: Icon }) => (
-            <Button key={id} size="sm" variant="ghost" className={cn("min-w-0 gap-1 px-1 text-[11px]", workspaceView === id ? "bg-accent/70 text-primary" : "text-muted-foreground")} aria-current={workspaceView === id ? "page" : undefined} render={<Link href={WORKSPACE_ROUTES[id]} />}><Icon />{label}</Button>
+            <Button key={id} size="sm" variant="ghost" className={cn("min-w-0 gap-1 px-1 text-[11px]", workspaceView === id ? "bg-accent/70 text-primary" : "text-muted-foreground")} aria-current={workspaceView === id ? "page" : undefined} nativeButton={false} render={<Link href={WORKSPACE_ROUTES[id]} />}><Icon />{label}</Button>
           ))}
         </nav>
       </header>
