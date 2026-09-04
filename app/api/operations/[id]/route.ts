@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { getEffectiveAppUser, isAuthRequired } from "@/lib/auth";
-import { applyQuantityAction, patchOperation, stealOperationClaim } from "@/lib/baserow";
+import { applyQuantityAction, patchOperation, stealOperationClaim, updateCamHandoff } from "@/lib/baserow";
 import { createNotification } from "@/lib/notifications";
 import { isShopName } from "@/lib/profile-name";
 import { OPERATION_STATUSES } from "@/lib/types";
@@ -28,7 +28,14 @@ const stealActionSchema = z.object({
   confirmed: z.literal(true),
 });
 
-const requestSchema = z.union([patchSchema, quantityActionSchema, stealActionSchema]);
+const camHandoffSchema = z.object({
+  action: z.literal("edit_cam_handoff"),
+  completedBy: z.string().trim().min(1, "Enter who completed the CAM").max(120),
+  programPath: z.string().trim().max(1024),
+  notes: z.string().trim().max(5000),
+});
+
+const requestSchema = z.union([patchSchema, quantityActionSchema, stealActionSchema, camHandoffSchema]);
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const user = await getEffectiveAppUser();
@@ -85,6 +92,13 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
           unmappedRecipients: stolen.displaced.length - recipients.length,
         },
       });
+    }
+    if ("action" in parsed.data && parsed.data.action === "edit_cam_handoff") {
+      if (user?.role !== "admin") {
+        return NextResponse.json({ error: "Administrator access required" }, { status: 403 });
+      }
+      const updated = await updateCamHandoff(operationId, parsed.data);
+      return NextResponse.json({ updated });
     }
 
     const updated = "action" in parsed.data

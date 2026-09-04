@@ -26,6 +26,7 @@ export interface OperationAllocation {
 export interface CamDependency {
   operationId: number;
   status: OperationStatus;
+  completedBy: string;
   programPath: string | null;
   notes: string;
 }
@@ -81,6 +82,7 @@ export interface FabricationJob {
   documentName: string | null;
   quantity: number;
   color: string;
+  qcOutcome: string;
   status: OperationStatus;
   requirementStatus: string;
   machinist: string;
@@ -120,6 +122,13 @@ export interface OperationQuantityPatch {
 export interface OperationStealPatch {
   action: "steal";
   confirmed: true;
+}
+
+export interface CamHandoffPatch {
+  action: "edit_cam_handoff";
+  completedBy: string;
+  programPath: string;
+  notes: string;
 }
 
 export type OperationActionPatch = OperationQuantityPatch | OperationStealPatch;

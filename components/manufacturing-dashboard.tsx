@@ -29,6 +29,7 @@ import {
   MoreHorizontal,
   PackageCheck,
   Paintbrush,
+  Pencil,
   RefreshCw,
   RotateCcw,
   Search,
@@ -88,6 +89,7 @@ import { isShopName } from "@/lib/profile-name";
 import { cn } from "@/lib/utils";
 import { WORKSPACE_ROUTES, type WorkspaceView } from "@/lib/workspace-routes";
 import {
+  type CamHandoffPatch,
   type ManufacturingOperation,
   type OperationActionPatch,
   type OperationQuantityAction,
@@ -465,6 +467,8 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
   const [quantityDialog, setQuantityDialog] = useState<{ action: OperationQuantityAction; max: number } | null>(null);
   const [quantityDraft, setQuantityDraft] = useState("1");
   const [camCompletionOpen, setCamCompletionOpen] = useState(false);
+  const [camHandoffEditOpen, setCamHandoffEditOpen] = useState(false);
+  const [camCompletedBy, setCamCompletedBy] = useState("");
   const [camProgramPath, setCamProgramPath] = useState("");
   const [camNotes, setCamNotes] = useState("");
   const [stealDialogOpen, setStealDialogOpen] = useState(false);
@@ -592,6 +596,25 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
     },
   });
 
+  const camHandoffMutation = useMutation({
+    mutationFn: async ({ id, patch }: { id: number; patch: CamHandoffPatch }) => {
+      const response = await fetch(`/api/operations/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error ?? "Unable to update the CAM handoff");
+      return body;
+    },
+    onSuccess: () => {
+      toast.success("CAM handoff updated");
+      setCamHandoffEditOpen(false);
+      queryClient.invalidateQueries({ queryKey: ["operations"] });
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to update the CAM handoff"),
+  });
+
   const profileMutation = useMutation({
     mutationFn: async () => {
       const response = await fetch("/api/account", {
@@ -615,6 +638,13 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
 
   const operations = useMemo(() => query.data?.operations ?? [], [query.data?.operations]);
   const selected = selectedId === null ? null : operations.find((operation) => operation.id === selectedId) ?? null;
+  const selectedCamHandoff = selected?.workType === "CAM" ? {
+    operationId: selected.id,
+    status: selected.status,
+    completedBy: selected.machinist,
+    programPath: selected.camProgramPath,
+    notes: selected.camNotes,
+  } : selected?.camDependency ?? null;
   const selectedAllocation = selected ? allocationForUser(selected, query.data?.user ?? null) : { claimed: 0, completed: 0 };
   const selectedOtherClaimants = selected ? otherClaimants(selected, query.data?.user ?? null) : [];
   const machines = useMemo(() => [...new Set(operations.map((operation) => operation.machine))].sort(), [operations]);
@@ -710,6 +740,25 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
         notes: camNotes.trim(),
       },
       workType: "CAM",
+    });
+  };
+  const openCamHandoffEditor = () => {
+    if (!selectedCamHandoff || selectedCamHandoff.status !== "Complete") return;
+    setCamCompletedBy(selectedCamHandoff.completedBy);
+    setCamProgramPath(selectedCamHandoff.programPath ?? "");
+    setCamNotes(selectedCamHandoff.notes);
+    setCamHandoffEditOpen(true);
+  };
+  const saveCamHandoff = () => {
+    if (!selectedCamHandoff) return;
+    camHandoffMutation.mutate({
+      id: selectedCamHandoff.operationId,
+      patch: {
+        action: "edit_cam_handoff",
+        completedBy: camCompletedBy.trim(),
+        programPath: camProgramPath.trim(),
+        notes: camNotes.trim(),
+      },
     });
   };
   const copyProgramPath = async (programPath: string) => {
@@ -1026,10 +1075,18 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
 
                 {(selected.workType === "CAM" || selected.camDependency) && (
                   <section>
-                    <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">CAM handoff</h3>
+                    <div className="mb-3 flex items-center justify-between gap-3">
+                      <h3 className="text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">CAM handoff</h3>
+                      {query.data?.user?.role === "admin" && selectedCamHandoff?.status === "Complete" && (
+                        <Button size="sm" variant="outline" onClick={openCamHandoffEditor}><Pencil /> Edit handoff</Button>
+                      )}
+                    </div>
                     <div className="space-y-3 rounded-xl border bg-muted/20 p-4">
                       {selected.workType === "Manufacturing" && selected.camDependency && (
                         <div className="flex flex-wrap items-center gap-2"><StatusBadge status={selected.camDependency.status} /><span className="text-xs text-muted-foreground">CAM for {selected.operationNumber}</span></div>
+                      )}
+                      {selectedCamHandoff?.status === "Complete" && (
+                        <div><p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Completed by</p><p className="mt-1 text-sm font-semibold">{selectedCamHandoff.completedBy || "Not recorded"}</p></div>
                       )}
                       {(selected.workType === "CAM" ? selected.camProgramPath : selected.camDependency?.programPath) ? (
                         <div>
@@ -1126,10 +1183,36 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
               </div>
               <div>
                 <label className="mb-1.5 block text-xs font-semibold" htmlFor="cam-notes">Setup notes <span className="font-normal text-muted-foreground">(optional)</span></label>
-                <textarea id="cam-notes" value={camNotes} onChange={(event) => setCamNotes(event.target.value)} maxLength={5000} placeholder="Workholding, tooling, post-processor, or setup details…" className="min-h-28 w-full resize-y rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring focus:ring-3 focus:ring-ring/50" />
+                <textarea id="cam-notes" value={camNotes} onChange={(event) => setCamNotes(event.target.value)} maxLength={5000} placeholder="Workholding, tooling, or setup detail. Include here if your CAM has been checked." className="min-h-28 w-full resize-y rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring focus:ring-3 focus:ring-ring/50" />
               </div>
             </div>
             <DialogFooter><Button type="button" variant="outline" onClick={() => setCamCompletionOpen(false)}>Cancel</Button><Button type="submit" disabled={mutation.isPending}>{mutation.isPending && <LoaderCircle className="animate-spin" />}Complete CAM</Button></DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={camHandoffEditOpen} onOpenChange={setCamHandoffEditOpen}>
+        <DialogContent>
+          <form onSubmit={(event) => { event.preventDefault(); saveCamHandoff(); }}>
+            <DialogHeader>
+              <DialogTitle>Edit CAM handoff</DialogTitle>
+              <DialogDescription>Administrators can correct the CAM attribution and the details handed to the machine operator.</DialogDescription>
+            </DialogHeader>
+            <div className="my-5 space-y-4">
+              <div>
+                <label className="mb-1.5 block text-xs font-semibold" htmlFor="cam-completed-by">Completed by</label>
+                <Input id="cam-completed-by" value={camCompletedBy} onChange={(event) => setCamCompletedBy(event.target.value)} maxLength={120} required autoFocus />
+              </div>
+              <div>
+                <label className="mb-1.5 block text-xs font-semibold" htmlFor="cam-edit-program-path">Shared-drive program path <span className="font-normal text-muted-foreground">(optional)</span></label>
+                <Input id="cam-edit-program-path" value={camProgramPath} onChange={(event) => setCamProgramPath(event.target.value)} placeholder="\\\\server\\manufacturing\\program.nc" maxLength={1024} />
+              </div>
+              <div>
+                <label className="mb-1.5 block text-xs font-semibold" htmlFor="cam-edit-notes">Setup notes <span className="font-normal text-muted-foreground">(optional)</span></label>
+                <textarea id="cam-edit-notes" value={camNotes} onChange={(event) => setCamNotes(event.target.value)} maxLength={5000} className="min-h-28 w-full resize-y rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring focus:ring-3 focus:ring-ring/50" />
+              </div>
+            </div>
+            <DialogFooter><Button type="button" variant="outline" onClick={() => setCamHandoffEditOpen(false)}>Cancel</Button><Button type="submit" disabled={camHandoffMutation.isPending || !camCompletedBy.trim()}>{camHandoffMutation.isPending && <LoaderCircle className="animate-spin" />}Save handoff</Button></DialogFooter>
           </form>
         </DialogContent>
       </Dialog>

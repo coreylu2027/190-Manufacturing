@@ -63,6 +63,7 @@ function reconcileDemoWorkflow(target: ManufacturingOperation) {
       camDependency: cam ? {
         operationId: cam.id,
         status: cam.status,
+        completedBy: cam.machinist,
         programPath: cam.camProgramPath,
         notes: cam.camNotes,
       } : null,
@@ -278,6 +279,7 @@ export async function getFabricationJobs(): Promise<{ jobs: FabricationJob[]; so
       documentName: sourceDocumentName(requirement),
       quantity: Math.max(1, Math.floor(Number(row["Required Quantity"] ?? requirement["Required Quantity"] ?? 1))),
       color: selectValue(row["Powder Coat Color"], selectValue(requirement.Finishing, "Unspecified")),
+      qcOutcome: selectValue(requirement["QC Outcome"], "Not Inspected"),
       status: fabricationStatus(requirementStatus, machinist),
       requirementStatus,
       machinist,
@@ -425,6 +427,7 @@ export async function getOperations(): Promise<{ operations: ManufacturingOperat
       camDependency: {
         operationId: cam.id,
         status: cam.status,
+        completedBy: cam.machinist,
         programPath: cam.camProgramPath,
         notes: cam.camNotes,
       },
@@ -523,6 +526,61 @@ export async function patchOperation(id: number, patch: OperationPatch, machinis
     }
   }
   return body;
+}
+
+export async function updateCamHandoff(
+  id: number,
+  patch: { completedBy: string; programPath: string; notes: string },
+) {
+  const completedBy = patch.completedBy.trim();
+  const programPath = patch.programPath.trim();
+  const notes = patch.notes.trim();
+
+  if (!completedBy) throw new Error("Enter who completed the CAM");
+
+  if (!hasBaserowCredentials()) {
+    const operation = DEMO_STATE.get(id);
+    if (!operation) throw new Error("Operation not found");
+    if (operation.workType !== "CAM") throw new Error("Only CAM handoffs can be edited");
+    if (operation.status !== "Complete") throw new Error("Only completed CAM handoffs can be edited");
+
+    const allocations = operation.allocations.map((allocation) => allocation.completed > 0
+      ? { ...allocation, name: completedBy }
+      : { ...allocation });
+    const updated = {
+      ...operation,
+      machinist: completedBy,
+      allocations,
+      camProgramPath: programPath || null,
+      camNotes: notes,
+    };
+    DEMO_STATE.set(id, updated);
+    reconcileDemoWorkflow(updated);
+    return DEMO_STATE.get(id) ?? updated;
+  }
+
+  const operation = await getRow(OPERATIONS_TABLE_ID, id);
+  if (operationWorkType(operation) !== "CAM") throw new Error("Only CAM handoffs can be edited");
+  const status = selectValue(operation.Status, "Planned") as OperationStatus;
+  if (status !== "Complete") throw new Error("Only completed CAM handoffs can be edited");
+
+  const allocations = quantitiesForRow(operation, 1, status).allocations.map((allocation) => allocation.completed > 0
+    ? { ...allocation, name: completedBy }
+    : allocation);
+  await patchRow(OPERATIONS_TABLE_ID, id, {
+    Machinist: completedBy,
+    "Quantity Ledger": JSON.stringify(allocations),
+    "CAM Program Path": programPath,
+    "CAM Notes": notes,
+  });
+
+  return {
+    id,
+    machinist: completedBy,
+    allocations,
+    camProgramPath: programPath || null,
+    camNotes: notes,
+  };
 }
 
 export async function applyQuantityAction(
