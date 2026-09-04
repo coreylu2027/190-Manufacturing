@@ -103,6 +103,7 @@ type ProductionSort = "document" | "part" | "description" | "quantity" | "progre
 interface ProductionRequirement {
   key: string;
   partNumber: string;
+  revision: string | null;
   partName: string;
   assemblyNumber: string;
   documentName: string | null;
@@ -274,7 +275,7 @@ function ProductionOverview({
     const grouped = new Map<string, ManufacturingOperation[]>();
 
     for (const operation of operations) {
-      const key = `${operation.assemblyNumber}|${operation.partNumber}`;
+      const key = `${operation.assemblyNumber}|${operation.partNumber}|${operation.revision ?? ""}`;
       grouped.set(key, [...(grouped.get(key) ?? []), operation]);
     }
 
@@ -283,6 +284,7 @@ function ProductionOverview({
         return {
           key,
           partNumber: first.partNumber,
+          revision: first.revision,
           partName: first.partName,
           assemblyNumber: first.assemblyNumber,
           documentName: first.documentName,
@@ -312,6 +314,7 @@ function ProductionOverview({
       if (status !== "all" && requirement.status !== status) return false;
       if (term && ![
         requirement.partNumber,
+        requirement.revision,
         requirement.partName,
         requirement.assemblyNumber,
         requirement.documentName,
@@ -371,7 +374,7 @@ function ProductionOverview({
             </div>
             <div className="relative min-w-0 flex-1 xl:max-w-md">
               <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-              <Input value={search} onChange={(event) => setSearch(event.target.value)} className="h-9 bg-card pl-9" placeholder="Search part, assembly, document…" />
+              <Input value={search} onChange={(event) => setSearch(event.target.value)} className="h-9 bg-card pl-9" placeholder="Search part, revision, assembly, document…" />
             </div>
             <Select value={status} onValueChange={(value) => setStatus((value ?? "all") as "all" | OperationStatus)}>
               <SelectTrigger className="h-9 w-full bg-card xl:w-48"><SlidersHorizontal className="text-muted-foreground" /><SelectValue placeholder="All statuses" /></SelectTrigger>
@@ -405,7 +408,7 @@ function ProductionOverview({
             <div className="hidden overflow-x-auto md:block">
               <table className="w-full text-left text-sm">
                 <thead className="border-b bg-muted/20 text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
-                  <tr><th className="px-4 py-3">Part</th><th className="px-4 py-3">Description</th><th className="px-4 py-3">Source document</th><th className="px-4 py-3 text-right">Qty</th><th className="px-4 py-3">Routing progress</th><th className="px-4 py-3">Status</th></tr>
+                  <tr><th className="px-4 py-3">Part</th><th className="px-4 py-3">Revision</th><th className="px-4 py-3">Description</th><th className="px-4 py-3">Source document</th><th className="px-4 py-3 text-right">Qty</th><th className="px-4 py-3">Routing progress</th><th className="px-4 py-3">Status</th></tr>
                 </thead>
                 <tbody className="divide-y">
                   {visibleRequirements.map((requirement) => {
@@ -413,6 +416,7 @@ function ProductionOverview({
                     return (
                       <tr key={requirement.key} className="transition hover:bg-muted/30">
                         <td className="px-4 py-3 font-mono text-xs font-bold text-primary">{requirement.partNumber}</td>
+                        <td className="px-4 py-3 font-mono text-xs font-semibold">{requirement.revision ?? "—"}</td>
                         <td className="px-4 py-3 font-semibold">{requirement.partName}</td>
                         <td className="px-4 py-3 font-mono text-xs">{requirement.documentName ?? "Not synced"}</td>
                         <td className="px-4 py-3 text-right font-semibold">{requirement.quantity}</td>
@@ -429,7 +433,7 @@ function ProductionOverview({
                 const percent = Math.round((requirement.completedOperations / requirement.totalOperations) * 100);
                 return (
                   <article key={requirement.key} className="p-4">
-                    <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary">{requirement.partNumber}</p><h3 className="mt-1 font-semibold">{requirement.partName}</h3><p className="mt-1 font-mono text-[11px] text-muted-foreground">{requirement.documentName ?? "Document not synced"} · Qty {requirement.quantity}</p></div><StatusBadge status={requirement.status} /></div>
+                    <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary">{requirement.partNumber}</p><h3 className="mt-1 font-semibold">{requirement.partName}</h3><p className="mt-1 font-mono text-[11px] text-muted-foreground">Rev {requirement.revision ?? "—"} · {requirement.documentName ?? "Document not synced"} · Qty {requirement.quantity}</p></div><StatusBadge status={requirement.status} /></div>
                     <div className="mt-3"><div className="mb-1.5 flex justify-between text-xs text-muted-foreground"><span>Mfg {requirement.completedManufacturingOperations}/{requirement.totalManufacturingOperations}{requirement.totalCamTasks > 0 ? ` · CAM ${requirement.completedCamTasks}/${requirement.totalCamTasks}` : ""}</span><span className="font-semibold text-foreground">{percent}%</span></div><div className="h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary" style={{ width: `${percent}%` }} /></div></div>
                   </article>
                 );
@@ -623,7 +627,7 @@ export function ManufacturingDashboard() {
       const claimable = isOperationClaimable(operation);
       if (view === "available" && !claimable && !isOperationStealable(operation, query.data?.user ?? null)) return false;
       if (view === "mine" && allocation.claimed === 0) return false;
-      if (term && ![operation.partNumber, operation.partName, operation.documentName, operation.material, operation.machine, operation.operationNumber, operation.workType, operation.camProgramPath].join(" ").toLowerCase().includes(term)) return false;
+      if (term && ![operation.partNumber, operation.revision, operation.partName, operation.documentName, operation.material, operation.machine, operation.operationNumber, operation.workType, operation.camProgramPath].join(" ").toLowerCase().includes(term)) return false;
       return true;
     });
   }, [machine, operations, query.data?.user, search, sourceDocument, view, workType]);
@@ -729,6 +733,7 @@ export function ManufacturingDashboard() {
 
   const columnDefs = useMemo<ColDef<ManufacturingOperation>[]>(() => [
     { field: "partNumber", headerName: "PART", minWidth: 155, pinned: "left", cellClass: "font-mono font-semibold" },
+    { field: "revision", headerName: "REVISION", width: 104, valueFormatter: ({ value }) => value || "—" },
     { field: "partName", headerName: "DESCRIPTION", minWidth: 230, flex: 1 },
     { field: "material", headerName: "MATERIAL", minWidth: 165, valueFormatter: ({ value }) => value || "Unspecified" },
     { field: "documentName", headerName: "SOURCE DOCUMENT", minWidth: 175, valueFormatter: ({ value }) => value || "Not synced" },
@@ -877,7 +882,7 @@ export function ManufacturingDashboard() {
               </div>
               <div className="relative min-w-0 flex-1">
                 <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-                <Input value={search} onChange={(event) => setSearch(event.target.value)} className="h-9 bg-card pl-9" placeholder="Search part, assembly, operation…" />
+                <Input value={search} onChange={(event) => setSearch(event.target.value)} className="h-9 bg-card pl-9" placeholder="Search part, revision, assembly, operation…" />
               </div>
               <Select value={workType} onValueChange={(value) => setWorkType((value ?? "all") as WorkTypeFilter)}>
                 <SelectTrigger className="h-9 w-full bg-card xl:w-48"><Code2 className="text-muted-foreground" /><SelectValue placeholder="All work types" /></SelectTrigger>
@@ -942,7 +947,7 @@ export function ManufacturingDashboard() {
                       />
                       <button onClick={() => openOperation(operation)} className="min-w-0 flex-1 text-left">
                         <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary">{operation.partNumber}</p><h3 className="mt-1 font-semibold">{operation.partName}</h3></div><StatusBadge status={operation.status} /></div>
-                        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground"><span>{operationLabel(operation)}</span><Badge variant="outline">{operation.workType}</Badge><span className="flex items-center gap-1"><Wrench className="size-3" />{operation.machine}</span><span>{operation.completedQuantity}/{operation.taskQuantity} done</span><span>{operation.availableQuantity} available</span></div>
+                        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground"><span>Rev {operation.revision ?? "—"}</span><span>{operationLabel(operation)}</span><Badge variant="outline">{operation.workType}</Badge><span className="flex items-center gap-1"><Wrench className="size-3" />{operation.machine}</span><span>{operation.completedQuantity}/{operation.taskQuantity} done</span><span>{operation.availableQuantity} available</span></div>
                       </button>
                     </article>
                   );
@@ -983,6 +988,7 @@ export function ManufacturingDashboard() {
                   <div className="grid grid-cols-2 overflow-hidden rounded-xl border">
                     {[
                       [selected.workType === "CAM" ? "Target machine" : "Machine", selected.machine], ["Work", operationLabel(selected)],
+                      ["Revision", selected.revision || "—"], ["Assembly", selected.assemblyNumber],
                       ["Part quantity", String(selected.quantity)], ["Task quantity", String(selected.taskQuantity)],
                       ["Available", String(selected.availableQuantity)], ["Claimed", String(selected.claimedQuantity)],
                       ["Completed", String(selected.completedQuantity)], ["Your claim", String(selectedAllocation.claimed)],

@@ -1,6 +1,7 @@
 import type { FabricationJob, ManufacturingOperation } from "@/lib/types";
 
 const shared = {
+  revision: "A",
   activeInRouting: true,
   claimedQuantity: 0,
   completedQuantity: 0,

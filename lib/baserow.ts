@@ -164,6 +164,15 @@ function sourceDocumentName(requirement: BaserowRow | undefined): string | null 
     || null;
 }
 
+function revisionName(requirement: BaserowRow | undefined, part: BaserowRow | undefined): string | null {
+  for (const value of [requirement?.Revision, part?.Revision]) {
+    if (typeof value === "number") return String(value);
+    const revision = textValue(value) || selectValue(value);
+    if (revision) return revision;
+  }
+  return null;
+}
+
 function parseRequirement(display: string) {
   const match = display.match(/^(.+?)\s+—\s+(.+?)\s+\[([^\]]+)]$/);
   return {
@@ -378,6 +387,7 @@ export async function getOperations(): Promise<{ operations: ManufacturingOperat
       id: row.id,
       operationKey: String(row.Operation ?? `${row.id}`),
       ...parsed,
+      revision: revisionName(requirement, part),
       documentName: sourceDocumentName(requirement),
       material: textValue(part?.Material) || null,
       quantity,
