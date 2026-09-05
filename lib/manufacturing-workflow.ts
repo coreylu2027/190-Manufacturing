@@ -106,6 +106,19 @@ export function requiresCam(machine: string) {
   return (CAM_REQUIRED_MACHINES as readonly string[]).includes(machine);
 }
 
+/**
+ * A claim reserves machine work, but releasing every uncompleted claim puts the
+ * operation back into an unstarted state. `startedAt` is intentionally not used
+ * here because older claim/release cycles may have left that timestamp behind.
+ */
+export function targetMachineHasStarted(operation: Pick<WorkflowOperation, "status">
+  & Partial<Pick<WorkflowOperation, "claimedQuantity" | "completedQuantity">>) {
+  return operation.status === "In Progress"
+    || operation.status === "Complete"
+    || (operation.claimedQuantity ?? 0) > 0
+    || (operation.completedQuantity ?? 0) > 0;
+}
+
 export function validateCamAction(input: {
   action: "claim" | "release" | "complete" | "undo_complete";
   quantity: number;

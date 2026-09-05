@@ -1,7 +1,12 @@
 import "server-only";
 
 import { DEMO_FABRICATION_JOBS, DEMO_OPERATIONS } from "@/lib/demo-data";
-import { deduplicateOperations, planRequirementWorkflow, validateCamAction } from "@/lib/manufacturing-workflow";
+import {
+  deduplicateOperations,
+  planRequirementWorkflow,
+  targetMachineHasStarted,
+  validateCamAction,
+} from "@/lib/manufacturing-workflow";
 import type {
   FabricationAction,
   FabricationJob,
@@ -534,7 +539,7 @@ export async function applyQuantityAction(
         && candidate.partNumber === operation.partNumber
         && candidate.operationNumber === operation.operationNumber,
       );
-      if (target && (target.status === "In Progress" || target.status === "Complete" || target.startedAt)) {
+      if (target && targetMachineHasStarted(target)) {
         validateCamAction({ action, quantity, targetStarted: true });
       }
     }
@@ -572,7 +577,11 @@ export async function applyQuantityAction(
       completedQuantity,
       availableQuantity: Math.max(0, operation.taskQuantity - claimedQuantity - completedQuantity),
       allocations: activeAllocations,
-      startedAt: action === "claim" && !operation.startedAt ? timestamp : operation.startedAt,
+      startedAt: action === "claim" && !operation.startedAt
+        ? timestamp
+        : action === "release" && claimedQuantity === 0 && completedQuantity === 0
+          ? null
+          : operation.startedAt,
       completedAt: status === "Complete" ? timestamp : null,
       camProgramPath: operation.workType === "CAM" && action === "complete"
         ? camHandoff?.programPath === undefined
@@ -607,10 +616,11 @@ export async function applyQuantityAction(
       && operationWorkType(candidate) === "Manufacturing"
       && selectValue(candidate["Operation Number"], "OP1") === selectValue(operation["Operation Number"], "OP1"),
     );
-    if (target && (
-      ["In Progress", "Complete"].includes(selectValue(target.Status, "Planned"))
-      || Boolean(target["Started At"])
-    )) {
+    if (target && targetMachineHasStarted({
+      status: selectValue(target.Status, "Planned") as OperationStatus,
+      claimedQuantity: Number(target["Claimed Quantity"] ?? 0),
+      completedQuantity: Number(target["Completed Quantity"] ?? 0),
+    })) {
       validateCamAction({ action, quantity, targetStarted: true });
     }
   }
@@ -668,6 +678,7 @@ export async function applyQuantityAction(
     "Completed At": nextStatus === "Complete" ? timestamp : null,
   };
   if (action === "claim" && !operation["Started At"]) operationPatch["Started At"] = timestamp;
+  if (action === "release" && claimedQuantity === 0 && completedQuantity === 0) operationPatch["Started At"] = null;
   if (workType === "CAM" && action === "complete") {
     if (camHandoff?.programPath !== undefined) {
       operationPatch["CAM Program Path"] = camHandoff.programPath.trim();
@@ -690,7 +701,9 @@ export async function applyQuantityAction(
     completedQuantity,
     availableQuantity: Math.max(0, taskQuantity - claimedQuantity - completedQuantity),
     allocations: activeAllocations,
-    startedAt: operationPatch["Started At"] ?? operation["Started At"] ?? null,
+    startedAt: Object.hasOwn(operationPatch, "Started At")
+      ? operationPatch["Started At"] as string | null
+      : operation["Started At"] ? String(operation["Started At"]) : null,
     completedAt: operationPatch["Completed At"],
     camProgramPath: workType === "CAM" && action === "complete"
       ? camHandoff?.programPath === undefined
