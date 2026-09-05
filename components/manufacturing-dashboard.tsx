@@ -11,7 +11,6 @@ import { AgGridReact } from "ag-grid-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import {
-  ArrowUpDown,
   ArrowUpRight,
   Check,
   ChevronRight,
@@ -27,6 +26,7 @@ import {
   LayoutList,
   ListChecks,
   LoaderCircle,
+  MapPin,
   MoreHorizontal,
   PackageCheck,
   Paintbrush,
@@ -106,7 +106,6 @@ ModuleRegistry.registerModules([AllCommunityModule]);
 
 type QueueView = "available" | "mine" | "all";
 type WorkTypeFilter = "all" | OperationWorkType;
-type ProductionSort = "document" | "part" | "description" | "quantity" | "progress" | "status";
 
 interface ProductionRequirement {
   key: string;
@@ -141,6 +140,7 @@ interface ProductionRequirement {
   totalCamTasks: number;
   completedManufacturingOperations: number;
   totalManufacturingOperations: number;
+  routingProgress: number;
   status: OperationStatus;
   storageLocation: ManufacturingOperation["storageLocation"];
   locationUpdatedBy: string | null;
@@ -195,6 +195,24 @@ function ActionCell({ data, onOpen, user }: { data?: ManufacturingOperation; onO
       </Button>
     </div>
   );
+}
+
+function ProductionProgressCell({ data }: { data?: ProductionRequirement }) {
+  if (!data) return null;
+  return (
+    <div className="flex h-full min-w-0 flex-col justify-center">
+      <div className="mb-1.5 flex justify-between gap-3 text-xs">
+        <span className="truncate">Mfg {data.completedManufacturingOperations}/{data.totalManufacturingOperations}{data.totalCamTasks > 0 ? ` · CAM ${data.completedCamTasks}/${data.totalCamTasks}` : ""}</span>
+        <span className="font-semibold">{data.routingProgress}%</span>
+      </div>
+      <div className="h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary" style={{ width: `${data.routingProgress}%` }} /></div>
+    </div>
+  );
+}
+
+function ProductionActionCell({ data, onOpen }: { data?: ProductionRequirement; onOpen: (requirement: ProductionRequirement) => void }) {
+  if (!data) return null;
+  return <div className="flex h-full items-center justify-end"><Button size="sm" variant="outline" onClick={() => onOpen(data)}>More details<ChevronRight /></Button></div>;
 }
 
 async function fetchOperations(): Promise<OperationsResponse> {
@@ -303,7 +321,8 @@ function ProductionOverview({
 }) {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<"all" | OperationStatus>("all");
-  const [sort, setSort] = useState<ProductionSort>("document");
+  const [sourceDocument, setSourceDocument] = useState("all");
+  const [location, setLocation] = useState("all");
   const [selectedRequirementKey, setSelectedRequirementKey] = useState<string | null>(null);
   const requirements = useMemo<ProductionRequirement[]>(() => {
     const grouped = new Map<string, ManufacturingOperation[]>();
@@ -350,6 +369,7 @@ function ProductionOverview({
           totalCamTasks: routedOperations.filter((operation) => operation.workType === "CAM").length,
           completedManufacturingOperations: routedOperations.filter((operation) => operation.workType === "Manufacturing" && operation.status === "Complete").length,
           totalManufacturingOperations: routedOperations.filter((operation) => operation.workType === "Manufacturing").length,
+          routingProgress: Math.round((routedOperations.filter((operation) => operation.status === "Complete").length / routedOperations.length) * 100),
           status: requirementStatus(routedOperations),
           storageLocation: first.storageLocation,
           locationUpdatedBy: first.locationUpdatedBy,
@@ -363,16 +383,12 @@ function ProductionOverview({
 
   const visibleRequirements = useMemo(() => {
     const term = search.trim().toLocaleLowerCase();
-    const statusOrder: Record<OperationStatus, number> = {
-      Blocked: 0,
-      "Needs Rework": 1,
-      "In Progress": 2,
-      Ready: 3,
-      Planned: 4,
-      Complete: 5,
-    };
     const filtered = requirements.filter((requirement) => {
       if (status !== "all" && requirement.status !== status) return false;
+      if (sourceDocument === "missing" && requirement.documentName) return false;
+      if (sourceDocument !== "all" && sourceDocument !== "missing" && requirement.documentName !== sourceDocument) return false;
+      if (location === "unassigned" && requirement.storageLocation) return false;
+      if (location !== "all" && location !== "unassigned" && requirement.storageLocation !== location) return false;
       if (term && ![
         requirement.partNumber,
         requirement.revision,
@@ -384,18 +400,11 @@ function ProductionOverview({
       return true;
     });
 
-    return [...filtered].sort((a, b) => {
-      if (sort === "part") return a.partNumber.localeCompare(b.partNumber);
-      if (sort === "description") return a.partName.localeCompare(b.partName) || a.partNumber.localeCompare(b.partNumber);
-      if (sort === "quantity") return b.quantity - a.quantity || a.partNumber.localeCompare(b.partNumber);
-      if (sort === "progress") {
-        const progressDifference = (b.completedOperations / b.totalOperations) - (a.completedOperations / a.totalOperations);
-        return progressDifference || a.partNumber.localeCompare(b.partNumber);
-      }
-      if (sort === "status") return statusOrder[a.status] - statusOrder[b.status] || a.partNumber.localeCompare(b.partNumber);
-      return (a.documentName ?? "").localeCompare(b.documentName ?? "") || a.partNumber.localeCompare(b.partNumber);
-    });
-  }, [requirements, search, sort, status]);
+    return [...filtered].sort((a, b) => (a.documentName ?? "").localeCompare(b.documentName ?? "") || a.partNumber.localeCompare(b.partNumber));
+  }, [location, requirements, search, sourceDocument, status]);
+
+  const sourceDocuments = useMemo(() => [...new Set(requirements.flatMap((requirement) => requirement.documentName ? [requirement.documentName] : []))].sort(), [requirements]);
+  const locations = useMemo(() => [...new Set(requirements.flatMap((requirement) => requirement.storageLocation ? [requirement.storageLocation] : []))].sort(), [requirements]);
 
   const summary = useMemo(() => ({
     total: requirements.length,
@@ -404,6 +413,18 @@ function ProductionOverview({
     attention: requirements.filter((requirement) => requirement.status === "Blocked" || requirement.status === "Needs Rework").length,
   }), [requirements]);
   const selectedRequirement = requirements.find((requirement) => requirement.key === selectedRequirementKey) ?? null;
+  const openRequirement = (requirement: ProductionRequirement) => setSelectedRequirementKey(requirement.key);
+  const columnDefs = useMemo<ColDef<ProductionRequirement>[]>(() => [
+    { field: "partNumber", headerName: "PART", minWidth: 155, pinned: "left", cellClass: "font-mono font-semibold" },
+    { field: "revision", headerName: "REVISION", width: 104, valueFormatter: ({ value }) => value || "—" },
+    { field: "partName", headerName: "DESCRIPTION", minWidth: 230, flex: 1 },
+    { field: "documentName", headerName: "SOURCE DOCUMENT", minWidth: 175, cellClass: "font-mono", valueFormatter: ({ value }) => value || "Not synced" },
+    { field: "storageLocation", headerName: "LOCATION", minWidth: 150, valueFormatter: ({ value }) => value || "Not recorded" },
+    { field: "quantity", headerName: "QTY", width: 90, filter: "agNumberColumnFilter" },
+    { field: "routingProgress", headerName: "ROUTING PROGRESS", minWidth: 230, cellRenderer: ProductionProgressCell },
+    { field: "status", headerName: "STATUS", minWidth: 145, cellRenderer: StatusCell },
+    { headerName: "", width: 142, pinned: "right", sortable: false, filter: false, resizable: false, cellRenderer: ProductionActionCell, cellRendererParams: { onOpen: openRequirement } },
+  ], []);
 
   return (
     <section className="mx-auto max-w-[1800px] px-4 py-5 md:px-7 md:py-7">
@@ -443,16 +464,13 @@ function ProductionOverview({
               <SelectTrigger className="h-9 w-full bg-card xl:w-48"><SlidersHorizontal className="text-muted-foreground" /><SelectValue placeholder="All statuses" /></SelectTrigger>
               <SelectContent><SelectItem value="all">All statuses</SelectItem>{(["Planned", "Ready", "In Progress", "Blocked", "Needs Rework", "Complete"] as OperationStatus[]).map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
             </Select>
-            <Select value={sort} onValueChange={(value) => setSort((value ?? "document") as ProductionSort)}>
-              <SelectTrigger className="h-9 w-full bg-card xl:w-52"><ArrowUpDown className="text-muted-foreground" /><SelectValue placeholder="Sort requirements" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="document">Source document</SelectItem>
-                <SelectItem value="part">Part number</SelectItem>
-                <SelectItem value="description">Description</SelectItem>
-                <SelectItem value="quantity">Quantity: high to low</SelectItem>
-                <SelectItem value="progress">Progress: high to low</SelectItem>
-                <SelectItem value="status">Status: attention first</SelectItem>
-              </SelectContent>
+            <Select value={sourceDocument} onValueChange={(value) => setSourceDocument(value ?? "all")}>
+              <SelectTrigger className="h-9 w-full bg-card xl:w-56"><FileText className="text-muted-foreground" /><SelectValue placeholder="All source documents" /></SelectTrigger>
+              <SelectContent><SelectItem value="all">All source documents</SelectItem>{sourceDocuments.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}<SelectItem value="missing">Not synced</SelectItem></SelectContent>
+            </Select>
+            <Select value={location} onValueChange={(value) => setLocation(value ?? "all")}>
+              <SelectTrigger className="h-9 w-full bg-card xl:w-52"><MapPin className="text-muted-foreground" /><SelectValue placeholder="All locations" /></SelectTrigger>
+              <SelectContent><SelectItem value="all">All locations</SelectItem>{locations.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}<SelectItem value="unassigned">Not recorded</SelectItem></SelectContent>
             </Select>
             <div className="whitespace-nowrap text-xs text-muted-foreground">{visibleRequirements.length} of {requirements.length} shown</div>
           </div>
@@ -465,33 +483,23 @@ function ProductionOverview({
         ) : requirements.length === 0 ? (
           <div className="grid min-h-80 place-items-center p-6 text-center"><div><PackageCheck className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h2 className="font-semibold">No routed parts</h2><p className="mt-1 text-sm text-muted-foreground">Production requirements will appear after operations are added to an active routing.</p></div></div>
         ) : visibleRequirements.length === 0 ? (
-          <div className="grid min-h-80 place-items-center p-6 text-center"><div><Search className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h2 className="font-semibold">No requirements match</h2><p className="mt-1 text-sm text-muted-foreground">Try another status or clear the search.</p><Button variant="outline" className="mt-4" onClick={() => { setSearch(""); setStatus("all"); }}>Clear filters</Button></div></div>
+          <div className="grid min-h-80 place-items-center p-6 text-center"><div><Search className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h2 className="font-semibold">No requirements match</h2><p className="mt-1 text-sm text-muted-foreground">Try another status, source document, or location, or clear the search.</p><Button variant="outline" className="mt-4" onClick={() => { setSearch(""); setStatus("all"); setSourceDocument("all"); setLocation("all"); }}>Clear filters</Button></div></div>
         ) : (
           <>
-            <div className="hidden overflow-x-auto md:block">
-              <table className="w-full text-left text-sm">
-                <thead className="border-b bg-muted/20 text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
-                  <tr><th className="px-4 py-3">Part</th><th className="px-4 py-3">Revision</th><th className="px-4 py-3">Description</th><th className="px-4 py-3">Source document</th><th className="px-4 py-3">Location</th><th className="px-4 py-3 text-right">Qty</th><th className="px-4 py-3">Routing progress</th><th className="px-4 py-3">Status</th><th className="px-4 py-3"><span className="sr-only">Actions</span></th></tr>
-                </thead>
-                <tbody className="divide-y">
-                  {visibleRequirements.map((requirement) => {
-                    const percent = Math.round((requirement.completedOperations / requirement.totalOperations) * 100);
-                    return (
-                      <tr key={requirement.key} className="transition hover:bg-muted/30">
-                        <td className="px-4 py-3 font-mono text-xs font-bold text-primary">{requirement.partNumber}</td>
-                        <td className="px-4 py-3 font-mono text-xs font-semibold">{requirement.revision ?? "—"}</td>
-                        <td className="px-4 py-3 font-semibold">{requirement.partName}</td>
-                        <td className="px-4 py-3 font-mono text-xs">{requirement.documentName ?? "Not synced"}</td>
-                        <td className="px-4 py-3 text-xs font-medium">{requirement.storageLocation ?? "Not recorded"}</td>
-                        <td className="px-4 py-3 text-right font-semibold">{requirement.quantity}</td>
-                        <td className="min-w-56 px-4 py-3"><div className="mb-1.5 flex justify-between text-xs"><span>Mfg {requirement.completedManufacturingOperations}/{requirement.totalManufacturingOperations}{requirement.totalCamTasks > 0 ? ` · CAM ${requirement.completedCamTasks}/${requirement.totalCamTasks}` : ""}</span><span className="font-semibold">{percent}%</span></div><div className="h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary" style={{ width: `${percent}%` }} /></div></td>
-                        <td className="px-4 py-3"><StatusBadge status={requirement.status} /></td>
-                        <td className="px-4 py-3 text-right"><Button size="sm" variant="outline" onClick={() => setSelectedRequirementKey(requirement.key)}>More details<ChevronRight /></Button></td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+            <div className="hidden h-[min(59vh,680px)] min-h-[430px] md:block">
+              <AgGridReact<ProductionRequirement>
+                theme={gridTheme}
+                rowData={visibleRequirements}
+                columnDefs={columnDefs}
+                defaultColDef={{ sortable: true, filter: false, resizable: true }}
+                initialState={{ sort: { sortModel: [{ colId: "documentName", sort: "asc" }] } }}
+                getRowId={({ data }) => data.key}
+                onRowDoubleClicked={({ data }) => data && openRequirement(data)}
+                pagination
+                paginationPageSize={25}
+                paginationPageSizeSelector={[10, 25, 50]}
+                animateRows
+              />
             </div>
             <div className="divide-y md:hidden">
               {visibleRequirements.map((requirement) => {
