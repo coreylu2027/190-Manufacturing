@@ -1,5 +1,9 @@
 # FRC 190 Manufacturing OS
 
+The Baserow-to-Supabase migration has been **staged and validated without a live
+cutover**. See [the migration report and runbook](docs/baserow-supabase-staged-migration.md)
+for the copied tables, preservation checks, exclusions, and remaining cutover gates.
+
 Shop-floor workflow for the `V3-26 FRC190 Summer 2026` Baserow database. Onshape/BOM sync creates production requirements and routed operations; machinists use this app to filter available work, claim an operation, and record progress and completion.
 
 ## To-Do List
