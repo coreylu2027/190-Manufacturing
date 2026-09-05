@@ -1,6 +1,7 @@
 import type { ManufacturingOperation, QualityControlItem, QualityResult, QualityLocationFields } from "./types.ts";
 import type { StorageLocation } from "./storage-locations.ts";
 import { isStorageLocation } from "./storage-locations.ts";
+import { requiresPassedQc } from "./manufacturing-workflow.ts";
 
 export interface QualityReviewRow {
   id: number;
@@ -80,16 +81,21 @@ export function qualityMetadataByRequirement(
 
   for (const requirementId of requirementIds) {
     const operations = operationsByRequirement.get(requirementId) ?? [];
+    const inspectedOperations = operations.filter((operation) => !requiresPassedQc(operation.machine));
     const review = reviewsByRequirement.get(requirementId);
-    const completedAt = latestCompletion(operations);
+    const completedAt = latestCompletion(inspectedOperations);
     const completedAfterReview = Boolean(
       review
-      && operations.length > 0
-      && operations.every((operation) => operation.status === "Complete")
+      && inspectedOperations.length > 0
+      && inspectedOperations.every((operation) => operation.status === "Complete")
       && completedAt
       && timestamp(completedAt) > timestamp(review.reviewed_at),
     );
-    const effectiveQcResult: QualityResult = !review || retracted.has(review.id) || completedAfterReview
+    const passedReviewHasIncompleteWork = Boolean(
+      review?.result === "passed"
+      && inspectedOperations.some((operation) => operation.status !== "Complete"),
+    );
+    const effectiveQcResult: QualityResult = !review || retracted.has(review.id) || completedAfterReview || passedReviewHasIncompleteWork
       ? "pending"
       : review.result;
     const effectivePass = effectiveQcResult === "passed";
@@ -143,9 +149,13 @@ export function projectQualityControl(
   );
 
   return [...operationsByRequirement.entries()]
-    .filter(([requirementId, operations]) =>
-      operations.every((operation) => operation.status === "Complete") || metadata.get(requirementId)?.effectiveQcResult !== "pending",
-    )
+    .map(([requirementId, operations]) => [
+      requirementId,
+      operations.filter((operation) => !requiresPassedQc(operation.machine)),
+    ] as const)
+    .filter(([requirementId, operations]) => operations.length > 0 && (
+      operations.every((operation) => operation.status === "Complete") || metadata.get(requirementId)?.effectiveQcResult !== "pending"
+    ))
     .map(([requirementId, operations]) => {
       const quality = metadata.get(requirementId) ?? {
         reviewId: null,

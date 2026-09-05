@@ -77,7 +77,7 @@ The Operations table stores `Work Type`, `CAM Program Path`, and `CAM Notes`.
 Historical migration utilities are retained only under
 `scripts/manufacturing-migration` for offline audit and recovery.
 
-The Fabrication tab reads active rows from the Finishing table and joins their linked production requirements for part, assembly, status, and file details. A finishing job becomes claimable when its requirement reaches `Ready for Finishing`; claiming records the machinist on the Finishing row, and completing it advances the linked requirement to `Complete`. Release and undo actions reverse those changes.
+The Fabrication tab reads active rows from the Finishing table and joins their linked production requirements for part, assembly, status, and file details. A finishing job becomes claimable when its requirement reaches `Ready for Finishing`; claiming records the machinist on the Finishing row. Completing it advances the linked requirement to `Complete` unless the route contains a `Threaded Insert` operation, in which case finishing releases that operation and the requirement completes after the inserts are installed. Release and undo actions reverse those changes.
 
 The shop UI treats the Onshape document name and assembly part number as separate identifiers. It reads the document name from a `Source Document` text field on Production Requirements (with `Onshape Document` supported as a compatibility alias) and displays values such as `A-26C-0001`. The linked `Assembly` value, such as `A-190B-26…`, remains available for internal requirement identity and is not presented as the source document.
 
@@ -88,7 +88,7 @@ The shop UI treats the Onshape document name and assembly part number as separat
 - Authentication and account approval are required in every environment.
 - An approved administrator assigns either the `machinist` or `admin` role.
 - Approval and role checks are repeated on protected server routes; hiding the Admin tab is not the security boundary.
-- Production requirements enter the administrator QC queue only after every active manufacturing operation is complete. Passing records the requirement-level review; failing records the review and returns the final operation to `Needs Rework`.
+- Production requirements enter the administrator QC queue after every active pre-QC manufacturing operation is complete. `Threaded Insert` is the sole post-QC exception: it remains planned until QC passes and, when required, powder-coat finishing completes. Passing records the requirement-level review; failing records the review and returns the final pre-QC operation to `Needs Rework`.
 - Supabase is the authoritative QC history by production requirement. Historical operation IDs are retained only as migration provenance. QC and its workflow update commit together in Supabase.
 - `supabase/migrations/202609050001_qc_storage_locations.sql` adds the nullable location and editor attribution columns. Apply it before deploying application code that reads locations, then apply `supabase/production/20260905_qc_storage_locations.sql` after the manufacturing write RPC.
 - A location is optional when QC passes. Only the latest effective passed review can be edited; an undone pass or a review made stale by later manufacturing completion is treated as pending and exposes no location.

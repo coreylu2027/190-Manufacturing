@@ -63,6 +63,25 @@ function fixture(options: {
   };
 }
 
+function withThreadedInsert(state: WriteState, overrides: Partial<RawRow> = {}) {
+  state.rows.operations.push(normalized("operations", {
+    id: 11,
+    Operation: "fixture|OP2|Manufacturing",
+    "Production Requirement": [{ id: 20, value: "P-1 — Fixture [A-1]" }],
+    "Operation Number": { value: "OP2" },
+    Machine: { value: "Threaded Insert" },
+    "Work Type": { value: "Manufacturing" },
+    "Active in Routing": true,
+    Status: { value: "Planned" },
+    Machinist: "",
+    "Claimed Quantity": 0,
+    "Completed Quantity": 0,
+    "Quantity Ledger": "",
+    ...overrides,
+  }));
+  return state;
+}
+
 function harness(state: WriteState, commitResponse?: (body: Record<string, unknown>, attempt: number) => Response | Promise<Response>) {
   const commits: Record<string, unknown>[] = [];
   let attempts = 0;
@@ -187,6 +206,44 @@ test("QC locations can be changed or cleared only for an effective passed review
     );
     assert.equal(invalid.commits.length, 0);
   }
+});
+
+test("QC releases threaded inserts only after any required finishing completes", async () => {
+  const readyForQc = withThreadedInsert(fixture({
+    operation: {
+      Status: { value: "Complete" }, "Completed Quantity": 2,
+      "Quantity Ledger": JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 2 }]),
+      "Completed At": "2026-09-05T12:00:00Z",
+    },
+    requirement: { Status: { value: "Ready for QC" }, "QC Outcome": { value: "Not Inspected" } },
+  }));
+  const uncoated = harness(readyForQc);
+  await uncoated.adapter.recordQualityReview(20, "passed", "Primary work accepted", ACTOR);
+  const uncoatedChanges = uncoated.commits[0].p_changes as Array<{ entity: string; id: number; patch: Record<string, unknown> }>;
+  assert.equal(uncoatedChanges.find(({ entity, id }) => entity === "operations" && id === 11)?.patch.status, "Ready");
+  assert.equal(uncoatedChanges.find(({ entity }) => entity === "requirements")?.patch.status, "Ready for Manufacturing");
+
+  const coatedState = withThreadedInsert(fixture({
+    operation: readyForQc.rows.operations[0].source_row,
+    requirement: {
+      Status: { value: "Ready for Finishing" }, Finishing: { value: "Black" },
+      "QC Outcome": { value: "Passed" },
+    },
+    finishing: { Machinist: ACTOR.name },
+  }));
+  const coated = harness(coatedState);
+  const result = await coated.adapter.applyFabricationAction(30, "complete", ACTOR);
+  assert.equal(result.status, "Complete");
+  assert.equal(result.requirementStatus, "Ready for Manufacturing");
+  const coatedChanges = coated.commits[0].p_changes as Array<{ entity: string; id: number; patch: Record<string, unknown> }>;
+  assert.equal(coatedChanges.find(({ entity, id }) => entity === "operations" && id === 11)?.patch.status, "Ready");
+});
+
+test("threaded inserts cannot be claimed before QC even if a stale row says Ready", async () => {
+  const state = withThreadedInsert(fixture(), { Status: { value: "Ready" } });
+  const { adapter, commits } = harness(state);
+  await assert.rejects(adapter.applyQuantityAction(11, "claim", 1, ACTOR), /passed QC review/);
+  assert.equal(commits.length, 0);
 });
 
 test("release, completion undo, CAM edits, finishing completion, and QC undo are planned safely", async () => {

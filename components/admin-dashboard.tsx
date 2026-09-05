@@ -135,7 +135,7 @@ export function AdminDashboard() {
       ) : (
         <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1.2fr)_minmax(420px,.8fr)]">
           <div className="overflow-hidden rounded-2xl border bg-card shadow-[0_14px_42px_rgba(15,23,42,.055)]">
-            <div className="border-b bg-muted/25 px-4 py-3"><h2 className="font-semibold">Quality control queue</h2><p className="mt-0.5 text-xs text-muted-foreground">Production requirements appear after every manufacturing operation is complete.</p></div>
+            <div className="border-b bg-muted/25 px-4 py-3"><h2 className="font-semibold">Quality control queue</h2><p className="mt-0.5 text-xs text-muted-foreground">Production requirements appear after every pre-QC manufacturing operation is complete.</p></div>
             {query.data?.qualityControl.length ? (
               <div className="divide-y">
                 {query.data.qualityControl.map((item) => (
@@ -175,7 +175,7 @@ export function AdminDashboard() {
                   </article>
                 ))}
               </div>
-            ) : <div className="grid min-h-60 place-items-center p-6 text-center"><div><ClipboardCheck className="mx-auto mb-3 size-10 text-emerald-600" /><h3 className="font-semibold">QC queue is clear</h3><p className="mt-1 text-sm text-muted-foreground">Requirements will appear after all manufacturing operations are complete.</p></div></div>}
+            ) : <div className="grid min-h-60 place-items-center p-6 text-center"><div><ClipboardCheck className="mx-auto mb-3 size-10 text-emerald-600" /><h3 className="font-semibold">QC queue is clear</h3><p className="mt-1 text-sm text-muted-foreground">Requirements will appear after all pre-QC manufacturing operations are complete.</p></div></div>}
           </div>
 
           <div className="overflow-hidden rounded-2xl border bg-card shadow-[0_14px_42px_rgba(15,23,42,.055)]">

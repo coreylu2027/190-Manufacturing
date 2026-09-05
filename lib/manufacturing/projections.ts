@@ -1,5 +1,5 @@
 // Pure projections from normalized manufacturing rows and the Supabase attachment catalog.
-import { deduplicateOperations } from "../manufacturing-workflow.ts";
+import { deduplicateOperations, requiresPassedQc } from "../manufacturing-workflow.ts";
 import type { ManufacturingOperation, FabricationJob, OperationWorkType, OperationStatus, OperationAllocation } from "../types.ts";
 import { projectQualityControl, qualityMetadataByRequirement, type QualityReviewRow } from "../quality-control.ts";
 import type { ManufacturingAttachment, RawRow as SourceRow } from "./model.ts";
@@ -143,7 +143,15 @@ export function projectOperations(operationRows: SourceRow[], requirementRows: S
     const part = partId ? parts.get(partId) : undefined;
     const parsed = parseRequirement(linkedValue(row["Production Requirement"]));
     const operationNumber = selectValue(row["Operation Number"], "OP1") as ManufacturingOperation["operationNumber"];
-    const status = selectValue(row.Status, "Planned") as OperationStatus;
+    const machine = selectValue(row.Machine, "Unassigned");
+    const storedStatus = selectValue(row.Status, "Planned") as OperationStatus;
+    const finishing = selectValue(requirement?.Finishing);
+    const waitingForQcOrFinishing = requiresPassedQc(machine)
+      && (selectValue(requirement?.["QC Outcome"]) !== "Passed"
+        || Boolean(finishing && finishing !== "None" && selectValue(requirement?.Status) === "Ready for Finishing"));
+    const status = waitingForQcOrFinishing && ["Planned", "Ready"].includes(storedStatus)
+      ? "Planned"
+      : storedStatus;
     const quantity = Number(requirement?.["Required Quantity"] ?? 1);
     const workType = operationWorkType(row);
     const taskQuantity = taskQuantityForRow(row, quantity);
@@ -163,7 +171,7 @@ export function projectOperations(operationRows: SourceRow[], requirementRows: S
       ...quantities,
       operationNumber,
       workType,
-      machine: selectValue(row.Machine, "Unassigned"),
+      machine,
       status,
       machinist: String(row.Machinist ?? ""),
       startedAt: row["Started At"] ? String(row["Started At"]) : null,
@@ -206,9 +214,22 @@ export function projectOperations(operationRows: SourceRow[], requirementRows: S
 
   return operations;
 }
-export function projectFinishing(finishingRows: SourceRow[], requirementRows: SourceRow[], attachments: ManufacturingAttachment[] = []): FabricationJob[] {
+export function projectFinishing(
+  finishingRows: SourceRow[],
+  requirementRows: SourceRow[],
+  attachments: ManufacturingAttachment[] = [],
+  operationRows: SourceRow[] = [],
+): FabricationJob[] {
   const requirements = new Map(requirementRows.map((row) => [row.id, row]));
   const files = attachmentIndex(attachments);
+  const requirementsWithPostQcWork = new Set(operationRows.filter((row) =>
+    Boolean(row["Active in Routing"])
+    && operationWorkType(row) === "Manufacturing"
+    && requiresPassedQc(selectValue(row.Machine)),
+  ).flatMap((row) => {
+    const requirementId = linkedId(row["Production Requirement"]);
+    return requirementId ? [requirementId] : [];
+  }));
 
   const jobs = finishingRows.flatMap((row): FabricationJob[] => {
     const requirementId = linkedId(row["Production Requirement"]);
@@ -218,6 +239,9 @@ export function projectFinishing(finishingRows: SourceRow[], requirementRows: So
     const parsed = parseRequirement(linkedValue(row["Production Requirement"]));
     const machinist = String(row.Machinist ?? "").trim();
     const requirementStatus = selectValue(requirement.Status, "Needs Triage");
+    const finishingCompleteBeforePostQcWork = requirementsWithPostQcWork.has(requirementId)
+      && selectValue(requirement["QC Outcome"]) === "Passed"
+      && requirementStatus !== "Ready for Finishing";
     const partId = linkedId(requirement.Part);
     const drawingPdf = partId ? files.get(`${partId}|drawing-pdf`) : undefined;
     const stepFile = partId ? files.get(`${partId}|step`) : undefined;
@@ -230,7 +254,7 @@ export function projectFinishing(finishingRows: SourceRow[], requirementRows: So
       quantity: Math.max(1, Math.floor(Number(row["Required Quantity"] ?? requirement["Required Quantity"] ?? 1))),
       color: selectValue(row["Powder Coat Color"], selectValue(requirement.Finishing, "Unspecified")),
       qcNotes: "",
-      status: fabricationStatus(requirementStatus, machinist),
+      status: finishingCompleteBeforePostQcWork ? "Complete" : fabricationStatus(requirementStatus, machinist),
       requirementStatus,
       machinist,
       active: Boolean(row.Active),

@@ -75,7 +75,7 @@ export function createSupabaseManufacturingAdapter(config: AdapterConfig) {
     },
     async getFabricationJobs() {
       const [rows, attachments] = await Promise.all([readRows(), readAttachments()]);
-      return { jobs: projectFinishing(rows.finishing, rows.requirements, attachments) };
+      return { jobs: projectFinishing(rows.finishing, rows.requirements, attachments, rows.operations) };
     }
   };
 }

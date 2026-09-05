@@ -1,5 +1,5 @@
 import { createWritePlan } from "./write-plan.ts";
-import { deduplicateOperations } from "../manufacturing-workflow.ts";
+import { deduplicateOperations, requiresPassedQc } from "../manufacturing-workflow.ts";
 import { supabaseApiHeaders, type AdapterConfig } from "./supabase-adapter.ts";
 import type { NormalizedRow } from "./model.ts";
 import type { FabricationAction, OperationPatch, OperationQuantityAction, QualityResult } from "../types.ts";
@@ -73,10 +73,15 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
         && state.rows.operations.some((candidate) => candidate.id === review.operation_id && candidate.requirement_id === requirementId))
       .sort((a, b) => b.reviewed_at.localeCompare(a.reviewed_at) || b.id - a.id)[0];
   }
-  function assertEffectivePassedReview(state: WriteState, requirementId: number) {
+  function assertEffectivePassedReview(
+    state: WriteState,
+    requirementId: number,
+    message = "A location can only be edited for the latest effective passed QC review",
+  ) {
     const review = latestReview(state, requirementId);
     const manufacturingOperations = deduplicateOperations(state.rows.operations.filter((row) =>
-      row.active_in_routing && row.work_type === "Manufacturing" && row.requirement_id === requirementId,
+      row.active_in_routing && row.work_type === "Manufacturing" && row.requirement_id === requirementId
+        && !requiresPassedQc(String(row.machine ?? "")),
     ).map((row) => ({
       id: row.id,
       operationKey: String(row.operation_key ?? ""),
@@ -89,7 +94,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       || manufacturingOperations.some((candidate) => candidate.completedAt
         && new Date(candidate.completedAt).getTime() > new Date(review?.reviewed_at ?? "").getTime());
     if (!review || review.result !== "passed" || state.retractions.some((item) => item.review_id === review.id) || stale) {
-      throw new ManufacturingWriteError("A location can only be edited for the latest effective passed QC review", 409);
+      throw new ManufacturingWriteError(message, 409);
     }
     return review;
   }
@@ -98,16 +103,30 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       return (await rpc<WriteState>("manufacturing_write_state")).retractions.map(row => row.review_id);
     },
     applyQuantityAction(id: number, action: OperationQuantityAction, quantity: number, actor: Actor, handoff?: { programPath?: string; notes?: string }) {
-      return transact(actor, action, async (plan, state) => { operation(state, id); return plan.applyQuantityAction(id, action, quantity, actor, handoff); });
+      return transact(actor, action, async (plan, state) => {
+        const row = operation(state, id);
+        if (requiresPassedQc(String(row.machine ?? "")) && ["claim", "complete"].includes(action)) {
+          assertEffectivePassedReview(state, Number(row.requirement_id), "Threaded inserts require a current passed QC review");
+        }
+        return plan.applyQuantityAction(id, action, quantity, actor, handoff);
+      });
     },
     stealOperationClaim(id: number, actor: Actor) {
-      return transact(actor, "steal", async (plan, state) => { operation(state, id); return plan.stealOperationClaim(id, actor); });
+      return transact(actor, "steal", async (plan, state) => {
+        const row = operation(state, id);
+        if (requiresPassedQc(String(row.machine ?? ""))) {
+          assertEffectivePassedReview(state, Number(row.requirement_id), "Threaded inserts require a current passed QC review");
+        }
+        return plan.stealOperationClaim(id, actor);
+      });
     },
     patchOperation(id: number, patch: OperationPatch, actor: Actor) {
       return transact(actor, "patch_operation", async (plan, state) => {
         const row = operation(state, id);
         const requirement = state.rows.requirements.find(r => r.id === row.requirement_id);
-        if (requirement?.qc_outcome === "Passed") throw new ManufacturingWriteError("Undo the passed QC review before editing completed work", 409);
+        if (requirement?.qc_outcome === "Passed" && !requiresPassedQc(String(row.machine ?? ""))) {
+          throw new ManufacturingWriteError("Undo the passed QC review before editing completed work", 409);
+        }
         if (patch.status === "Complete" || patch.status === "In Progress" || row.status === "Complete" && patch.status !== "Needs Rework") {
           throw new ManufacturingWriteError("Use quantity actions to claim, complete, or reopen work", 409);
         }

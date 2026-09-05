@@ -1541,7 +1541,13 @@ def operation_statuses_for_routes(
             current_status = select_option_value(
                 existing_by_key.get(operation_key, {}).get("Status")
             )
-            if current_status in ("", "Planned", "Ready"):
+            machine = select_option_value(operation.get("Machine"))
+            if machine == "Threaded Insert" and current_status in ("", "Planned"):
+                # The shop workflow releases threaded inserts only after QC (and
+                # after powder coat when finishing is required). Preserve Ready
+                # once the app has explicitly released the operation.
+                status = "Planned"
+            elif current_status in ("", "Planned", "Ready"):
                 status = "Ready" if predecessor_complete else "Planned"
             else:
                 status = current_status

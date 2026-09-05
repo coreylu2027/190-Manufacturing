@@ -1,5 +1,5 @@
 // Manufacturing workflow planning is pure; all I/O is committed by the Supabase transaction adapter.
-import { deduplicateOperations, planRequirementWorkflow, validateCamAction } from '../manufacturing-workflow.ts';
+import { deduplicateOperations, planRequirementWorkflow, requiresPassedQc, validateCamAction } from '../manufacturing-workflow.ts';
 import type { FabricationAction, ManufacturingOperation, OperationAllocation, OperationPatch, OperationQuantityAction, OperationStatus, OperationWorkType, QualityResult } from '../types.ts';
 import { ENTITIES, denormalizeRow, normalizeRow, type NormalizedRow, type RawRow } from './model.ts';
 type SourceRow = RawRow;
@@ -30,6 +30,9 @@ function selectValue(value: unknown, fallback = ""): string {
 }
 function operationWorkType(row: SourceRow): OperationWorkType {
   return selectValue(row["Work Type"], "Manufacturing") === "CAM" ? "CAM" : "Manufacturing";
+}
+function isPostQcOperationRow(row: SourceRow) {
+  return operationWorkType(row) === "Manufacturing" && requiresPassedQc(selectValue(row.Machine));
 }
 function taskQuantityForRow(row: SourceRow, requiredQuantity: number) {
   return operationWorkType(row) === "CAM" ? 1 : requiredQuantity;
@@ -152,6 +155,12 @@ async function applyFabricationAction(id: number, action: FabricationAction, act
   const requirementId = linkedId(finishing["Production Requirement"]);
   if (!requirementId) throw new Error("Finishing job is not linked to a production requirement");
   const requirement = await getRow(REQUIREMENTS_TABLE_ID, requirementId);
+  const operationRows = await listAllRows(OPERATIONS_TABLE_ID);
+  const postQcRows = canonicalRows(operationRows).filter((row) =>
+    linkedId(row["Production Requirement"]) === requirementId
+    && Boolean(row["Active in Routing"])
+    && isPostQcOperationRow(row),
+  );
   const requirementStatus = selectValue(requirement.Status, "Needs Triage");
   const assignedMachinist = String(finishing.Machinist ?? "").trim();
   const isAssignedActor = assignedMachinist.toLocaleLowerCase() === actor.name.toLocaleLowerCase();
@@ -168,27 +177,52 @@ async function applyFabricationAction(id: number, action: FabricationAction, act
     await patchRow(FINISHING_TABLE_ID, id, { Machinist: "" });
   } else if (action === "complete") {
     if (requirementStatus !== "Ready for Finishing" || !isAssignedActor) throw new Error("Claim this finishing job before completing it");
-    nextRequirementStatus = "Complete";
+    nextRequirementStatus = postQcRows.length > 0 ? "Ready for Manufacturing" : "Complete";
     await patchRow(REQUIREMENTS_TABLE_ID, requirementId, { Status: nextRequirementStatus });
+    if (postQcRows.length > 0) {
+      nextRequirementStatus = (await reconcileRequirementWorkflow(requirementId, { finishingComplete: true })).requirementStatus;
+    }
   } else {
-    if (requirementStatus !== "Complete" || !isAssignedActor) throw new Error("Only the assigned machinist can undo this completion");
+    const postQcWorkStarted = postQcRows.some((row) =>
+      !["Planned", "Ready"].includes(selectValue(row.Status, "Planned"))
+      || Number(row["Claimed Quantity"] ?? 0) > 0
+      || Number(row["Completed Quantity"] ?? 0) > 0,
+    );
+    const canUndoCompletedFinishing = postQcRows.length > 0
+      ? requirementStatus === "Ready for Manufacturing" && !postQcWorkStarted
+      : requirementStatus === "Complete";
+    if (!canUndoCompletedFinishing || !isAssignedActor) {
+      throw new Error(postQcWorkStarted
+        ? "Undo threaded-insert work before reopening finishing"
+        : "Only the assigned machinist can undo this completion");
+    }
     nextRequirementStatus = "Ready for Finishing";
     await patchRow(REQUIREMENTS_TABLE_ID, requirementId, { Status: nextRequirementStatus });
+    if (postQcRows.length > 0) {
+      await reconcileRequirementWorkflow(requirementId, { finishingComplete: false });
+    }
   }
 
   return {
     id,
-    status: fabricationStatus(nextRequirementStatus, nextMachinist),
+    status: action === "complete" ? "Complete" : fabricationStatus(nextRequirementStatus, nextMachinist),
     requirementStatus: nextRequirementStatus,
     machinist: nextMachinist,
   };
 }
-async function reconcileRequirementWorkflow(requirementId: number) {
+async function reconcileRequirementWorkflow(requirementId: number, options: { finishingComplete?: boolean } = {}) {
   const [requirement, operationRows] = await Promise.all([
     getRow(REQUIREMENTS_TABLE_ID, requirementId),
     listAllRows(OPERATIONS_TABLE_ID),
   ]);
   const relatedRows = operationRows.filter((row) => linkedId(row["Production Requirement"]) === requirementId);
+  const finishing = selectValue(requirement.Finishing);
+  const finishingRequired = Boolean(finishing && finishing !== "None");
+  const requirementStatus = selectValue(requirement.Status, "Needs Triage");
+  const qcPassed = selectValue(requirement["QC Outcome"]) === "Passed";
+  const finishingComplete = options.finishingComplete ?? (!finishingRequired || (
+    qcPassed && !["Ready for QC", "Ready for Finishing", "Needs Rework"].includes(requirementStatus)
+  ));
   const plan = planRequirementWorkflow(relatedRows.map((row) => ({
     id: row.id,
     operationKey: String(row.Operation ?? row.id),
@@ -201,10 +235,10 @@ async function reconcileRequirementWorkflow(requirementId: number) {
     completedQuantity: Number(row["Completed Quantity"] ?? 0),
     startedAt: row["Started At"] ? String(row["Started At"]) : null,
     completedAt: row["Completed At"] ? String(row["Completed At"]) : null,
-  })), selectValue(requirement.Status, "Needs Triage"));
+  })), requirementStatus, { qcPassed, finishingRequired, finishingComplete });
 
   await Promise.all(plan.operationPatches.map((patch) => patchRow(OPERATIONS_TABLE_ID, patch.id, { Status: patch.status })));
-  if (selectValue(requirement.Status, "Needs Triage") !== plan.requirementStatus) {
+  if (requirementStatus !== plan.requirementStatus) {
     await patchRow(REQUIREMENTS_TABLE_ID, requirementId, { Status: plan.requirementStatus });
   }
   return plan;
@@ -309,6 +343,15 @@ async function applyQuantityAction(
   const requirement = await getRow(REQUIREMENTS_TABLE_ID, requirementId);
   const requiredQuantity = Math.max(1, Math.floor(Number(requirement["Required Quantity"] ?? 1)));
   const workType = operationWorkType(operation);
+  const postQcOperation = isPostQcOperationRow(operation);
+  const qcOutcome = selectValue(requirement["QC Outcome"]);
+  const finishing = selectValue(requirement.Finishing);
+  const waitingForFinishing = Boolean(finishing && finishing !== "None" && selectValue(requirement.Status) === "Ready for Finishing");
+  if (postQcOperation && ["claim", "complete"].includes(action) && (qcOutcome !== "Passed" || waitingForFinishing)) {
+    throw new Error(waitingForFinishing
+      ? "Complete finishing before starting threaded inserts"
+      : "Threaded inserts require a passed QC review");
+  }
   const taskQuantity = taskQuantityForRow(operation, requiredQuantity);
   if (workType === "CAM") validateCamAction({ action, quantity });
   const currentStatus = selectValue(operation.Status, "Planned") as OperationStatus;
@@ -359,8 +402,7 @@ async function applyQuantityAction(
     actorAllocation.claimed -= quantity;
     actorAllocation.completed += quantity;
   } else {
-    const qcOutcome = selectValue(requirement["QC Outcome"]);
-    if (qcOutcome === "Passed") throw new Error("Undo the passed QC review before reopening completed work");
+    if (qcOutcome === "Passed" && !postQcOperation) throw new Error("Undo the passed QC review before reopening completed work");
     if (quantity > actorAllocation.completed) throw new Error(`You only completed ${actorAllocation.completed} part(s)`);
     actorAllocation.completed -= quantity;
     actorAllocation.claimed += quantity;
@@ -394,7 +436,7 @@ async function applyQuantityAction(
   await patchRow(OPERATIONS_TABLE_ID, id, operationPatch);
   if (workType === "Manufacturing") {
     const requirementPatch: Record<string, unknown> = { Machinist: summary };
-    if (action === "undo_complete") requirementPatch["QC Outcome"] = "Not Inspected";
+    if (action === "undo_complete" && !postQcOperation) requirementPatch["QC Outcome"] = "Not Inspected";
     await patchRow(REQUIREMENTS_TABLE_ID, requirementId, requirementPatch);
   }
   await reconcileRequirementWorkflow(requirementId);
@@ -429,6 +471,15 @@ async function stealOperationClaim(
   const requirementId = linkedId(operation["Production Requirement"]);
   if (!requirementId) throw new Error("Operation is not linked to a production requirement");
   const requirement = await getRow(REQUIREMENTS_TABLE_ID, requirementId);
+  if (isPostQcOperationRow(operation)) {
+    const finishing = selectValue(requirement.Finishing);
+    if (selectValue(requirement["QC Outcome"]) !== "Passed") {
+      throw new Error("Threaded inserts require a passed QC review");
+    }
+    if (finishing && finishing !== "None" && selectValue(requirement.Status) === "Ready for Finishing") {
+      throw new Error("Complete finishing before starting threaded inserts");
+    }
+  }
   const requiredQuantity = Math.max(1, Math.floor(Number(requirement["Required Quantity"] ?? 1)));
   const workType = operationWorkType(operation);
   const taskQuantity = taskQuantityForRow(operation, requiredQuantity);
@@ -560,32 +611,40 @@ async function patchRequirementQualityOutcome(
     && operationWorkType(row) === "Manufacturing"
     && Boolean(row["Active in Routing"]),
   );
-  if (manufacturingRows.length === 0) throw new Error("Production requirement has no active manufacturing operations");
-  if (!manufacturingRows.every((row) => selectValue(row.Status, "Planned") === "Complete")) {
-    throw new Error("All manufacturing operations must be complete before QC");
+  const inspectedRows = manufacturingRows.filter((row) => !isPostQcOperationRow(row));
+  if (inspectedRows.length === 0) throw new Error("Production requirement has no pre-QC manufacturing operations");
+  if (!inspectedRows.every((row) => selectValue(row.Status, "Planned") === "Complete")) {
+    throw new Error("All pre-QC manufacturing operations must be complete before QC");
   }
 
   if (result === "failed") {
-    const reworkOperation = [...manufacturingRows].sort((a, b) =>
+    const reworkOperation = [...inspectedRows].sort((a, b) =>
       selectValue(b["Operation Number"], "OP1").localeCompare(selectValue(a["Operation Number"], "OP1")) || b.id - a.id,
     )[0];
     await patchOperation(reworkOperation.id, { status: "Needs Rework" }, actorName);
   }
 
   const finishing = selectValue(requirement.Finishing);
+  const hasPostQcWork = manufacturingRows.some(isPostQcOperationRow);
   const status = result === "failed"
     ? "Needs Rework"
     : finishing && finishing !== "None"
       ? "Ready for Finishing"
-      : "Complete";
+      : hasPostQcWork
+        ? "Ready for Manufacturing"
+        : "Complete";
 
-  return patchRow(REQUIREMENTS_TABLE_ID, requirementId, {
+  await patchRow(REQUIREMENTS_TABLE_ID, requirementId, {
     "QC Outcome": result === "passed" ? "Passed" : "Failed",
     "QC Notes": notes,
     "QC Reviewed By": actorName,
     "QC Reviewed At": reviewedAt,
     Status: status,
   });
+  if (result === "passed" && hasPostQcWork) {
+    await reconcileRequirementWorkflow(requirementId, { finishingComplete: !finishing || finishing === "None" });
+  }
+  return getRow(REQUIREMENTS_TABLE_ID, requirementId);
 }
 async function clearPassedRequirementQualityOutcome(requirementId: number) {
   
@@ -596,8 +655,19 @@ async function clearPassedRequirementQualityOutcome(requirementId: number) {
     && operationWorkType(row) === "Manufacturing"
     && Boolean(row["Active in Routing"]),
   );
-  if (manufacturingRows.length === 0 || !manufacturingRows.every((row) => selectValue(row.Status, "Planned") === "Complete")) {
-    throw new Error("Only a passed QC review with all operations complete can be undone");
+  const inspectedRows = manufacturingRows.filter((row) => !isPostQcOperationRow(row));
+  const postQcRows = manufacturingRows.filter(isPostQcOperationRow);
+  if (inspectedRows.length === 0 || !inspectedRows.every((row) => selectValue(row.Status, "Planned") === "Complete")) {
+    throw new Error("Only a passed QC review with all pre-QC operations complete can be undone");
+  }
+  if (postQcRows.some((row) => !["Planned", "Ready"].includes(selectValue(row.Status, "Planned"))
+    || Number(row["Claimed Quantity"] ?? 0) > 0 || Number(row["Completed Quantity"] ?? 0) > 0)) {
+    throw new Error("Undo threaded-insert work before undoing the QC pass");
+  }
+  const finishing = selectValue((await getRow(REQUIREMENTS_TABLE_ID, requirementId)).Finishing);
+  const currentStatus = selectValue((await getRow(REQUIREMENTS_TABLE_ID, requirementId)).Status);
+  if (finishing && finishing !== "None" && currentStatus !== "Ready for Finishing") {
+    throw new Error("QC cannot be undone after finishing is complete");
   }
   await patchRow(REQUIREMENTS_TABLE_ID, requirementId, {
     "QC Outcome": "Not Inspected",
@@ -606,6 +676,7 @@ async function clearPassedRequirementQualityOutcome(requirementId: number) {
     "QC Reviewed At": null,
     Status: "Ready for QC",
   });
+  await reconcileRequirementWorkflow(requirementId, { finishingComplete: false });
 }
 return { applyFabricationAction,patchOperation,updateCamHandoff,applyQuantityAction,stealOperationClaim,renameMachinistAllocations,patchRequirementQualityOutcome,clearPassedRequirementQualityOutcome,
  changes() {

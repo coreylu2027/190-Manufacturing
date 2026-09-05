@@ -1411,6 +1411,38 @@ class RecordBuildingTests(unittest.TestCase):
         self.assertEqual(statuses["route-a|OP1"], "In Progress")
         self.assertEqual(statuses["route-a|OP2"], "Planned")
 
+    def test_threaded_inserts_wait_for_the_app_to_release_them_after_qc(self):
+        operations = [
+            {
+                "Operation": "route-a|OP1",
+                "production_key": "route-a",
+                "Operation Number": "OP1",
+                "Machine": "Mill",
+            },
+            {
+                "Operation": "route-a|OP2",
+                "production_key": "route-a",
+                "Operation Number": "OP2",
+                "Machine": "Threaded Insert",
+            },
+        ]
+        completed_primary = [
+            {"Operation": "route-a|OP1", "Status": "Complete"},
+        ]
+        statuses = MODULE.operation_statuses_for_routes(
+            operations, completed_primary
+        )
+        self.assertEqual(statuses["route-a|OP2"], "Planned")
+
+        released_by_app = [
+            *completed_primary,
+            {"Operation": "route-a|OP2", "Status": "Ready"},
+        ]
+        statuses = MODULE.operation_statuses_for_routes(
+            operations, released_by_app
+        )
+        self.assertEqual(statuses["route-a|OP2"], "Ready")
+
     def test_custom_bom_header_display_name_is_available_for_operations(self):
         normalized = MODULE.normalize_bom_rows(
             [

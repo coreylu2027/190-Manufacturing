@@ -51,3 +51,25 @@ test("file availability and exact names come only from the Supabase attachment c
   assert.equal(job.hasStepFile, true);
   assert.equal(job.stepName, "P-1 REV B.step");
 });
+
+test("threaded inserts stay hidden behind QC and finishing while completed finishing remains visible", () => {
+  const threadedInsert = {
+    ...operation,
+    id: 5,
+    Operation: "root|part|OP2",
+    "Operation Number": { value: "OP2" },
+    Machine: { value: "Threaded Insert" },
+    Status: { value: "Ready" },
+  };
+  const awaitingFinishing = {
+    ...requirement,
+    Finishing: { value: "Black" },
+    "QC Outcome": { value: "Passed" },
+    Status: { value: "Ready for Finishing" },
+  };
+  assert.equal(projectOperations([threadedInsert], [awaitingFinishing], [part])[0].status, "Planned");
+
+  const finishingComplete = { ...awaitingFinishing, Status: { value: "Ready for Manufacturing" } };
+  assert.equal(projectOperations([threadedInsert], [finishingComplete], [part])[0].status, "Ready");
+  assert.equal(projectFinishing([finishing], [finishingComplete], [], [threadedInsert])[0].status, "Complete");
+});
