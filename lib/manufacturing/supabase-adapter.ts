@@ -63,7 +63,15 @@ export function createSupabaseManufacturingAdapter(config: AdapterConfig) {
   }
   async function readRows(): Promise<ManufacturingRows> {
     const entries = await Promise.all(ENTITIES.map(async entity => [entity.name,
-      (await readEntity(entity.name)).map(row=>denormalizeRow(entity,row))
+      (await readEntity(entity.name)).map(row => {
+        const raw = denormalizeRow(entity, row);
+        return entity.name === "requirements" ? {
+          ...raw,
+          "Part Location": row.part_location ?? null,
+          "Location Updated By": row.location_updated_by ?? null,
+          "Location Updated At": row.location_updated_at ?? null,
+        } : raw;
+      })
         .sort((a,b)=>Number(a.order??a.id)-Number(b.order??b.id) || a.id-b.id)] as const));
     return Object.fromEntries(entries);
   }

@@ -10,7 +10,7 @@ const locationSchema = z.object({
   location: storageLocationSchema.nullable(),
 }).strict();
 
-export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function PATCH(request: Request, { params }: RouteContext<"/api/requirements/[id]/location">) {
   const currentUser = await getAppUser();
   if (!currentUser) return NextResponse.json({ error: "Authentication required" }, { status: 401 });
   if (!currentUser.approved) return NextResponse.json({ error: "Account approval required" }, { status: 403 });
@@ -28,7 +28,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     return NextResponse.json(await updatePartLocation(requirementId, parsed.data.location, currentUser));
   } catch (error) {
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Unable to update the storage location" },
+      { error: error instanceof Error ? error.message : "Unable to update the part location" },
       { status: error instanceof ManufacturingWriteError ? error.status : 502 },
     );
   }

@@ -33,6 +33,7 @@ import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetT
 import { Skeleton } from "@/components/ui/skeleton";
 import { StorageLocationEditor } from "@/components/storage-location-editor";
 import { isShopName } from "@/lib/profile-name";
+import { canUseOnRobotLocation } from "@/lib/storage-locations";
 import type { FabricationAction, FabricationActionPatch, FabricationJob, FabricationResponse, OperationStatus, OperationsResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -334,7 +335,8 @@ export function FabricationDashboard({
                     value={selected.storageLocation}
                     updatedBy={selected.locationUpdatedBy}
                     updatedAt={selected.locationUpdatedAt}
-                    canEdit={selected.effectiveQcResult === "passed"}
+                    canEdit
+                    allowOnRobot={canUseOnRobotLocation(selected.effectiveQcResult === "passed", selected.status === "Complete")}
                   />
                 </section>
 

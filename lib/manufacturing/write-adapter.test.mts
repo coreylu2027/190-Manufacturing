@@ -170,7 +170,7 @@ test("CAM completion, finishing, claim stealing, and QC use their atomic action 
   assert.equal((qc.commits[0].p_changes as Array<{ entity: string }>).length, 1);
 });
 
-test("QC locations can be changed or cleared only for an effective passed review", async () => {
+test("part locations are editable before QC while On Robot requires passed QC and completed finishing", async () => {
   const reviewedAt = "2026-09-05T13:00:00Z";
   const passedState = fixture({
     operation: {
@@ -178,34 +178,69 @@ test("QC locations can be changed or cleared only for an effective passed review
       "Quantity Ledger": JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 2 }]),
       "Completed At": "2026-09-05T12:00:00Z",
     },
+    requirement: { "QC Outcome": { value: "Passed" }, Status: { value: "Complete" } },
     reviews: [{ id: 50, production_requirement_id: 20, operation_id: null, result: "passed", reviewed_at: reviewedAt }],
   });
-  const changed = harness(passedState);
-  const changedResult = await changed.adapter.updateQualityLocation(20, "Kwolek 2-8", ACTOR);
+  const changed = harness(fixture());
+  const changedResult = await changed.adapter.updatePartLocation(20, "Kwolek 2-8", ACTOR);
   assert.equal(changedResult.storageLocation, "Kwolek 2-8");
-  assert.equal(changed.commits[0].p_action, "qc_location");
+  assert.equal(changed.commits[0].p_action, "part_location");
   assert.equal((changed.commits[0].p_qc as { location: string }).location, "Kwolek 2-8");
   assert.deepEqual(changed.commits[0].p_changes, []);
 
-  const cleared = harness(passedState);
-  const clearedResult = await cleared.adapter.updateQualityLocation(20, null, ACTOR);
+  const cleared = harness(fixture());
+  const clearedResult = await cleared.adapter.updatePartLocation(20, null, ACTOR);
   assert.equal(clearedResult.storageLocation, null);
   assert.equal((cleared.commits[0].p_qc as { location: null }).location, null);
 
-  const invalidStates = [
-    fixture({ operation: passedState.rows.operations[0], reviews: [] }),
-    fixture({ operation: passedState.rows.operations[0], reviews: [{ id: 50, production_requirement_id: 20, operation_id: null, result: "failed", reviewed_at: reviewedAt }] }),
-    fixture({ operation: { ...passedState.rows.operations[0], "Completed At": "2026-09-05T14:00:00Z" }, reviews: passedState.reviews }),
-    fixture({ operation: passedState.rows.operations[0], reviews: passedState.reviews, retractions: [{ review_id: 50 }] }),
-  ];
-  for (const state of invalidStates) {
-    const invalid = harness(state);
-    await assert.rejects(
-      invalid.adapter.updateQualityLocation(20, "Shelf 3", ACTOR),
-      (error: unknown) => error instanceof ManufacturingWriteError && error.status === 409,
-    );
-    assert.equal(invalid.commits.length, 0);
-  }
+  const onRobot = harness(passedState);
+  assert.equal((await onRobot.adapter.updatePartLocation(20, "On Robot", ACTOR)).storageLocation, "On Robot");
+
+  const withoutQc = harness(fixture());
+  await assert.rejects(withoutQc.adapter.updatePartLocation(20, "On Robot", ACTOR), /passed QC review/);
+  assert.equal(withoutQc.commits.length, 0);
+
+  const awaitingFinishing = harness(fixture({
+    operation: passedState.rows.operations[0].source_row,
+    requirement: { "QC Outcome": { value: "Passed" }, Finishing: { value: "Black" }, Status: { value: "Ready for Finishing" } },
+    reviews: passedState.reviews,
+  }));
+  await assert.rejects(awaitingFinishing.adapter.updatePartLocation(20, "On Robot", ACTOR), /Complete finishing/);
+  assert.equal(awaitingFinishing.commits.length, 0);
+
+  const finishingInRework = harness(fixture({
+    operation: passedState.rows.operations[0].source_row,
+    requirement: { "QC Outcome": { value: "Passed" }, Finishing: { value: "Black" }, Status: { value: "Needs Rework" } },
+    reviews: passedState.reviews,
+  }));
+  await assert.rejects(finishingInRework.adapter.updatePartLocation(20, "On Robot", ACTOR), /Complete finishing/);
+  assert.equal(finishingInRework.commits.length, 0);
+});
+
+test("QC and finishing cannot be reopened while the part is on the robot", async () => {
+  const reviewedAt = "2026-09-05T13:00:00Z";
+  const qcState = fixture({
+    operation: {
+      Status: { value: "Complete" }, "Completed Quantity": 2,
+      "Quantity Ledger": JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 2 }]),
+      "Completed At": "2026-09-05T12:00:00Z",
+    },
+    requirement: { "QC Outcome": { value: "Passed" }, Status: { value: "Complete" } },
+    reviews: [{ id: 50, production_requirement_id: 20, operation_id: null, result: "passed", reviewed_at: reviewedAt }],
+  });
+  qcState.rows.requirements[0].part_location = "On Robot";
+  const qc = harness(qcState);
+  await assert.rejects(qc.adapter.undoQualityReview(20, ACTOR), /Move the part off the robot/);
+  assert.equal(qc.commits.length, 0);
+
+  const finishingState = fixture({
+    requirement: { "QC Outcome": { value: "Passed" }, Finishing: { value: "Black" }, Status: { value: "Complete" } },
+    finishing: { Machinist: ACTOR.name },
+  });
+  finishingState.rows.requirements[0].part_location = "On Robot";
+  const finishing = harness(finishingState);
+  await assert.rejects(finishing.adapter.applyFabricationAction(30, "undo_complete", ACTOR), /Move the part off the robot/);
+  assert.equal(finishing.commits.length, 0);
 });
 
 test("QC releases threaded inserts only after any required finishing completes", async () => {

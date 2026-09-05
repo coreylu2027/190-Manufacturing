@@ -7,9 +7,11 @@ transaction RPC with stale-write protection and audit history. PDFs and STEP
 files are served from private Supabase Storage, and their exact original names
 come from the private attachment catalog.
 
-Passed QC batches can also carry one optional shop-wide storage location. The
-current location is shown in Admin, Operations, Production, and Finishing and
-can be changed or cleared by any approved machinist or administrator.
+Each production requirement can carry one optional shop-wide part location at
+any workflow stage. The current location is shown in Admin, Operations,
+Production, and Finishing and can be changed or cleared by any approved
+machinist or administrator. The guarded `On Robot` location is available only
+after QC passes and any required finishing is complete.
 
 The historical [migration report](docs/baserow-supabase-staged-migration.md) and
 [shadow validation report](docs/supabase-shadow-migration.md) remain as offline
@@ -90,9 +92,9 @@ The shop UI treats the Onshape document name and assembly part number as separat
 - Approval and role checks are repeated on protected server routes; hiding the Admin tab is not the security boundary.
 - Production requirements enter the administrator QC queue after every active pre-QC manufacturing operation is complete. `Threaded Insert` is the sole post-QC exception: it remains planned until QC passes and, when required, powder-coat finishing completes. Passing records the requirement-level review; failing records the review and returns the final pre-QC operation to `Needs Rework`.
 - Supabase is the authoritative QC history by production requirement. Historical operation IDs are retained only as migration provenance. QC and its workflow update commit together in Supabase.
-- `supabase/migrations/202609050001_qc_storage_locations.sql` adds the nullable location and editor attribution columns. Apply it before deploying application code that reads locations, then apply `supabase/production/20260905_qc_storage_locations.sql` after the manufacturing write RPC.
-- A location is optional when QC passes. Only the latest effective passed review can be edited; an undone pass or a review made stale by later manufacturing completion is treated as pending and exposes no location.
-- Location edits replace the current value and record the editor and time. Clearing records who cleared it, while undoing the QC pass removes both the location and its attribution from that review.
+- `supabase/migrations/20260905165307_part_locations.sql` extends the canonical location choices. Apply it before the normalized production schema, then apply `supabase/production/20260905_part_locations.sql` after the location-aware manufacturing write RPC.
+- Part location is independent from QC and can be changed at any workflow stage. The `On Robot` choice is enforced in both the application and the database and requires an effective passed review plus completed finishing (or no required finish).
+- Location edits replace the current value and record the editor and time. Clearing records who cleared it. Existing QC-era locations are copied into the requirement-level location during migration.
 
 ## Notifications
 

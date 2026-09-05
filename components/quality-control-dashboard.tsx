@@ -5,11 +5,11 @@ import { Check, ClipboardCheck, Clock3, ExternalLink, FileText, LoaderCircle, Sh
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 
-import { StorageLocationEditor, StorageLocationSelect } from "@/components/storage-location-editor";
+import { StorageLocationEditor } from "@/components/storage-location-editor";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import type { StorageLocation } from "@/lib/storage-locations";
+import { canUseOnRobotLocation } from "@/lib/storage-locations";
 import type { AdminResponse, QualityControlItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -20,11 +20,11 @@ async function fetchQualityControl(): Promise<AdminResponse> {
   return body;
 }
 
-async function submitReview(item: QualityControlItem, result: "passed" | "failed", notes: string, location: StorageLocation | null) {
+async function submitReview(item: QualityControlItem, result: "passed" | "failed", notes: string) {
   const response = await fetch(`/api/admin/qc/${item.requirementId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ result, notes, ...(result === "passed" ? { location } : {}) }),
+    body: JSON.stringify({ result, notes }),
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error ?? "Unable to record the quality review");
@@ -47,10 +47,9 @@ export function QualityControlDashboard() {
   const queryClient = useQueryClient();
   const query = useQuery({ queryKey: ["qc"], queryFn: fetchQualityControl });
   const [notes, setNotes] = useState<Record<number, string>>({});
-  const [locations, setLocations] = useState<Record<number, StorageLocation | null>>({});
 
   const reviewMutation = useMutation({
-    mutationFn: ({ item, result }: { item: QualityControlItem; result: "passed" | "failed" }) => submitReview(item, result, notes[item.requirementId] ?? item.notes, locations[item.requirementId] ?? null),
+    mutationFn: ({ item, result }: { item: QualityControlItem; result: "passed" | "failed" }) => submitReview(item, result, notes[item.requirementId] ?? item.notes),
     onSuccess: (_data, variables) => {
       toast.success(variables.result === "passed" ? "Quality check passed" : "Operation returned for rework", variables.result === "passed" ? { action: { label: "Undo", onClick: () => undoReviewMutation.mutate(variables.item) } } : undefined);
       queryClient.invalidateQueries({ queryKey: ["qc"] });
@@ -83,7 +82,7 @@ export function QualityControlDashboard() {
         <div>
           <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-primary"><span className="size-2 rounded-full bg-violet-500 shadow-[0_0_0_4px_rgba(139,92,246,.12)]" /> Administrator workspace</div>
           <h1 className="text-3xl font-bold tracking-[-.035em] md:text-[2.55rem]">Quality control</h1>
-          <p className="mt-1.5 max-w-2xl text-sm leading-6 text-muted-foreground">Inspect completed work, record results, and assign post-QC storage locations.</p>
+          <p className="mt-1.5 max-w-2xl text-sm leading-6 text-muted-foreground">Inspect completed work, record results, and keep each part’s current location up to date.</p>
         </div>
         <div className="grid grid-cols-3 gap-2">
           {[
@@ -116,16 +115,16 @@ export function QualityControlDashboard() {
                   </div>
                   <label className="mt-4 block text-xs font-semibold text-muted-foreground" htmlFor={`qc-notes-${item.requirementId}`}>Inspection notes</label>
                   <textarea id={`qc-notes-${item.requirementId}`} value={notes[item.requirementId] ?? item.notes} onChange={(event) => setNotes((current) => ({ ...current, [item.requirementId]: event.target.value }))} placeholder="Measurements, defects, or acceptance notes…" className="mt-1.5 min-h-20 w-full resize-y rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring focus:ring-3 focus:ring-ring/50" />
-                  {item.result === "pending" ? (
-                    <div className="mt-3">
-                      <label className="mb-1.5 block text-xs font-semibold text-muted-foreground">Post-QC location (optional)</label>
-                      <StorageLocationSelect value={locations[item.requirementId] ?? null} onChange={(location) => setLocations((current) => ({ ...current, [item.requirementId]: location }))} disabled={reviewMutation.isPending} className="h-9 w-full bg-background sm:w-64" />
-                    </div>
-                  ) : item.result === "passed" ? (
-                    <div className="mt-3">
-                      <StorageLocationEditor requirementId={item.requirementId} value={item.storageLocation} updatedBy={item.locationUpdatedBy} updatedAt={item.locationUpdatedAt} canEdit={item.effectiveQcResult === "passed"} />
-                    </div>
-                  ) : null}
+                  <div className="mt-3">
+                    <StorageLocationEditor
+                      requirementId={item.requirementId}
+                      value={item.storageLocation}
+                      updatedBy={item.locationUpdatedBy}
+                      updatedAt={item.locationUpdatedAt}
+                      canEdit
+                      allowOnRobot={canUseOnRobotLocation(item.effectiveQcResult === "passed", item.operations[0].finishingComplete)}
+                    />
+                  </div>
                   <div className="mt-3 flex flex-wrap items-center gap-2">
                     <Button variant="outline" nativeButton={!item.operations[0].hasDrawingPdf} render={item.operations[0].hasDrawingPdf ? <a href={`/api/operations/${item.operations[0].id}/files/drawing-pdf`} target="_blank" rel="noreferrer" /> : undefined} disabled={!item.operations[0].hasDrawingPdf}><FileText /> Drawing PDF</Button>
                     <Button variant="outline" nativeButton={!item.operations[0].onshapeUrl} render={item.operations[0].onshapeUrl ? <a href={item.operations[0].onshapeUrl} target="_blank" rel="noreferrer" /> : undefined} disabled={!item.operations[0].onshapeUrl}><ExternalLink /> Onshape source</Button>

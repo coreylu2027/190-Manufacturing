@@ -23,9 +23,9 @@ export async function GET() {
       return {
         ...job,
         qcNotes: metadata?.notes ?? "",
-        storageLocation: metadata?.storageLocation ?? null,
-        locationUpdatedBy: metadata?.locationUpdatedBy ?? null,
-        locationUpdatedAt: metadata?.locationUpdatedAt ?? null,
+        storageLocation: job.storageLocation,
+        locationUpdatedBy: job.locationUpdatedBy,
+        locationUpdatedAt: job.locationUpdatedAt,
         effectiveQcResult: metadata?.effectiveQcResult ?? "pending" as const,
       };
     });

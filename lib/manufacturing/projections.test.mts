@@ -73,3 +73,43 @@ test("threaded inserts stay hidden behind QC and finishing while completed finis
   assert.equal(projectOperations([threadedInsert], [finishingComplete], [part])[0].status, "Ready");
   assert.equal(projectFinishing([finishing], [finishingComplete], [], [threadedInsert])[0].status, "Complete");
 });
+
+test("requirement projections include independent location and lifecycle details", () => {
+  const [projected] = projectOperations([operation], [{
+    ...requirement,
+    "Production Key": "root|part",
+    Configuration: "Main",
+    "BOM Positions": "2, 5",
+    Finishing: { value: "Black" },
+    "QC Outcome": { value: "Passed" },
+    Status: { value: "Ready for Manufacturing" },
+    "Part Location": "Shelf 2",
+    "Location Updated By": "Morgan M.",
+    "Location Updated At": "2026-09-05T15:00:00Z",
+  }], [part]);
+
+  assert.equal(projected.requirementKey, "root|part");
+  assert.equal(projected.configuration, "Main");
+  assert.equal(projected.bomPositions, "2, 5");
+  assert.equal(projected.finishing, "Black");
+  assert.equal(projected.finishingComplete, true);
+  assert.equal(projected.storageLocation, "Shelf 2");
+  assert.equal(projected.locationUpdatedBy, "Morgan M.");
+
+  const [projectedRework] = projectOperations([operation], [{
+    ...requirement,
+    Finishing: { value: "Black" },
+    "QC Outcome": { value: "Passed" },
+    Status: { value: "Needs Rework" },
+  }], [part]);
+  assert.equal(projectedRework.finishingComplete, false);
+
+  const [projectedFinishing] = projectFinishing([finishing], [{
+    ...requirement,
+    "Part Location": "Shelf 2",
+    "Location Updated By": "Morgan M.",
+    "Location Updated At": "2026-09-05T15:00:00Z",
+  }]);
+  assert.equal(projectedFinishing.storageLocation, "Shelf 2");
+  assert.equal(projectedFinishing.locationUpdatedBy, "Morgan M.");
+});

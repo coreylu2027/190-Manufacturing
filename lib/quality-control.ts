@@ -127,10 +127,13 @@ export function enrichOperationsWithQuality(
     const quality = operation.requirementId ? metadata.get(operation.requirementId) : undefined;
     return {
       ...operation,
-      storageLocation: quality?.storageLocation ?? null,
-      locationUpdatedBy: quality?.locationUpdatedBy ?? null,
-      locationUpdatedAt: quality?.locationUpdatedAt ?? null,
+      storageLocation: operation.storageLocation,
+      locationUpdatedBy: operation.locationUpdatedBy,
+      locationUpdatedAt: operation.locationUpdatedAt,
       effectiveQcResult: quality?.effectiveQcResult ?? "pending",
+      qualityNotes: quality?.notes ?? "",
+      qualityReviewedBy: quality?.reviewedBy ?? null,
+      qualityReviewedAt: quality?.reviewedAt ?? null,
     };
   });
 }
@@ -173,9 +176,9 @@ export function projectQualityControl(
         notes: quality.notes,
         reviewedAt: quality.reviewedAt,
         reviewedBy: quality.reviewedBy,
-        storageLocation: quality.storageLocation,
-        locationUpdatedBy: quality.locationUpdatedBy,
-        locationUpdatedAt: quality.locationUpdatedAt,
+        storageLocation: operations[0].storageLocation,
+        locationUpdatedBy: operations[0].locationUpdatedBy,
+        locationUpdatedAt: operations[0].locationUpdatedAt,
         effectiveQcResult: quality.effectiveQcResult,
       };
     })

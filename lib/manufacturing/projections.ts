@@ -2,6 +2,7 @@
 import { deduplicateOperations, requiresPassedQc } from "../manufacturing-workflow.ts";
 import type { ManufacturingOperation, FabricationJob, OperationWorkType, OperationStatus, OperationAllocation } from "../types.ts";
 import { projectQualityControl, qualityMetadataByRequirement, type QualityReviewRow } from "../quality-control.ts";
+import { isStorageLocation } from "../storage-locations.ts";
 import type { ManufacturingAttachment, RawRow as SourceRow } from "./model.ts";
 function selectValue(value: unknown, fallback = ""): string {
   return typeof value === "object" && value !== null && "value" in value
@@ -146,6 +147,11 @@ export function projectOperations(operationRows: SourceRow[], requirementRows: S
     const machine = selectValue(row.Machine, "Unassigned");
     const storedStatus = selectValue(row.Status, "Planned") as OperationStatus;
     const finishing = selectValue(requirement?.Finishing);
+    const finishingRequired = Boolean(finishing && finishing !== "None");
+    const requirementStatus = selectValue(requirement?.Status, "Needs Triage");
+    const finishingComplete = !finishingRequired
+      || selectValue(requirement?.["QC Outcome"]) === "Passed"
+        && !["Ready for QC", "Ready for Finishing", "Needs Rework"].includes(requirementStatus);
     const waitingForQcOrFinishing = requiresPassedQc(machine)
       && (selectValue(requirement?.["QC Outcome"]) !== "Passed"
         || Boolean(finishing && finishing !== "None" && selectValue(requirement?.Status) === "Ready for Finishing"));
@@ -160,12 +166,29 @@ export function projectOperations(operationRows: SourceRow[], requirementRows: S
     const stepFile = partId ? files.get(`${partId}|step`) : undefined;
     return {
       requirementId,
+      requirementKey: textValue(requirement?.["Production Key"]) || null,
       id: row.id,
       operationKey: String(row.Operation ?? `${row.id}`),
       ...parsed,
       revision: revisionName(requirement, part),
       documentName: sourceDocumentName(requirement),
+      sourceRoot: textValue(requirement?.["Source Root"]) || null,
+      sourceAssemblyRevision: textValue(requirement?.["Source Assembly Revision"]) || null,
+      requiredPartRevision: textValue(requirement?.["Required Part Revision"]) || null,
+      configuration: textValue(requirement?.Configuration) || null,
+      bomPositions: textValue(requirement?.["BOM Positions"]) || null,
       material: textValue(part?.Material) || null,
+      finishing: finishing || null,
+      finishingRequired,
+      finishingComplete,
+      requirementStatus,
+      requirementMachinist: textValue(requirement?.Machinist) || null,
+      activeInBom: Boolean(requirement?.["Active in BOM"]),
+      engineeringChanged: Boolean(requirement?.["Engineering Changed"]),
+      disposition: selectValue(requirement?.Disposition) || null,
+      qualityNotes: "",
+      qualityReviewedBy: null,
+      qualityReviewedAt: null,
       quantity,
       taskQuantity,
       ...quantities,
@@ -186,9 +209,9 @@ export function projectOperations(operationRows: SourceRow[], requirementRows: S
       hasStepFile: Boolean(stepFile),
       stepName: stepFile?.originalName ?? null,
       onshapeUrl: requirement?.["Onshape Source"] ? String(requirement["Onshape Source"]) : null,
-      storageLocation: null,
-      locationUpdatedBy: null,
-      locationUpdatedAt: null,
+      storageLocation: isStorageLocation(requirement?.["Part Location"]) ? requirement["Part Location"] : null,
+      locationUpdatedBy: textValue(requirement?.["Location Updated By"]) || null,
+      locationUpdatedAt: textValue(requirement?.["Location Updated At"]) || null,
       effectiveQcResult: "pending" as const,
     };
   });
@@ -265,9 +288,9 @@ export function projectFinishing(
       hasStepFile: Boolean(stepFile),
       stepName: stepFile?.originalName ?? null,
       onshapeUrl: requirement["Onshape Source"] ? String(requirement["Onshape Source"]) : null,
-      storageLocation: null,
-      locationUpdatedBy: null,
-      locationUpdatedAt: null,
+      storageLocation: isStorageLocation(requirement["Part Location"]) ? requirement["Part Location"] : null,
+      locationUpdatedBy: textValue(requirement["Location Updated By"]) || null,
+      locationUpdatedAt: textValue(requirement["Location Updated At"]) || null,
       effectiveQcResult: "pending" as const,
     }];
   });

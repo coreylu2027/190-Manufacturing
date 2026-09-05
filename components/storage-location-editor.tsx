@@ -16,7 +16,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { STORAGE_LOCATION_GROUPS, type StorageLocation } from "@/lib/storage-locations";
+import { ROBOT_LOCATION, STORAGE_LOCATION_GROUPS, type StorageLocation } from "@/lib/storage-locations";
 
 const NO_LOCATION = "__not_recorded__";
 
@@ -24,11 +24,13 @@ export function StorageLocationSelect({
   value,
   onChange,
   disabled = false,
+  allowOnRobot = false,
   className,
 }: {
   value: StorageLocation | null;
   onChange: (value: StorageLocation | null) => void;
   disabled?: boolean;
+  allowOnRobot?: boolean;
   className?: string;
 }) {
   return (
@@ -43,6 +45,7 @@ export function StorageLocationSelect({
       </SelectTrigger>
       <SelectContent align="start">
         <SelectItem value={NO_LOCATION}>Not recorded</SelectItem>
+        {allowOnRobot && <SelectItem value={ROBOT_LOCATION}>{ROBOT_LOCATION}</SelectItem>}
         <SelectSeparator />
         {STORAGE_LOCATION_GROUPS.map((group) => (
           <SelectGroup key={group.name}>
@@ -72,12 +75,14 @@ export function StorageLocationEditor({
   updatedBy,
   updatedAt,
   canEdit,
+  allowOnRobot = false,
 }: {
   requirementId: number;
   value: StorageLocation | null;
   updatedBy: string | null;
   updatedAt: string | null;
   canEdit: boolean;
+  allowOnRobot?: boolean;
 }) {
   const queryClient = useQueryClient();
   const [draftOverride, setDraftOverride] = useState<StorageLocation | null | undefined>(undefined);
@@ -85,7 +90,7 @@ export function StorageLocationEditor({
 
   const mutation = useMutation({
     mutationFn: async () => {
-      const response = await fetch(`/api/qc/${requirementId}/location`, {
+      const response = await fetch(`/api/requirements/${requirementId}/location`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ location: draft }),
@@ -106,7 +111,7 @@ export function StorageLocationEditor({
   return (
     <div className="space-y-2 rounded-xl border bg-muted/20 p-4">
       <div>
-        <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Post-QC location</p>
+        <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Part location</p>
         <p className="mt-1 text-sm font-semibold">{value ?? "Not recorded"}</p>
         {updatedAt && (
           <p className="mt-1 text-xs text-muted-foreground">
@@ -116,7 +121,7 @@ export function StorageLocationEditor({
       </div>
       {canEdit && (
         <div className="flex items-center gap-2">
-          <StorageLocationSelect value={draft} onChange={setDraftOverride} disabled={mutation.isPending} />
+          <StorageLocationSelect value={draft} onChange={setDraftOverride} disabled={mutation.isPending} allowOnRobot={allowOnRobot} />
           <Button
             size="sm"
             variant="outline"

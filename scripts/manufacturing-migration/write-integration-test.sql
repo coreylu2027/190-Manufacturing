@@ -99,6 +99,8 @@ declare
   failed_request constant uuid := '00000000-0000-4000-8000-000000000195';
   location_request constant uuid := '00000000-0000-4000-8000-000000000196';
   rejected_location_request constant uuid := '00000000-0000-4000-8000-000000000197';
+  robot_location_request constant uuid := '00000000-0000-4000-8000-000000000200';
+  rejected_robot_request constant uuid := '00000000-0000-4000-8000-000000000201';
   state jsonb;
   rejected boolean := false;
 begin
@@ -125,21 +127,31 @@ begin
   state := public.manufacturing_write_state();
   begin
     perform public.manufacturing_commit_with_locations(
-      rejected_location_request, pending_actor, 'qc_location', state->>'token', '[]',
+      rejected_location_request, pending_actor, 'part_location', state->>'token', '[]',
       jsonb_build_object('requirement_id',-190,'location','Shelf 3','location_updated_at','2026-09-05T00:01:20Z'), '{}'
     );
   exception when insufficient_privilege then rejected := true; end;
-  if not rejected then raise exception 'Unapproved user changed a QC location'; end if;
+  if not rejected then raise exception 'Unapproved user changed a part location'; end if;
 
   state := public.manufacturing_write_state();
   perform public.manufacturing_commit_with_locations(
-    location_request, mover, 'qc_location', state->>'token', '[]',
+    robot_location_request, mover, 'part_location', state->>'token', '[]',
+    jsonb_build_object('requirement_id',-190,'location','On Robot','location_updated_at','2026-09-05T00:01:25Z'),
+    '{"storageLocation":"On Robot"}'
+  );
+  if (select part_location from manufacturing.requirements where id=-190) is distinct from 'On Robot' then
+    raise exception 'Eligible part could not be moved onto the robot';
+  end if;
+
+  state := public.manufacturing_write_state();
+  perform public.manufacturing_commit_with_locations(
+    location_request, mover, 'part_location', state->>'token', '[]',
     jsonb_build_object('requirement_id',-190,'location','Shelf 3','location_updated_at','2026-09-05T00:01:30Z'),
     '{"storageLocation":"Shelf 3","locationUpdatedBy":"Test Machinist","locationUpdatedAt":"2026-09-05T00:01:30Z"}'
   );
-  if (select storage_location from public.quality_control where production_requirement_id=-190) is distinct from 'Shelf 3'
-    or (select location_updated_by from public.quality_control where production_requirement_id=-190) is distinct from mover then
-    raise exception 'QC location was not updated';
+  if (select part_location from manufacturing.requirements where id=-190) is distinct from 'Shelf 3'
+    or (select location_updated_by from manufacturing.requirements where id=-190) is distinct from 'Test Machinist' then
+    raise exception 'Part location was not updated';
   end if;
 
   state := public.manufacturing_write_state();
@@ -152,9 +164,20 @@ begin
   );
   if (select count(*) from manufacturing.quality_review_retractions) <> 1
     or (select status from manufacturing.requirements where id=-190) <> 'Ready for QC'
-    or (select storage_location from public.quality_control where production_requirement_id=-190) is not null then
+    or (select storage_location from public.quality_control where production_requirement_id=-190) is not null
+    or (select part_location from manufacturing.requirements where id=-190) is distinct from 'Shelf 3' then
     raise exception 'QC undo did not retain and retract history atomically';
   end if;
+
+  state := public.manufacturing_write_state();
+  rejected := false;
+  begin
+    perform public.manufacturing_commit_with_locations(
+      rejected_robot_request, mover, 'part_location', state->>'token', '[]',
+      jsonb_build_object('requirement_id',-190,'location','On Robot','location_updated_at','2026-09-05T00:01:40Z'), '{}'
+    );
+  exception when serialization_failure then rejected := true; end;
+  if not rejected then raise exception 'Part moved onto the robot without an effective QC pass'; end if;
 
   state := public.manufacturing_write_state();
   rejected := false;

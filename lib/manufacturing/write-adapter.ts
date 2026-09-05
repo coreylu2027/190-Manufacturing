@@ -3,7 +3,7 @@ import { deduplicateOperations, requiresPassedQc } from "../manufacturing-workfl
 import { supabaseApiHeaders, type AdapterConfig } from "./supabase-adapter.ts";
 import type { NormalizedRow } from "./model.ts";
 import type { FabricationAction, OperationPatch, OperationQuantityAction, QualityResult } from "../types.ts";
-import { isStorageLocation, type StorageLocation } from "../storage-locations.ts";
+import { ROBOT_LOCATION, canUseOnRobotLocation, isStorageLocation, type StorageLocation } from "../storage-locations.ts";
 
 export class ManufacturingWriteError extends Error {
   status: number;
@@ -73,6 +73,11 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
         && state.rows.operations.some((candidate) => candidate.id === review.operation_id && candidate.requirement_id === requirementId))
       .sort((a, b) => b.reviewed_at.localeCompare(a.reviewed_at) || b.id - a.id)[0];
   }
+  function requirement(state: WriteState, requirementId: number) {
+    const row = state.rows.requirements.find((candidate) => candidate.id === requirementId);
+    if (!row) throw new ManufacturingWriteError("Production requirement no longer exists", 409);
+    return row;
+  }
   function assertEffectivePassedReview(
     state: WriteState,
     requirementId: number,
@@ -141,7 +146,16 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       return transact(actor, "cam_handoff", async (plan, state) => { operation(state, id); return plan.updateCamHandoff(id, patch); });
     },
     applyFabricationAction(id: number, action: FabricationAction, actor: Actor) {
-      return transact(actor, `finishing_${action}`, plan => plan.applyFabricationAction(id, action, actor));
+      return transact(actor, `finishing_${action}`, (plan, state) => {
+        if (action === "undo_complete") {
+          const finishingRow = state.rows.finishing.find((candidate) => candidate.id === id);
+          const requirementRow = finishingRow ? requirement(state, Number(finishingRow.requirement_id)) : null;
+          if (requirementRow?.part_location === ROBOT_LOCATION) {
+            throw new ManufacturingWriteError("Move the part off the robot before reopening finishing", 409);
+          }
+        }
+        return plan.applyFabricationAction(id, action, actor);
+      });
     },
     renameMachinistAllocations(userId: string, oldName: string, newName: string) {
       return transact({ id: userId, name: newName }, "rename", plan => plan.renameMachinistAllocations(userId, oldName, newName));
@@ -149,6 +163,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     recordQualityReview(requirementId: number, result: Exclude<QualityResult, "pending">, notes: string, actor: Actor, location: StorageLocation | null = null) {
       if (location !== null && !isStorageLocation(location)) throw new ManufacturingWriteError("Invalid storage location", 400);
       if (result === "failed" && location !== null) throw new ManufacturingWriteError("A failed QC review cannot assign a storage location", 400);
+      if (location === ROBOT_LOCATION) throw new ManufacturingWriteError("On Robot becomes available after QC passes and finishing is complete", 409);
       const reviewedAt = new Date().toISOString();
       return transact(actor, "qc_review", async plan => {
         await plan.patchRequirementQualityOutcome(requirementId, result, actor.name, notes, reviewedAt);
@@ -162,11 +177,21 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
         };
       }, { requirement_id: requirementId, result, notes, reviewed_at: reviewedAt, location: result === "passed" ? location : null });
     },
-    updateQualityLocation(requirementId: number, location: StorageLocation | null, actor: Actor) {
+    updatePartLocation(requirementId: number, location: StorageLocation | null, actor: Actor) {
       if (location !== null && !isStorageLocation(location)) throw new ManufacturingWriteError("Invalid storage location", 400);
       const updatedAt = new Date().toISOString();
-      return transact(actor, "qc_location", async (_plan, state) => {
-        assertEffectivePassedReview(state, requirementId);
+      return transact(actor, "part_location", async (_plan, state) => {
+        const requirementRow = requirement(state, requirementId);
+        const finishingRequired = Boolean(requirementRow.finishing && requirementRow.finishing !== "None");
+        const finishingComplete = !finishingRequired
+          || requirementRow.qc_outcome === "Passed"
+            && !["Ready for QC", "Ready for Finishing", "Needs Rework"].includes(String(requirementRow.status ?? ""));
+        if (location === ROBOT_LOCATION) {
+          assertEffectivePassedReview(state, requirementId, "On Robot requires a current passed QC review");
+          if (!canUseOnRobotLocation(true, finishingComplete)) {
+            throw new ManufacturingWriteError("Complete finishing before moving this part onto the robot", 409);
+          }
+        }
         return {
           storageLocation: location,
           locationUpdatedBy: actor.name,
@@ -176,6 +201,9 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     },
     undoQualityReview(requirementId: number, actor: Actor) {
       return transact(actor, "qc_undo", async (plan, state) => {
+        if (requirement(state, requirementId).part_location === ROBOT_LOCATION) {
+          throw new ManufacturingWriteError("Move the part off the robot before undoing QC", 409);
+        }
         const review = latestReview(state, requirementId);
         if (!review || review.result !== "passed" || state.retractions.some(r => r.review_id === review.id)) throw new ManufacturingWriteError("Only the latest passed QC review can be undone", 409);
         await plan.clearPassedRequirementQualityOutcome(requirementId);

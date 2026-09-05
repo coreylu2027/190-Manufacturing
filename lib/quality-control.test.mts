@@ -6,8 +6,13 @@ import type { ManufacturingOperation } from "./types.ts";
 
 function operation(completedAt = "2026-09-05T12:00:00Z"): ManufacturingOperation {
   return {
-    id: 10, requirementId: 20, operationKey: "fixture", partNumber: "P-1", revision: null,
-    partName: "Fixture", assemblyNumber: "A-1", documentName: null, material: null,
+    id: 10, requirementId: 20, requirementKey: "fixture", operationKey: "fixture", partNumber: "P-1", revision: null,
+    partName: "Fixture", assemblyNumber: "A-1", documentName: null, sourceRoot: null,
+    sourceAssemblyRevision: null, requiredPartRevision: null, configuration: null,
+    bomPositions: null, material: null, finishing: null, finishingRequired: false,
+    finishingComplete: true, requirementStatus: "Ready for QC", requirementMachinist: "Alex A.",
+    activeInBom: true, engineeringChanged: false, disposition: null, qualityNotes: "",
+    qualityReviewedBy: null, qualityReviewedAt: null,
     quantity: 1, taskQuantity: 1, claimedQuantity: 0, completedQuantity: 1,
     availableQuantity: 0, allocations: [], operationNumber: "OP1", workType: "Manufacturing",
     machine: "Mill", status: "Complete", machinist: "Alex A.", startedAt: null, completedAt,

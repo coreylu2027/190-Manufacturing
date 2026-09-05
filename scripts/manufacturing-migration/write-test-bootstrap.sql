@@ -26,7 +26,9 @@ create table frc190_baserow_stage.snapshots (id uuid primary key);
 \ir ../../supabase/migrations/202609040001_requirement_level_qc.sql
 \ir ../../supabase/migrations/202609040002_qc_legacy_compatibility.sql
 \ir ../../supabase/migrations/202609050001_qc_storage_locations.sql
+\ir ../../supabase/migrations/20260905165307_part_locations.sql
 \ir ../../supabase/production/20260905_normalized_manufacturing.sql
 \ir ../../supabase/production/20260905_manufacturing_writes.sql
 \ir ../../supabase/production/20260905_qc_storage_locations.sql
+\ir ../../supabase/production/20260905_part_locations.sql
 \ir ../../supabase/production/20260905_manufacturing_attachments.sql
