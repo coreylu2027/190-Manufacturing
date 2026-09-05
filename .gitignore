@@ -47,3 +47,5 @@ next-env.d.ts
 # IDE database connections may contain hosts, usernames, or credentials.
 /.idea/dataSources*
 /.idea/**/dataSources*
+__pycache__/
+*.pyc
