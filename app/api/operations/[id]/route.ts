@@ -6,6 +6,8 @@ import { applyQuantityAction, patchOperation, stealOperationClaim, updateCamHand
 import { createNotification } from "@/lib/notifications";
 import { isShopName } from "@/lib/profile-name";
 import { OPERATION_STATUSES } from "@/lib/types";
+import { manufacturingConfig } from "@/lib/manufacturing/config";
+import { ManufacturingWriteError } from "@/lib/manufacturing/write-adapter";
 
 const patchSchema = z.object({
   status: z.enum(OPERATION_STATUSES).optional(),
@@ -97,10 +99,13 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       if (user?.role !== "admin") {
         return NextResponse.json({ error: "Administrator access required" }, { status: 403 });
       }
-      const updated = await updateCamHandoff(operationId, parsed.data);
+      const updated = await updateCamHandoff(operationId, parsed.data, user ?? undefined);
       return NextResponse.json({ updated });
     }
 
+    if (!("action" in parsed.data) && manufacturingConfig().write === "supabase" && user?.role !== "admin") {
+      return NextResponse.json({ error: "Administrator access required for status overrides" }, { status: 403 });
+    }
     const updated = "action" in parsed.data
       ? await applyQuantityAction(operationId, parsed.data.action, parsed.data.quantity, {
           id: user?.id ?? "demo-admin",
@@ -109,11 +114,11 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
           programPath: parsed.data.programPath,
           notes: parsed.data.notes,
         })
-      : await patchOperation(operationId, parsed.data, machinist);
+      : await patchOperation(operationId, parsed.data, machinist, user?.id);
     return NextResponse.json({ updated });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to update operation";
-    const status = message.includes("cannot be reopened") ? 409
+    const status = error instanceof ManufacturingWriteError ? error.status : message.includes("cannot be reopened") ? 409
       : message.includes("single task") ? 400
         : 502;
     return NextResponse.json({ error: message }, { status });

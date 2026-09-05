@@ -1,9 +1,10 @@
-import { assertBaserowWriteSource } from "@/lib/manufacturing/config";
+import { assertBaserowWriteSource, manufacturingConfig } from "@/lib/manufacturing/config";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { getAdminActor } from "@/lib/auth";
-import { clearPassedRequirementQualityOutcome, getOperations, patchRequirementQualityOutcome } from "@/lib/manufacturing";
+import { clearPassedRequirementQualityOutcome, getOperations, patchRequirementQualityOutcome, recordQualityReview, undoQualityReview } from "@/lib/manufacturing";
+import { ManufacturingWriteError } from "@/lib/manufacturing/write-adapter";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 const reviewSchema = z.object({
@@ -24,6 +25,10 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   if (!Number.isInteger(requirementId)) return NextResponse.json({ error: "Invalid production requirement ID" }, { status: 400 });
 
   try {
+    if (manufacturingConfig().write === "supabase") {
+      const review = await recordQualityReview(requirementId, parsed.data.result, parsed.data.notes, currentUser);
+      return NextResponse.json({ review });
+    }
     assertBaserowWriteSource();
     const operationData = await getOperations();
     const operations = operationData.operations.filter((item) =>
@@ -63,7 +68,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
 
     return NextResponse.json({ review: { requirementId, ...parsed.data } });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to record quality review" }, { status: 502 });
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to record quality review" }, { status: error instanceof ManufacturingWriteError ? error.status : 502 });
   }
 }
 
@@ -77,6 +82,9 @@ export async function DELETE(_request: Request, { params }: { params: Promise<{ 
   if (!Number.isInteger(requirementId)) return NextResponse.json({ error: "Invalid production requirement ID" }, { status: 400 });
 
   try {
+    if (manufacturingConfig().write === "supabase") {
+      return NextResponse.json(await undoQualityReview(requirementId, currentUser));
+    }
     assertBaserowWriteSource();
     const admin = createAdminClient();
     if (!admin) return NextResponse.json({ error: "Supabase administration is not configured" }, { status: 503 });
@@ -104,6 +112,6 @@ export async function DELETE(_request: Request, { params }: { params: Promise<{ 
     }
     return NextResponse.json({ undone: true, requirementId });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to undo quality review" }, { status: 502 });
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to undo quality review" }, { status: error instanceof ManufacturingWriteError ? error.status : 502 });
   }
 }

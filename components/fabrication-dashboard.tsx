@@ -170,7 +170,7 @@ export function FabricationDashboard({
       });
     },
     onSettled: () => {
-      if (query.data?.source === "baserow") queryClient.invalidateQueries({ queryKey: ["fabrication"] });
+      if (query.data?.source !== "demo") queryClient.invalidateQueries({ queryKey: ["fabrication"] });
     },
   });
 

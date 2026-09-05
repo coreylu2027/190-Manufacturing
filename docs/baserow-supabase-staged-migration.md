@@ -1,5 +1,13 @@
 # Baserow to Supabase: staged migration
 
+> This is the historical staging report. Its production-write implementation
+> gate has since been completed; see
+> [Supabase production writes](supabase-production-writes.md). A live cutover is
+> still separate from the implementation.
+> The 241 attachment binaries described below were subsequently copied to private
+> Supabase Storage and independently verified; the original statement is retained
+> as the historical condition at staging time.
+
 ## Completed stage — September 4, 2026 (America/New_York)
 
 The active `V3-26 FRC190 Summer 2026` database (`515011`) was copied into

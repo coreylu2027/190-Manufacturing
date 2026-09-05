@@ -1,6 +1,7 @@
 import "server-only";
 
 import { isShopName } from "@/lib/profile-name";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient, getCurrentUser } from "@/lib/supabase/server";
 
 export const APP_ROLES = ["machinist", "admin"] as const;
@@ -22,6 +23,26 @@ export const DEMO_ADMIN: AppUser = {
   approved: true,
 };
 
+const persistedBootstrapAdmins = new Set<string>();
+
+async function persistBootstrapAdmin(id: string, email: string | null, displayName: string) {
+  if (persistedBootstrapAdmins.has(id)) return;
+  const admin = createAdminClient();
+  if (!admin) return;
+  const timestamp = new Date().toISOString();
+  const { error } = await admin.from("profiles").upsert({
+    id,
+    email: email ?? "",
+    display_name: displayName,
+    role: "admin",
+    approved: true,
+    approved_by: id,
+    approved_at: timestamp,
+    updated_at: timestamp,
+  }, { onConflict: "id" });
+  if (!error) persistedBootstrapAdmins.add(id);
+}
+
 export function isBootstrapAdminEmail(email: string | null | undefined) {
   if (!email) return false;
   const configured = (process.env.INITIAL_ADMIN_EMAILS ?? "")
@@ -33,7 +54,10 @@ export function isBootstrapAdminEmail(email: string | null | undefined) {
 
 export function isAuthRequired() {
   // Live manufacturing data must never be exposed through a demo identity.
-  return process.env.REQUIRE_AUTH === "true" || Boolean(process.env.BASEROW_API_TOKEN);
+  return process.env.REQUIRE_AUTH === "true"
+    || Boolean(process.env.BASEROW_API_TOKEN)
+    || process.env.MANUFACTURING_READ_SOURCE === "supabase"
+    || process.env.MANUFACTURING_WRITE_SOURCE === "supabase";
 }
 
 export async function getAppUser(): Promise<AppUser | null> {
@@ -44,6 +68,7 @@ export async function getAppUser(): Promise<AppUser | null> {
   const metadataName = user.user_metadata.full_name ?? user.user_metadata.name ?? "";
   const fallbackName = metadataName || email?.split("@")[0] || "Machinist";
   if (isBootstrapAdminEmail(email)) {
+    await persistBootstrapAdmin(user.id, email, fallbackName);
     return { id: user.id, name: fallbackName, email, role: "admin", approved: true };
   }
 

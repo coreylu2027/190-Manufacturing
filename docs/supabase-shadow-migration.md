@@ -1,5 +1,12 @@
 # Normalized Supabase candidate and shadow validation
 
+> This is the historical report for the read-shadow phase. The production write
+> adapter described here as future work is now implemented and tested; see
+> [Supabase production writes](supabase-production-writes.md). The live cutover
+> remains an explicit deployment step.
+> The 241 attachment binaries were subsequently copied to private Supabase
+> Storage with exact filenames, byte counts, hashes, and route resolution verified.
+
 Completed September 4, 2026, on branch `supabase-migration`. This continues the
 [staging report](baserow-supabase-staged-migration.md). **No deployment, backend
 cutover, live environment change, Baserow write, or sync workflow change was made.**

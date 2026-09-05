@@ -1,10 +1,15 @@
 # FRC 190 Manufacturing OS
 
-The Baserow-to-Supabase migration has been **staged and validated without a live
-cutover**. See [the migration report and runbook](docs/baserow-supabase-staged-migration.md)
-for the copied tables, preservation checks, exclusions, and remaining cutover gates.
+The Baserow-to-Supabase migration has been staged, and an atomic production-write
+path is ready for an explicit coordinated cutover. See the
+[production-write runbook](docs/supabase-production-writes.md) and the
+[migration report](docs/baserow-supabase-staged-migration.md) for the remaining
+deployment gates.
 The [normalized candidate and shadow validation report](docs/supabase-shadow-migration.md)
 records the independent backup, captured Onshape source, normalized import, and clean read parity.
+Manufacturing PDFs and STEP files are served from a private Supabase Storage
+bucket after the verified attachment migration; download routes never expose the
+service credential or fetch Baserow-hosted file URLs.
 
 Shop-floor workflow for the `V3-26 FRC190 Summer 2026` Baserow database. Onshape/BOM sync creates production requirements and routed operations; machinists use this app to filter available work, claim an operation, and record progress and completion.
 
@@ -22,7 +27,7 @@ Shop-floor workflow for the `V3-26 FRC190 Summer 2026` Baserow database. Onshape
 - AG Grid Community for editable shop-floor tables
 - TanStack Query for cached data and optimistic mutations
 - Supabase Auth for email and password sign-in
-- Next.js Route Handlers as the server-only Baserow proxy
+- Next.js Route Handlers as the server-only manufacturing data gateway
 - Vercel deployment
 
 ## Local setup
@@ -40,9 +45,10 @@ Shop-floor workflow for the `V3-26 FRC190 Summer 2026` Baserow database. Onshape
 
 Without a Baserow token, the app intentionally loads realistic demo rows so the full workflow can be reviewed safely. All production credentials remain server-only.
 
-## Baserow writes
+## Manufacturing writes
 
-Operation actions update the Baserow Operations table and also set:
+The safe default remains Baserow. With both manufacturing source flags set to
+`supabase`, operation actions use the atomic Supabase transaction RPC and also set:
 
 - `Started At` and the signed-in machinist when work begins.
 - `Completed At` and the signed-in machinist when work is completed.
@@ -80,9 +86,9 @@ The shop UI treats the Onshape document name and assembly part number as separat
 - An approved administrator assigns either the `machinist` or `admin` role.
 - Approval and role checks are repeated on protected server routes; hiding the Admin tab is not the security boundary.
 - Production requirements enter the administrator QC queue only after every active manufacturing operation is complete. Passing records the requirement-level review; failing records the review and returns the final operation to `Needs Rework`.
-- Supabase is the authoritative QC history by production requirement. Historical operation IDs are retained only as migration provenance. The latest QC notes, reviewer, review time, outcome, and workflow status are mirrored onto the Baserow Production Requirement for shop-floor visibility.
+- Supabase is the authoritative QC history by production requirement. Historical operation IDs are retained only as migration provenance. Before cutover, the latest QC details are mirrored onto the Baserow Production Requirement; after cutover, QC and its workflow update commit together in Supabase.
 - When upgrading an existing Supabase project, apply the migrations first and run `npm run qc:migrate -- --apply` once to backfill existing operation-level reviews without deleting them.
-- After adding the `QC Notes`, `QC Reviewed By`, and `QC Reviewed At` fields to Baserow, run `npm run qc:sync-baserow -- --apply` once to mirror existing reviews. New reviews are mirrored automatically.
+- After adding the `QC Notes`, `QC Reviewed By`, and `QC Reviewed At` fields to Baserow, run `npm run qc:sync-baserow -- --apply` once to mirror existing reviews. While Baserow is the configured source, new reviews are mirrored automatically.
 
 ## Notifications
 

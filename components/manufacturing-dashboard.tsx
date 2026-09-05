@@ -592,7 +592,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
     },
     onError: (error, variables) => toast.error(error instanceof Error ? error.message : `Unable to ${variables.action} selected operations`),
     onSettled: () => {
-      if (query.data?.source === "baserow") queryClient.invalidateQueries({ queryKey: ["operations"] });
+      if (query.data?.source !== "demo") queryClient.invalidateQueries({ queryKey: ["operations"] });
     },
   });
 
@@ -878,9 +878,9 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
             )}
           </nav>
           <div className="ml-auto flex items-center gap-2">
-            <div className={cn("hidden items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium sm:flex", query.data?.source === "baserow" ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-200 bg-amber-50 text-amber-900")}>
-              {query.data?.source === "baserow" ? <Cloud className="size-3.5" /> : <CloudOff className="size-3.5" />}
-              {query.data?.source === "baserow" ? "Baserow live" : "Demo data"}
+            <div className={cn("hidden items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium sm:flex", query.data?.source !== "demo" ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-200 bg-amber-50 text-amber-900")}>
+              {query.data?.source !== "demo" ? <Cloud className="size-3.5" /> : <CloudOff className="size-3.5" />}
+              {query.data?.source === "supabase" ? "Supabase live" : query.data?.source === "baserow" ? "Baserow live" : "Demo data"}
             </div>
             <Button
               variant="ghost"

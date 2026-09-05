@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { getAdminActor, isBootstrapAdminEmail } from "@/lib/auth";
-import { getOperations, scheduleQualityControlShadow } from "@/lib/manufacturing";
+import { getOperations, scheduleQualityControlShadow, getRetractedQualityReviewIds } from "@/lib/manufacturing";
 import { isShopName } from "@/lib/profile-name";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { AdminResponse, AdminUserSummary, QualityControlItem, QualityResult } from "@/lib/types";
@@ -41,11 +41,12 @@ export async function GET() {
   }
 
   try {
-    const [{ data: authData, error: authError }, { data: profileData, error: profileError }, { data: reviewData, error: reviewError }, operationData] = await Promise.all([
+    const [{ data: authData, error: authError }, { data: profileData, error: profileError }, { data: reviewData, error: reviewError }, operationData, retractedIds] = await Promise.all([
       admin.auth.admin.listUsers({ page: 1, perPage: 200 }),
       admin.from("profiles").select("id, display_name, role, approved, last_seen_at"),
       admin.from("quality_control").select("id, production_requirement_id, operation_id, result, notes, reviewed_by, reviewed_at"),
       getOperations(),
+      getRetractedQualityReviewIds(),
     ]);
 
     if (authError) throw authError;
@@ -84,7 +85,8 @@ export async function GET() {
       const requirementId = review.production_requirement_id ?? (review.operation_id ? requirementIdByOperation.get(review.operation_id) : undefined);
       if (!requirementId) continue;
       const current = reviewsByRequirement.get(requirementId);
-      if (!current || new Date(review.reviewed_at).getTime() > new Date(current.reviewed_at).getTime()) {
+      if (!current || new Date(review.reviewed_at).getTime() > new Date(current.reviewed_at).getTime()
+        || review.reviewed_at === current.reviewed_at && review.id > current.id) {
         reviewsByRequirement.set(requirementId, review);
       }
     }
@@ -103,7 +105,7 @@ export async function GET() {
           && review
           && new Date(latestCompletedAt).getTime() > new Date(review.reviewed_at).getTime(),
         );
-        const result: QualityResult = !review || completedAfterReview ? "pending" : review.result;
+        const result: QualityResult = !review || completedAfterReview || retractedIds.includes(review.id) ? "pending" : review.result;
         return {
           requirementId,
           operations: [...operations].sort((a, b) => a.operationNumber.localeCompare(b.operationNumber) || a.id - b.id),

@@ -22,7 +22,7 @@ test("multi-links are rejected rather than silently collapsed",()=>{
 test("source flags default to Baserow and cannot accidentally enable Supabase writes",()=>{
  assert.deepEqual(manufacturingConfig({}),{read:"baserow",write:"baserow",shadow:false});
  assert.doesNotThrow(()=>assertBaserowWriteSource({}));
- assert.throws(()=>assertBaserowWriteSource({MANUFACTURING_WRITE_SOURCE:"supabase"}),/disabled/);
+ assert.throws(()=>assertBaserowWriteSource({MANUFACTURING_WRITE_SOURCE:"supabase"}),/only available/);
  assert.throws(()=>manufacturingConfig({MANUFACTURING_READ_SOURCE:"typo"}),/Invalid/);
 });
 test("parity reports meaningful differences without including private values",()=>{

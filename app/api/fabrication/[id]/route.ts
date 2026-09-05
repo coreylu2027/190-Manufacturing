@@ -4,6 +4,7 @@ import { z } from "zod";
 import { getEffectiveAppUser, isAuthRequired } from "@/lib/auth";
 import { applyFabricationAction } from "@/lib/manufacturing";
 import { isShopName } from "@/lib/profile-name";
+import { ManufacturingWriteError } from "@/lib/manufacturing/write-adapter";
 
 const requestSchema = z.object({
   action: z.enum(["claim", "release", "complete", "undo_complete"]),
@@ -27,9 +28,9 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   }
 
   try {
-    const updated = await applyFabricationAction(jobId, parsed.data.action, { name: machinist });
+    const updated = await applyFabricationAction(jobId, parsed.data.action, { id: user?.id, name: machinist });
     return NextResponse.json({ updated });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to update finishing job" }, { status: 502 });
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to update finishing job" }, { status: error instanceof ManufacturingWriteError ? error.status : 502 });
   }
 }

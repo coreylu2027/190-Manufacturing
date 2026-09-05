@@ -9,7 +9,7 @@ export const OPERATION_STATUSES = [
 
 export type OperationStatus = (typeof OPERATION_STATUSES)[number];
 
-export type DataSource = "baserow" | "demo";
+export type DataSource = "baserow" | "supabase" | "demo";
 export type UserRole = "machinist" | "admin";
 export type OperationWorkType = "Manufacturing" | "CAM";
 export type OperationQuantityAction = "claim" | "release" | "complete" | "undo_complete";
