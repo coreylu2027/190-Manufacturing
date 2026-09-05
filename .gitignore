@@ -13,12 +13,24 @@
 # testing
 /coverage
 
+# python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
 # next.js
 /.next/
 /out/
 
 # production
 /build
+
+# local database migration output and backups
+/migration-artifacts/
 
 # misc
 .DS_Store
