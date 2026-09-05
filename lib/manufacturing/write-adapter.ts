@@ -103,7 +103,31 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     }
     return review;
   }
+  function assertForceEligible(state: WriteState, requirementId: number) {
+    requirement(state, requirementId);
+    let passed = false;
+    try { assertEffectivePassedReview(state, requirementId); passed = true; }
+    catch (error) { if (!(error instanceof ManufacturingWriteError)) throw error; }
+    if (passed) throw new ManufacturingWriteError("This requirement already has a current QC pass", 409);
+  }
   return {
+    async previewForceQuality(requirementId: number) {
+      const state = await rpc<WriteState>("manufacturing_write_state");
+      assertForceEligible(state, requirementId);
+      try { return { ...await createWritePlan(state.rows).previewForceQuality(requirementId), token: state.token }; }
+      catch (error) { throw new ManufacturingWriteError(error instanceof Error ? error.message : "Unable to preview Force QC", 409); }
+    },
+    forceQualityReview(requirementId: number, notes: string, token: string, actor: Actor) {
+      const reviewedAt = new Date().toISOString();
+      return transact(actor, "qc_review", async (plan, state) => {
+        if (token !== state.token) throw new ManufacturingWriteError("Manufacturing changed. Refresh the preview and review the affected work before submitting again.", 409);
+        assertForceEligible(state, requirementId);
+        try { await plan.forceCompletePrerequisites(requirementId, actor, reviewedAt); }
+        catch (error) { throw new ManufacturingWriteError(error instanceof Error ? error.message : "Unable to force complete work", 409); }
+        await plan.patchRequirementQualityOutcome(requirementId, "passed", actor.name, notes, reviewedAt);
+        return { requirementId, result: "passed", notes };
+      }, { requirement_id: requirementId, result: "passed", notes, reviewed_at: reviewedAt, location: null });
+    },
     async retractedReviewIds() {
       return (await rpc<WriteState>("manufacturing_write_state")).retractions.map(row => row.review_id);
     },

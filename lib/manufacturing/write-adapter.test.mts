@@ -6,6 +6,108 @@ import { createSupabaseWriteAdapter, ManufacturingWriteError, type WriteState } 
 
 const ACTOR = { id: "00000000-0000-4000-8000-000000000190", name: "Alex A." };
 
+test("Force QC preserves completed credit, clears claims, includes CAM, and commits one passed review", async () => {
+  const state = fixture({ operation: {
+    Status: { value: "In Progress" }, "Completed Quantity": 1, "Claimed Quantity": 1,
+    "Quantity Ledger": JSON.stringify([{ userId: "other", name: "Other", claimed: 1, completed: 1 }]),
+  } });
+  state.rows.operations.push(normalized("operations", {
+    id: 12, Operation: "fixture|OP1|CAM", "Production Requirement": [{ id: 20 }],
+    "Operation Number": { value: "OP1" }, "Work Type": { value: "CAM" }, "Active in Routing": true,
+    Status: { value: "Planned" }, "CAM Program Path": "existing.nc", "CAM Notes": "Keep this",
+  }));
+  const { adapter, commits } = harness(state);
+  const preview = await adapter.previewForceQuality(20);
+  assert.equal(commits.length, 0);
+  assert.equal(preview.operations.length, 2);
+  assert.match(preview.generatedNotes, /CAM/);
+  assert.match(preview.generatedNotes, /In Progress/);
+  await adapter.forceQualityReview(20, "Edited inspection", preview.token, ACTOR);
+  assert.equal(commits.length, 1);
+  assert.equal(commits[0].p_action, "qc_review");
+  const changes = commits[0].p_changes as Array<{ entity: string; id: number; patch: Record<string, unknown> }>;
+  const machining = changes.find(change => change.entity === "operations" && change.id === 10)!.patch;
+  assert.equal(machining.claimed_quantity, 0);
+  assert.equal(machining.completed_quantity, 2);
+  assert.deepEqual(JSON.parse(String(machining.quantity_ledger)), [
+    { userId: "other", name: "Other", claimed: 0, completed: 1 },
+    { userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 1 },
+  ]);
+  const cam = changes.find(change => change.entity === "operations" && change.id === 12)!.patch;
+  assert.equal(cam.completed_quantity, 1);
+  assert.equal(cam.cam_program_path, undefined);
+  assert.equal(cam.cam_notes, undefined);
+  const qc = commits[0].p_qc as Record<string, unknown>;
+  assert.equal(qc.notes, "Edited inspection");
+  assert.equal(qc.reviewed_at, machining.completed_at);
+  assert.equal(qc.result, "passed");
+  assert.equal(changes.find(change => change.entity === "requirements")!.patch.status, "Complete");
+});
+
+test("Force QC routes finishing and post-QC work without completing inserts", async () => {
+  for (const finishing of ["None", "Black"]) {
+    const state = withThreadedInsert(fixture({ requirement: { Finishing: { value: finishing } } }));
+    const { adapter, commits } = harness(state);
+    const preview = await adapter.previewForceQuality(20);
+    assert.equal(preview.operations.length, 1);
+    assert.equal(preview.nextDestination, finishing === "None" ? "Post-QC manufacturing" : "Finishing");
+    await adapter.forceQualityReview(20, "", preview.token, ACTOR);
+    const changes = commits[0].p_changes as Array<{ entity: string; id: number; patch: Record<string, unknown> }>;
+    const insert = changes.find(change => change.entity === "operations" && change.id === 11);
+    assert.equal(insert?.patch.status, finishing === "None" ? "Ready" : undefined);
+    assert.equal(insert?.patch.completed_quantity, undefined);
+    assert.equal((commits[0].p_qc as Record<string, unknown>).notes, "");
+  }
+});
+
+test("Force QC rejects stale previews, inactive requirements, completed prerequisites, and current passes", async () => {
+  const stale = harness(fixture());
+  await assert.rejects(stale.adapter.forceQualityReview(20, "", "old-token", ACTOR), /Refresh the preview/);
+  assert.equal(stale.commits.length, 0);
+  const inactive = harness(fixture({ requirement: { "Active in BOM": false } }));
+  await assert.rejects(inactive.adapter.previewForceQuality(20), /inactive/);
+  const complete = harness(fixture({ operation: { Status: { value: "Complete" }, "Completed Quantity": 2 } }));
+  await assert.rejects(complete.adapter.previewForceQuality(20), /normal QC/);
+  const passed = harness(fixture({ operation: { Status: { value: "Complete" }, "Completed Quantity": 2 }, reviews: [{
+    id: 1, production_requirement_id: 20, operation_id: null, result: "passed", reviewed_at: "2026-09-01T00:00:00Z",
+  }] }));
+  await assert.rejects(passed.adapter.previewForceQuality(20), /current QC pass/);
+});
+
+test("Force QC ignores inactive and duplicate rows and preserves already completed operations", async () => {
+  const state = fixture();
+  state.rows.operations.push({ ...state.rows.operations[0], id: 11, status: "Complete", completed_quantity: 2 });
+  state.rows.operations.push({ ...state.rows.operations[0], id: 12, operation_key: "inactive", active_in_routing: false });
+  state.rows.operations.push({ ...state.rows.operations[0], id: 13, operation_key: "fixture|OP2|Manufacturing", operation_number: "OP2" });
+  const { adapter, commits } = harness(state);
+  const preview = await adapter.previewForceQuality(20);
+  assert.deepEqual(preview.operations.map(op => op.id), [13]);
+  await adapter.forceQualityReview(20, preview.generatedNotes, preview.token, ACTOR);
+  const changes = commits[0].p_changes as Array<{ entity: string; id: number }>;
+  assert.deepEqual(changes.filter(change => change.entity === "operations").map(change => change.id), [13]);
+});
+
+test("Force QC transport retries reuse the atomic payload and database conflicts do not retry", async () => {
+  const retry = harness(fixture(), (body, attempt) => { if (attempt === 1) throw new TypeError("Transport lost"); return Response.json(body.p_result); });
+  await retry.adapter.forceQualityReview(20, "", "fixture-token", ACTOR);
+  assert.equal(retry.commits.length, 2);
+  assert.deepEqual(retry.commits[0], retry.commits[1]);
+  const conflict = harness(fixture(), () => Response.json({ code: "40001" }, { status: 409 }));
+  await assert.rejects(conflict.adapter.forceQualityReview(20, "", "fixture-token", ACTOR), error => error instanceof ManufacturingWriteError && error.status === 409);
+  assert.equal(conflict.commits.length, 1);
+});
+
+test("Force QC accepts rework and propagates database permission rejection without changing its input state", async () => {
+  const state = fixture({ operation: { Status: { value: "Needs Rework" } }, requirement: { "QC Outcome": { value: "Failed" } } });
+  const original = structuredClone(state);
+  const denied = harness(state, () => Response.json({ code: "42501" }, { status: 403 }));
+  const preview = await denied.adapter.previewForceQuality(20);
+  assert.equal(preview.operations[0].previousStatus, "Needs Rework");
+  await assert.rejects(denied.adapter.forceQualityReview(20, "Rework inspected", preview.token, ACTOR), error => error instanceof ManufacturingWriteError && error.status === 403);
+  assert.equal(denied.commits.length, 1);
+  assert.deepEqual(state, original);
+});
+
 function normalized(entityName: string, raw: RawRow): NormalizedRow {
   const entity = ENTITIES.find((candidate) => candidate.name === entityName);
   assert.ok(entity);

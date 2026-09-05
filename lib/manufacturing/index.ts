@@ -55,6 +55,14 @@ export async function updatePartLocation(requirementId: number, location: Storag
   return writer().updatePartLocation(requirementId, location, actor);
 }
 
+export async function previewForceQuality(requirementId: number) {
+  return writer().previewForceQuality(requirementId);
+}
+
+export async function forceQualityReview(requirementId: number, notes: string, token: string, actor: Actor) {
+  return writer().forceQualityReview(requirementId, notes, token, actor);
+}
+
 export const updateQualityLocation = updatePartLocation;
 
 export async function undoQualityReview(requirementId: number, actor: Actor) {

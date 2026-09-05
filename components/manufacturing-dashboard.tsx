@@ -1,4 +1,5 @@
 "use client";
+import { ForceQcButton, hasUnfinishedQcPrerequisites } from "@/components/force-qc";
 
 import {
   AllCommunityModule,
@@ -286,12 +287,14 @@ function requirementStatus(operations: ManufacturingOperation[]): OperationStatu
 }
 
 function ProductionOverview({
+  canForceQc,
   operations,
   isLoading,
   isError,
   errorMessage,
   onRetry,
 }: {
+  canForceQc: boolean;
   operations: ManufacturingOperation[];
   isLoading: boolean;
   isError: boolean;
@@ -555,6 +558,9 @@ function ProductionOverview({
                   </div>
                 </section>
 
+                {canForceQc && selectedRequirement.requirementId !== null && selectedRequirement.activeInBom && selectedRequirement.effectiveQcResult !== "passed" && hasUnfinishedQcPrerequisites(selectedRequirement.operations) && (
+                  <ForceQcButton key={selectedRequirement.requirementId} requirementId={selectedRequirement.requirementId} label={selectedRequirement.partNumber} />
+                )}
                 {selectedRequirement.requirementId !== null && (
                   <section>
                     <StorageLocationEditor
@@ -1253,6 +1259,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
         <FabricationDashboard user={query.data?.user ?? null} onProfileRequired={openProfile} />
       ) : (
         <ProductionOverview
+          canForceQc={query.data?.user?.role === "admin" && query.data.user.approved}
           operations={operations}
           isLoading={query.isLoading}
           isError={query.isError}

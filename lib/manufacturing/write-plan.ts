@@ -681,7 +681,48 @@ async function clearPassedRequirementQualityOutcome(requirementId: number) {
   });
   await reconcileRequirementWorkflow(requirementId, { finishingComplete: false });
 }
-return { applyFabricationAction,patchOperation,updateCamHandoff,applyQuantityAction,stealOperationClaim,renameMachinistAllocations,patchRequirementQualityOutcome,clearPassedRequirementQualityOutcome,
+async function previewForceQuality(requirementId: number) {
+  const requirement = await getRow(REQUIREMENTS_TABLE_ID, requirementId);
+  if (!requirement["Active in BOM"]) throw new Error("This production requirement is inactive");
+  const active = canonicalRows(await listAllRows(OPERATIONS_TABLE_ID)).filter(row => linkedId(row["Production Requirement"]) === requirementId);
+  const manufacturing = active.filter(row => operationWorkType(row) === "Manufacturing" && !isPostQcOperationRow(row));
+  if (!manufacturing.length) throw new Error("Production requirement has no pre-QC manufacturing operations");
+  const quantity = Math.max(1, Math.floor(Number(requirement["Required Quantity"] ?? 1)));
+  const numbers = new Set(manufacturing.map(row => selectValue(row["Operation Number"])));
+  const affected = active.filter(row => manufacturing.includes(row) || operationWorkType(row) === "CAM" && numbers.has(selectValue(row["Operation Number"])))
+    .filter(row => selectValue(row.Status) !== "Complete");
+  if (!affected.length) throw new Error("All prerequisite work is already complete; use normal QC");
+  const operations = affected.map(row => {
+    const status = selectValue(row.Status, "Planned") as OperationStatus;
+    const total = taskQuantityForRow(row, quantity);
+    const current = quantitiesForRow(row, total, status);
+    if (current.completedQuantity > total) throw new Error("Completed quantity exceeds the requirement quantity");
+    return { id: row.id, operationNumber: selectValue(row["Operation Number"]), workType: operationWorkType(row), machine: selectValue(row.Machine), previousStatus: status, quantity: total - current.completedQuantity };
+  }).sort((a, b) => a.operationNumber.localeCompare(b.operationNumber) || a.workType.localeCompare(b.workType) || a.id - b.id);
+  const finishing = selectValue(requirement.Finishing);
+  const nextDestination = finishing && finishing !== "None" ? "Finishing" : active.some(isPostQcOperationRow) ? "Post-QC manufacturing" : "Complete";
+  const generatedNotes = "Admin Force QC — force-completed prerequisite work:\n" + operations.map(op => `${op.operationNumber} ${op.workType} (${op.machine || "CAM"}): ${op.previousStatus} → Complete; ${op.quantity} ${op.workType === "CAM" ? "task(s)" : "part(s)"} force-completed.`).join("\n");
+  return { requirementId, productionKey: String(requirement["Production Key"] ?? ""), quantity, operations, generatedNotes, nextDestination };
+}
+async function forceCompletePrerequisites(requirementId: number, actor: { id: string; name: string }, timestamp: string) {
+  const preview = await previewForceQuality(requirementId);
+  for (const item of preview.operations) {
+    const row = await getRow(OPERATIONS_TABLE_ID, item.id);
+    const total = taskQuantityForRow(row, preview.quantity);
+    const allocations = quantitiesForRow(row, total, item.previousStatus).allocations.map(allocation => ({ ...allocation, claimed: 0 }));
+    let credit = allocations.find(allocation => allocation.userId === actor.id);
+    if (!credit) { credit = { userId: actor.id, name: actor.name, claimed: 0, completed: 0 }; allocations.push(credit); }
+    credit.name = actor.name;
+    credit.completed += item.quantity;
+    const ledger = allocations.filter(allocation => allocation.completed > 0);
+    await patchRow(OPERATIONS_TABLE_ID, item.id, {
+      Status: "Complete", "Completed At": timestamp, "Claimed Quantity": 0, "Completed Quantity": total,
+      "Quantity Ledger": JSON.stringify(ledger), Machinist: machinistSummary(ledger, total),
+    });
+  }
+  return preview;
+}
+return { previewForceQuality, forceCompletePrerequisites, applyFabricationAction,patchOperation,updateCamHandoff,applyQuantityAction,stealOperationClaim,renameMachinistAllocations,patchRequirementQualityOutcome,clearPassedRequirementQualityOutcome,
  changes() {
  return ENTITIES.flatMap(entity=>(input[entity.name]??[]).flatMap(before=>{
  const after=normalizeRow(entity,rows[String(entity.tableId)].find(r=>r.id===before.id)!);

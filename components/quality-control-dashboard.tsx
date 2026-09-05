@@ -1,4 +1,5 @@
 "use client";
+import { ForceQcPicker } from "@/components/force-qc";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, ClipboardCheck, Clock3, ExternalLink, FileText, LoaderCircle, ShieldCheck, X } from "lucide-react";
@@ -78,6 +79,7 @@ export function QualityControlDashboard() {
 
   return (
     <section className="mx-auto max-w-[1800px] px-4 py-5 md:px-7 md:py-7">
+      <ForceQcPicker />
       <div className="mb-5 flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
         <div>
           <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-primary"><span className="size-2 rounded-full bg-violet-500 shadow-[0_0_0_4px_rgba(139,92,246,.12)]" /> Administrator workspace</div>
