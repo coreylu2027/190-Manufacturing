@@ -96,7 +96,7 @@ export function StorageLocationEditor({
     },
     onSuccess: () => {
       toast.success(draft ? `Location updated to ${draft}` : "Storage location cleared");
-      for (const queryKey of [["admin"], ["operations"], ["fabrication"]]) {
+      for (const queryKey of [["admin"], ["qc"], ["operations"], ["fabrication"]]) {
         queryClient.invalidateQueries({ queryKey });
       }
     },

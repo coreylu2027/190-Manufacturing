@@ -10,7 +10,7 @@ export async function WorkspacePage({ workspaceView }: { workspaceView: Workspac
   if (!user) redirect("/login");
   await recordSiteVisit(user.id);
   if (!user.approved) redirect("/pending");
-  if (workspaceView === "admin" && user?.role !== "admin") redirect(WORKSPACE_ROUTES.operations);
+  if (["admin", "qc"].includes(workspaceView) && user.role !== "admin") redirect(WORKSPACE_ROUTES.operations);
 
   return <ManufacturingDashboard workspaceView={workspaceView} />;
 }

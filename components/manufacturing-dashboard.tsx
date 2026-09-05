@@ -15,6 +15,7 @@ import {
   Check,
   ChevronRight,
   CircleDot,
+  ClipboardCheck,
   ClipboardCopy,
   Clock3,
   Cloud,
@@ -46,6 +47,7 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { AdminDashboard } from "@/components/admin-dashboard";
 import { FabricationDashboard } from "@/components/fabrication-dashboard";
 import { NotificationInbox } from "@/components/notification-inbox";
+import { QualityControlDashboard } from "@/components/quality-control-dashboard";
 import { StorageLocationEditor } from "@/components/storage-location-editor";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -871,15 +873,26 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
               <PackageCheck /><span className="hidden lg:inline">Production</span>
             </Button>
             {query.data?.user?.role === "admin" && (
-              <Button
-                variant="ghost"
-                className={cn("h-10", workspaceView === "admin" ? "bg-accent/70 text-primary" : "text-muted-foreground")}
-                aria-current={workspaceView === "admin" ? "page" : undefined}
-                nativeButton={false}
-                render={<Link href={WORKSPACE_ROUTES.admin} />}
-              >
-                <ShieldCheck /><span className="hidden lg:inline">Admin</span>
-              </Button>
+              <>
+                <Button
+                  variant="ghost"
+                  className={cn("h-10", workspaceView === "qc" ? "bg-accent/70 text-primary" : "text-muted-foreground")}
+                  aria-current={workspaceView === "qc" ? "page" : undefined}
+                  nativeButton={false}
+                  render={<Link href={WORKSPACE_ROUTES.qc} />}
+                >
+                  <ClipboardCheck /><span className="hidden lg:inline">QC</span>
+                </Button>
+                <Button
+                  variant="ghost"
+                  className={cn("h-10", workspaceView === "admin" ? "bg-accent/70 text-primary" : "text-muted-foreground")}
+                  aria-current={workspaceView === "admin" ? "page" : undefined}
+                  nativeButton={false}
+                  render={<Link href={WORKSPACE_ROUTES.admin} />}
+                >
+                  <ShieldCheck /><span className="hidden lg:inline">Admin</span>
+                </Button>
+              </>
             )}
           </nav>
           <div className="ml-auto flex items-center gap-2">
@@ -891,9 +904,13 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
               variant="ghost"
               size="icon"
               aria-label="Refresh data"
-              onClick={() => workspaceView === "fabrication" ? queryClient.invalidateQueries({ queryKey: ["fabrication"] }) : query.refetch()}
-              disabled={workspaceView !== "fabrication" && query.isFetching}
-            ><RefreshCw className={cn(workspaceView !== "fabrication" && query.isFetching && "animate-spin")} /></Button>
+              onClick={() => workspaceView === "fabrication"
+                ? queryClient.invalidateQueries({ queryKey: ["fabrication"] })
+                : workspaceView === "qc" || workspaceView === "admin"
+                  ? queryClient.invalidateQueries({ queryKey: [workspaceView] })
+                  : query.refetch()}
+              disabled={["operations", "production"].includes(workspaceView) && query.isFetching}
+            ><RefreshCw className={cn(["operations", "production"].includes(workspaceView) && query.isFetching && "animate-spin")} /></Button>
             <DropdownMenu>
               <DropdownMenuTrigger render={<Button variant="outline" className="h-10 gap-2 px-2 pr-3" />}>
                 <Avatar size="sm"><AvatarFallback className="bg-primary/10 font-bold text-primary">{initials(userName)}</AvatarFallback></Avatar>
@@ -912,19 +929,22 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
             </DropdownMenu>
           </div>
         </div>
-        <nav className={cn("grid gap-1 border-t px-3 py-1.5 md:hidden", query.data?.user?.role === "admin" ? "grid-cols-4" : "grid-cols-3")}>
+        <nav className={cn("grid gap-1 border-t px-3 py-1.5 md:hidden", query.data?.user?.role === "admin" ? "grid-cols-5" : "grid-cols-3")}>
           {[
             { id: "operations" as const, label: "Operations", icon: LayoutList },
             { id: "fabrication" as const, label: "Finishing", icon: Paintbrush },
             { id: "production" as const, label: "Production", icon: PackageCheck },
-            ...(query.data?.user?.role === "admin" ? [{ id: "admin" as const, label: "Admin", icon: ShieldCheck }] : []),
+            ...(query.data?.user?.role === "admin" ? [
+              { id: "qc" as const, label: "QC", icon: ClipboardCheck },
+              { id: "admin" as const, label: "Admin", icon: ShieldCheck },
+            ] : []),
           ].map(({ id, label, icon: Icon }) => (
             <Button key={id} size="sm" variant="ghost" className={cn("min-w-0 gap-1 px-1 text-[11px]", workspaceView === id ? "bg-accent/70 text-primary" : "text-muted-foreground")} aria-current={workspaceView === id ? "page" : undefined} nativeButton={false} render={<Link href={WORKSPACE_ROUTES[id]} />}><Icon />{label}</Button>
           ))}
         </nav>
       </header>
 
-      {workspaceView === "admin" ? <AdminDashboard /> : workspaceView === "operations" ? <section className="mx-auto max-w-[1800px] px-4 py-5 md:px-7 md:py-7">
+      {workspaceView === "admin" ? <AdminDashboard /> : workspaceView === "qc" ? <QualityControlDashboard /> : workspaceView === "operations" ? <section className="mx-auto max-w-[1800px] px-4 py-5 md:px-7 md:py-7">
         <div className="mb-5 flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
           <div>
             <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-primary"><span className="size-2 rounded-full bg-emerald-500 shadow-[0_0_0_4px_rgba(16,185,129,.12)]" /> Shop queue</div>
