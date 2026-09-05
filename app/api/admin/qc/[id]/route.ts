@@ -1,8 +1,9 @@
+import { assertBaserowWriteSource } from "@/lib/manufacturing/config";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { getAdminActor } from "@/lib/auth";
-import { clearPassedRequirementQualityOutcome, getOperations, patchRequirementQualityOutcome } from "@/lib/baserow";
+import { clearPassedRequirementQualityOutcome, getOperations, patchRequirementQualityOutcome } from "@/lib/manufacturing";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 const reviewSchema = z.object({
@@ -23,6 +24,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   if (!Number.isInteger(requirementId)) return NextResponse.json({ error: "Invalid production requirement ID" }, { status: 400 });
 
   try {
+    assertBaserowWriteSource();
     const operationData = await getOperations();
     const operations = operationData.operations.filter((item) =>
       item.requirementId === requirementId && item.workType === "Manufacturing",
@@ -75,6 +77,7 @@ export async function DELETE(_request: Request, { params }: { params: Promise<{ 
   if (!Number.isInteger(requirementId)) return NextResponse.json({ error: "Invalid production requirement ID" }, { status: 400 });
 
   try {
+    assertBaserowWriteSource();
     const admin = createAdminClient();
     if (!admin) return NextResponse.json({ error: "Supabase administration is not configured" }, { status: 503 });
     const { data: review, error: reviewError } = await admin

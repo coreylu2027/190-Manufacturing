@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { getEffectiveAppUser, isAuthRequired } from "@/lib/auth";
-import { getFabricationJobs, getOperations } from "@/lib/baserow";
+import { getFabricationJobs, getOperations } from "@/lib/manufacturing";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export const dynamic = "force-dynamic";

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { getAdminActor, isBootstrapAdminEmail } from "@/lib/auth";
-import { getOperations } from "@/lib/baserow";
+import { getOperations, scheduleQualityControlShadow } from "@/lib/manufacturing";
 import { isShopName } from "@/lib/profile-name";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { AdminResponse, AdminUserSummary, QualityControlItem, QualityResult } from "@/lib/types";
@@ -115,6 +115,7 @@ export async function GET() {
       })
       .sort((a, b) => Number(a.result !== "pending") - Number(b.result !== "pending") || a.operations[0].partNumber.localeCompare(b.operations[0].partNumber));
 
+    scheduleQualityControlShadow(qualityControl, reviewData as ReviewRow[], users);
     return NextResponse.json({ users, qualityControl, source: operationData.source } satisfies AdminResponse);
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to load administration data" }, { status: 502 });

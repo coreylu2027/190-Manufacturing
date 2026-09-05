@@ -1,0 +1,334 @@
+// Pure projections captured from the existing app. Baserow implementation remains unchanged.
+import { deduplicateOperations } from "../manufacturing-workflow.ts";
+import type { ManufacturingOperation, FabricationJob, OperationWorkType, OperationStatus, OperationAllocation, QualityControlItem, QualityResult } from "../types.ts";
+import type { RawRow as BaserowRow } from "./model.ts";
+function selectValue(value: unknown, fallback = ""): string {
+  return typeof value === "object" && value !== null && "value" in value
+    ? String((value as { value: unknown }).value ?? fallback)
+    : fallback;
+}
+
+function operationWorkType(row: BaserowRow): OperationWorkType {
+  return selectValue(row["Work Type"], "Manufacturing") === "CAM" ? "CAM" : "Manufacturing";
+}
+
+function taskQuantityForRow(row: BaserowRow, requiredQuantity: number) {
+  return operationWorkType(row) === "CAM" ? 1 : requiredQuantity;
+}
+
+function linkedId(value: unknown): number | null {
+  return Array.isArray(value) && value[0] && typeof value[0] === "object" && "id" in value[0]
+    ? Number((value[0] as { id: unknown }).id)
+    : null;
+}
+
+function linkedValue(value: unknown): string {
+  return Array.isArray(value) && value[0] && typeof value[0] === "object" && "value" in value[0]
+    ? String((value[0] as { value: unknown }).value ?? "")
+    : "";
+}
+
+function firstFile(value: unknown): { url: string; name: string } | null {
+  if (!Array.isArray(value) || !value[0] || typeof value[0] !== "object" || !("url" in value[0])) return null;
+
+  const file = value[0] as Record<string, unknown>;
+  const name = file.visible_name ?? file.original_name ?? file.name;
+  if (!file.url || !name) return null;
+  return { url: String(file.url), name: String(name) };
+}
+
+function textValue(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (Array.isArray(value) && value[0] && typeof value[0] === "object" && "value" in value[0]) {
+    return String((value[0] as { value: unknown }).value ?? "").trim();
+  }
+  return "";
+}
+
+function sourceDocumentName(requirement: BaserowRow | undefined): string | null {
+  if (!requirement) return null;
+  return textValue(requirement["Source Document"])
+    || textValue(requirement["Onshape Document"])
+    || null;
+}
+
+function revisionName(requirement: BaserowRow | undefined, part: BaserowRow | undefined): string | null {
+  for (const value of [requirement?.Revision, part?.Revision]) {
+    if (typeof value === "number") return String(value);
+    const revision = textValue(value) || selectValue(value);
+    if (revision) return revision;
+  }
+  return null;
+}
+
+function parseRequirement(display: string) {
+  const match = display.match(/^(.+?)\s+—\s+(.+?)\s+\[([^\]]+)]$/);
+  return {
+    partNumber: match?.[1] ?? display.split(" ")[0] ?? "Unknown",
+    partName: match?.[2] ?? display,
+    assemblyNumber: match?.[3] ?? "Unassigned",
+  };
+}
+
+function parseQuantityLedger(value: unknown): OperationAllocation[] {
+  if (typeof value !== "string" || !value.trim()) return [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((item): OperationAllocation[] => {
+      if (!item || typeof item !== "object") return [];
+      const allocation = item as Record<string, unknown>;
+      const userId = String(allocation.userId ?? "");
+      const name = String(allocation.name ?? "");
+      const claimed = Math.max(0, Math.floor(Number(allocation.claimed ?? 0)));
+      const completed = Math.max(0, Math.floor(Number(allocation.completed ?? 0)));
+      return userId && name && (claimed > 0 || completed > 0) ? [{ userId, name, claimed, completed }] : [];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function quantitiesForRow(row: BaserowRow, requiredQuantity: number, status: OperationStatus) {
+  let allocations = parseQuantityLedger(row["Quantity Ledger"]);
+  const hasStoredClaimed = row["Claimed Quantity"] !== null && row["Claimed Quantity"] !== undefined && row["Claimed Quantity"] !== "";
+  const hasStoredCompleted = row["Completed Quantity"] !== null && row["Completed Quantity"] !== undefined && row["Completed Quantity"] !== "";
+  const storedClaimed = Number(row["Claimed Quantity"]);
+  const storedCompleted = Number(row["Completed Quantity"]);
+  const claimedFallback = hasStoredClaimed && Number.isFinite(storedClaimed)
+    ? Math.max(0, Math.floor(storedClaimed))
+    : status === "In Progress" ? requiredQuantity : 0;
+  const completedFallback = hasStoredCompleted && Number.isFinite(storedCompleted)
+    ? Math.max(0, Math.floor(storedCompleted))
+    : status === "Complete" ? requiredQuantity : 0;
+
+  if (allocations.length === 0 && (claimedFallback > 0 || completedFallback > 0)) {
+    const legacyName = String(row.Machinist ?? "").trim() || "Legacy assignment";
+    allocations = [{
+      userId: `legacy:${legacyName.toLocaleLowerCase()}`,
+      name: legacyName,
+      claimed: claimedFallback,
+      completed: completedFallback,
+    }];
+  }
+
+  const claimedQuantity = allocations.reduce((sum, allocation) => sum + allocation.claimed, 0);
+  const completedQuantity = allocations.reduce((sum, allocation) => sum + allocation.completed, 0);
+  const canClaim = ["Ready", "In Progress", "Needs Rework"].includes(status);
+  return {
+    allocations,
+    claimedQuantity,
+    completedQuantity,
+    availableQuantity: canClaim ? Math.max(0, requiredQuantity - claimedQuantity - completedQuantity) : 0,
+  };
+}
+
+function fabricationStatus(requirementStatus: string, machinist: string): ManufacturingOperation["status"] {
+  if (requirementStatus === "Complete") return "Complete";
+  if (requirementStatus === "Needs Rework") return "Needs Rework";
+  if (requirementStatus === "Ready for Finishing") return machinist ? "In Progress" : "Ready";
+  return "Planned";
+}
+
+export function projectOperations(operationRows: BaserowRow[], requirementRows: BaserowRow[], partRows: BaserowRow[]): ManufacturingOperation[] {
+  const requirements = new Map(requirementRows.map((row) => [row.id, row]));
+  const parts = new Map(partRows.map((row) => [row.id, row]));
+
+  const parsedOperations = operationRows.map((row) => {
+    const requirementId = linkedId(row["Production Requirement"]);
+    const requirement = requirementId ? requirements.get(requirementId) : undefined;
+    const partId = linkedId(requirement?.Part);
+    const part = partId ? parts.get(partId) : undefined;
+    const parsed = parseRequirement(linkedValue(row["Production Requirement"]));
+    const operationNumber = selectValue(row["Operation Number"], "OP1") as ManufacturingOperation["operationNumber"];
+    const status = selectValue(row.Status, "Planned") as OperationStatus;
+    const quantity = Number(requirement?.["Required Quantity"] ?? 1);
+    const workType = operationWorkType(row);
+    const taskQuantity = taskQuantityForRow(row, quantity);
+    const quantities = quantitiesForRow(row, taskQuantity, status);
+    const drawingPdf = firstFile(requirement?.["Drawing PDF"]);
+    const stepFile = firstFile(requirement?.["STEP File"]);
+    return {
+      requirementId,
+      id: row.id,
+      operationKey: String(row.Operation ?? `${row.id}`),
+      ...parsed,
+      revision: revisionName(requirement, part),
+      documentName: sourceDocumentName(requirement),
+      material: textValue(part?.Material) || null,
+      quantity,
+      taskQuantity,
+      ...quantities,
+      operationNumber,
+      workType,
+      machine: selectValue(row.Machine, "Unassigned"),
+      status,
+      machinist: String(row.Machinist ?? ""),
+      startedAt: row["Started At"] ? String(row["Started At"]) : null,
+      completedAt: row["Completed At"] ? String(row["Completed At"]) : null,
+      activeInRouting: Boolean(row["Active in Routing"]),
+      camProgramPath: textValue(row["CAM Program Path"]) || null,
+      camNotes: textValue(row["CAM Notes"]),
+      camDependency: null,
+      drawingUrl: linkedValue(requirement?.Drawing) || null,
+      drawingPdfUrl: drawingPdf?.url ?? null,
+      drawingPdfName: drawingPdf?.name ?? null,
+      stepUrl: stepFile?.url ?? null,
+      stepName: stepFile?.name ?? null,
+      onshapeUrl: requirement?.["Onshape Source"] ? String(requirement["Onshape Source"]) : null,
+    };
+  });
+
+  const canonicalOperations = deduplicateOperations(parsedOperations.filter((operation) => operation.activeInRouting));
+  const camByTarget = new Map(canonicalOperations
+    .filter((operation) => operation.workType === "CAM" && operation.requirementId)
+    .map((operation) => [`${operation.requirementId}|${operation.operationNumber}`, operation]));
+  const operations: ManufacturingOperation[] = canonicalOperations.map((operation) => {
+    if (operation.workType !== "Manufacturing" || !operation.requirementId) return operation;
+    const cam = camByTarget.get(`${operation.requirementId}|${operation.operationNumber}`);
+    return cam ? {
+      ...operation,
+      camDependency: {
+        operationId: cam.id,
+        status: cam.status,
+        completedBy: cam.machinist,
+        programPath: cam.camProgramPath,
+        notes: cam.camNotes,
+      },
+    } : operation;
+  });
+
+  return operations;
+}
+export function projectFinishing(finishingRows: BaserowRow[], requirementRows: BaserowRow[]): FabricationJob[] {
+  const requirements = new Map(requirementRows.map((row) => [row.id, row]));
+
+  const jobs = finishingRows.flatMap((row): FabricationJob[] => {
+    const requirementId = linkedId(row["Production Requirement"]);
+    const requirement = requirementId ? requirements.get(requirementId) : undefined;
+    if (!requirementId || !requirement) return [];
+
+    const parsed = parseRequirement(linkedValue(row["Production Requirement"]));
+    const machinist = String(row.Machinist ?? "").trim();
+    const requirementStatus = selectValue(requirement.Status, "Needs Triage");
+    const drawingPdf = firstFile(requirement["Drawing PDF"]);
+    const stepFile = firstFile(requirement["STEP File"]);
+    return [{
+      id: row.id,
+      productionKey: String(row["Production Key"] ?? row.id),
+      requirementId,
+      ...parsed,
+      documentName: sourceDocumentName(requirement),
+      quantity: Math.max(1, Math.floor(Number(row["Required Quantity"] ?? requirement["Required Quantity"] ?? 1))),
+      color: selectValue(row["Powder Coat Color"], selectValue(requirement.Finishing, "Unspecified")),
+      qcNotes: "",
+      status: fabricationStatus(requirementStatus, machinist),
+      requirementStatus,
+      machinist,
+      active: Boolean(row.Active),
+      lastSyncedAt: row["Last Synced At"] ? String(row["Last Synced At"]) : null,
+      drawingUrl: linkedValue(requirement.Drawing) || null,
+      drawingPdfUrl: drawingPdf?.url ?? null,
+      drawingPdfName: drawingPdf?.name ?? null,
+      stepUrl: stepFile?.url ?? null,
+      stepName: stepFile?.name ?? null,
+      onshapeUrl: requirement["Onshape Source"] ? String(requirement["Onshape Source"]) : null,
+    }];
+  });
+
+  return jobs.filter(job => job.active);
+}
+export interface ReviewRow { id: number; production_requirement_id: number | null; operation_id: number | null; result: "passed" | "failed"; notes: string; reviewed_by: string; reviewed_at: string; }
+export function projectQc(operationsInput: ManufacturingOperation[], reviewData: ReviewRow[], users: Array<{id:string;name:string}>) {
+    const manufacturingOperations = operationsInput.filter((operation) =>
+      operation.workType === "Manufacturing" && operation.requirementId !== null,
+    );
+    const requirementIdByOperation = new Map(manufacturingOperations.map((operation) => [operation.id, operation.requirementId as number]));
+    const operationsByRequirement = new Map<number, typeof manufacturingOperations>();
+    for (const operation of manufacturingOperations) {
+      const requirementId = operation.requirementId as number;
+      operationsByRequirement.set(requirementId, [...(operationsByRequirement.get(requirementId) ?? []), operation]);
+    }
+
+    const reviewsByRequirement = new Map<number, ReviewRow>();
+    for (const review of reviewData) {
+      const requirementId = review.production_requirement_id ?? (review.operation_id ? requirementIdByOperation.get(review.operation_id) : undefined);
+      if (!requirementId) continue;
+      const current = reviewsByRequirement.get(requirementId);
+      if (!current || new Date(review.reviewed_at).getTime() > new Date(current.reviewed_at).getTime()) {
+        reviewsByRequirement.set(requirementId, review);
+      }
+    }
+
+    const qualityControl: QualityControlItem[] = [...operationsByRequirement.entries()]
+      .filter(([requirementId, operations]) => operations.every((operation) => operation.status === "Complete") || reviewsByRequirement.has(requirementId))
+      .map(([requirementId, operations]) => {
+        const review = reviewsByRequirement.get(requirementId);
+        const latestCompletedAt = operations.reduce<string | null>((latest, operation) => {
+          if (!operation.completedAt) return latest;
+          return !latest || new Date(operation.completedAt).getTime() > new Date(latest).getTime() ? operation.completedAt : latest;
+        }, null);
+        const completedAfterReview = Boolean(
+          operations.every((operation) => operation.status === "Complete")
+          && latestCompletedAt
+          && review
+          && new Date(latestCompletedAt).getTime() > new Date(review.reviewed_at).getTime(),
+        );
+        const result: QualityResult = !review || completedAfterReview ? "pending" : review.result;
+        return {
+          requirementId,
+          operations: [...operations].sort((a, b) => a.operationNumber.localeCompare(b.operationNumber) || a.id - b.id),
+          result,
+          notes: result === "pending" ? "" : review?.notes ?? "",
+          reviewedAt: result === "pending" ? null : review?.reviewed_at ?? null,
+          reviewedBy: result === "pending" ? null : users.find((user) => user.id === review?.reviewed_by)?.name ?? null,
+        };
+      })
+      .sort((a, b) => Number(a.result !== "pending") - Number(b.result !== "pending") || a.operations[0].partNumber.localeCompare(b.operations[0].partNumber));
+
+ return qualityControl;
+}
+function requirementStatus(operations: ManufacturingOperation[]): OperationStatus {
+  if (operations.every((operation) => operation.status === "Complete")) return "Complete";
+  if (operations.some((operation) => operation.status === "Blocked")) return "Blocked";
+  if (operations.some((operation) => operation.status === "Needs Rework")) return "Needs Rework";
+  if (operations.some((operation) => operation.status === "In Progress")) return "In Progress";
+  if (operations.some((operation) => operation.status === "Ready")) return "Ready";
+  return "Planned";
+}
+
+export function projectProduction(operations: ManufacturingOperation[]) {
+    const grouped = new Map<string, ManufacturingOperation[]>();
+
+    for (const operation of operations) {
+      const key = `${operation.assemblyNumber}|${operation.partNumber}|${operation.revision ?? ""}`;
+      grouped.set(key, [...(grouped.get(key) ?? []), operation]);
+    }
+
+    return [...grouped.entries()].map(([key, routedOperations]) => {
+        const first = routedOperations[0];
+        return {
+          key,
+          partNumber: first.partNumber,
+          revision: first.revision,
+          partName: first.partName,
+          assemblyNumber: first.assemblyNumber,
+          documentName: first.documentName,
+          quantity: first.quantity,
+          completedOperations: routedOperations.filter((operation) => operation.status === "Complete").length,
+          totalOperations: routedOperations.length,
+          completedCamTasks: routedOperations.filter((operation) => operation.workType === "CAM" && operation.status === "Complete").length,
+          totalCamTasks: routedOperations.filter((operation) => operation.workType === "CAM").length,
+          completedManufacturingOperations: routedOperations.filter((operation) => operation.workType === "Manufacturing" && operation.status === "Complete").length,
+          totalManufacturingOperations: routedOperations.filter((operation) => operation.workType === "Manufacturing").length,
+          status: requirementStatus(routedOperations),
+        };
+      });
+
+}
+export function withFinishingQc(jobs: FabricationJob[], reviews: ReviewRow[], operations: ManufacturingOperation[]) {
+  const requirementByOperation = new Map(operations.map(o=>[o.id,o.requirementId]));
+  const notes = new Map<number,{notes:string;reviewedAt:string}>();
+  for (const review of reviews) { const id=review.production_requirement_id ?? (review.operation_id ? requirementByOperation.get(review.operation_id) : null); if(!id) continue; const current=notes.get(id); if(!current || review.reviewed_at > current.reviewedAt) notes.set(id,{notes:review.notes,reviewedAt:review.reviewed_at}); }
+  return jobs.map(job=>({...job,qcNotes:notes.get(job.requirementId)?.notes ?? ""}));
+}

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { getEffectiveAppUser, isAuthRequired } from "@/lib/auth";
-import { applyFabricationAction } from "@/lib/baserow";
+import { applyFabricationAction } from "@/lib/manufacturing";
 import { isShopName } from "@/lib/profile-name";
 
 const requestSchema = z.object({

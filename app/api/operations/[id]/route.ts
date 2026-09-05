@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { getEffectiveAppUser, isAuthRequired } from "@/lib/auth";
-import { applyQuantityAction, patchOperation, stealOperationClaim, updateCamHandoff } from "@/lib/baserow";
+import { applyQuantityAction, patchOperation, stealOperationClaim, updateCamHandoff } from "@/lib/manufacturing";
 import { createNotification } from "@/lib/notifications";
 import { isShopName } from "@/lib/profile-name";
 import { OPERATION_STATUSES } from "@/lib/types";

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { getEffectiveAppUser, isAuthRequired } from "@/lib/auth";
-import { getOperations } from "@/lib/baserow";
+import { getOperations } from "@/lib/manufacturing";
 
 export const dynamic = "force-dynamic";
 

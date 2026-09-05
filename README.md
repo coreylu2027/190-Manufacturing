@@ -3,6 +3,8 @@
 The Baserow-to-Supabase migration has been **staged and validated without a live
 cutover**. See [the migration report and runbook](docs/baserow-supabase-staged-migration.md)
 for the copied tables, preservation checks, exclusions, and remaining cutover gates.
+The [normalized candidate and shadow validation report](docs/supabase-shadow-migration.md)
+records the independent backup, captured Onshape source, normalized import, and clean read parity.
 
 Shop-floor workflow for the `V3-26 FRC190 Summer 2026` Baserow database. Onshape/BOM sync creates production requirements and routed operations; machinists use this app to filter available work, claim an operation, and record progress and completion.
 
