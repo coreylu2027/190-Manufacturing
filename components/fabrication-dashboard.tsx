@@ -31,6 +31,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
+import { StorageLocationEditor } from "@/components/storage-location-editor";
 import { isShopName } from "@/lib/profile-name";
 import type { FabricationAction, FabricationActionPatch, FabricationJob, FabricationResponse, OperationStatus, OperationsResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -191,7 +192,7 @@ export function FabricationDashboard({
       if (color !== "all" && job.color !== color) return false;
       if (view === "available" && job.status !== "Ready") return false;
       if (view === "mine" && !(ownedBy(job, userName) && job.status === "In Progress")) return false;
-      if (term && ![job.partNumber, job.partName, job.documentName, job.color, job.qcNotes, job.machinist].join(" ").toLocaleLowerCase().includes(term)) return false;
+      if (term && ![job.partNumber, job.partName, job.documentName, job.color, job.qcNotes, job.machinist, job.storageLocation].join(" ").toLocaleLowerCase().includes(term)) return false;
       return true;
     });
   }, [color, jobs, search, userName, view]);
@@ -210,6 +211,7 @@ export function FabricationDashboard({
     { field: "documentName", headerName: "SOURCE DOCUMENT", minWidth: 175, valueFormatter: ({ value }) => value || "Not synced" },
     { field: "quantity", headerName: "REQUIRED", width: 105, filter: "agNumberColumnFilter" },
     { field: "color", headerName: "FINISH", minWidth: 125, cellRenderer: FinishCell },
+    { field: "storageLocation", headerName: "LOCATION", minWidth: 150, valueFormatter: ({ value }) => value || "Not recorded" },
     { field: "qcNotes", headerName: "QC NOTES", minWidth: 240, flex: 1, cellRenderer: QcNotesCell },
     { field: "status", headerName: "STATUS", minWidth: 145, cellRenderer: StatusCell },
     { field: "machinist", headerName: "MACHINIST", minWidth: 180, valueFormatter: ({ value }) => value || "—" },
@@ -287,7 +289,7 @@ export function FabricationDashboard({
               {filtered.map((job) => (
                 <button key={job.id} onClick={() => openJob(job)} className="block w-full p-4 text-left transition hover:bg-muted/40">
                   <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary">{job.partNumber}</p><h3 className="mt-1 font-semibold">{job.partName}</h3><p className="mt-1 font-mono text-[11px] text-muted-foreground">{job.documentName ?? "Document not synced"}</p></div><StatusBadge status={job.status} /></div>
-                  <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground"><span className="flex items-center gap-1"><Paintbrush className="size-3" />{job.color}</span><span>{job.quantity} required</span><span>{job.machinist || "Unclaimed"}</span></div>
+                  <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground"><span className="flex items-center gap-1"><Paintbrush className="size-3" />{job.color}</span><span>{job.quantity} required</span><span>{job.machinist || "Unclaimed"}</span><span>Location: {job.storageLocation ?? "Not recorded"}</span></div>
                   <p className={cn("mt-2 line-clamp-2 text-xs", job.qcNotes ? "text-foreground" : "text-muted-foreground")}>QC notes: {job.qcNotes || "No inspection notes"}</p>
                 </button>
               ))}
@@ -324,6 +326,16 @@ export function FabricationDashboard({
                   <p className={cn("whitespace-pre-wrap rounded-xl border p-4 text-sm leading-6", selected.qcNotes ? "bg-emerald-50/60 text-foreground" : "border-dashed bg-muted/30 text-muted-foreground")}>
                     {selected.qcNotes || "No inspection notes were recorded."}
                   </p>
+                </section>
+
+                <section>
+                  <StorageLocationEditor
+                    requirementId={selected.requirementId}
+                    value={selected.storageLocation}
+                    updatedBy={selected.locationUpdatedBy}
+                    updatedAt={selected.locationUpdatedAt}
+                    canEdit={selected.effectiveQcResult === "passed"}
+                  />
                 </section>
 
                 <section>

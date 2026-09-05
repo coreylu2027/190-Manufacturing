@@ -1,3 +1,5 @@
+import type { StorageLocation } from "./storage-locations";
+
 export const OPERATION_STATUSES = [
   "Planned",
   "Ready",
@@ -30,7 +32,16 @@ export interface CamDependency {
   notes: string;
 }
 
-export interface ManufacturingOperation {
+export type QualityResult = "pending" | "passed" | "failed";
+
+export interface QualityLocationFields {
+  storageLocation: StorageLocation | null;
+  locationUpdatedBy: string | null;
+  locationUpdatedAt: string | null;
+  effectiveQcResult: QualityResult;
+}
+
+export interface ManufacturingOperation extends QualityLocationFields {
   id: number;
   requirementId: number | null;
   operationKey: string;
@@ -71,7 +82,7 @@ export interface OperationsResponse {
   user: { id: string; name: string; email: string | null; role: UserRole; approved: boolean } | null;
 }
 
-export interface FabricationJob {
+export interface FabricationJob extends QualityLocationFields {
   id: number;
   productionKey: string;
   requirementId: number;
@@ -150,9 +161,7 @@ export interface AdminUserSummary {
   lastSeenAt: string | null;
 }
 
-export type QualityResult = "pending" | "passed" | "failed";
-
-export interface QualityControlItem {
+export interface QualityControlItem extends QualityLocationFields {
   requirementId: number;
   operations: ManufacturingOperation[];
   result: QualityResult;

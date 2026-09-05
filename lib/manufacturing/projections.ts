@@ -1,6 +1,7 @@
 // Pure projections from normalized manufacturing rows and the Supabase attachment catalog.
 import { deduplicateOperations } from "../manufacturing-workflow.ts";
-import type { ManufacturingOperation, FabricationJob, OperationWorkType, OperationStatus, OperationAllocation, QualityControlItem, QualityResult } from "../types.ts";
+import type { ManufacturingOperation, FabricationJob, OperationWorkType, OperationStatus, OperationAllocation } from "../types.ts";
+import { projectQualityControl, qualityMetadataByRequirement, type QualityReviewRow } from "../quality-control.ts";
 import type { ManufacturingAttachment, RawRow as SourceRow } from "./model.ts";
 function selectValue(value: unknown, fallback = ""): string {
   return typeof value === "object" && value !== null && "value" in value
@@ -177,6 +178,10 @@ export function projectOperations(operationRows: SourceRow[], requirementRows: S
       hasStepFile: Boolean(stepFile),
       stepName: stepFile?.originalName ?? null,
       onshapeUrl: requirement?.["Onshape Source"] ? String(requirement["Onshape Source"]) : null,
+      storageLocation: null,
+      locationUpdatedBy: null,
+      locationUpdatedAt: null,
+      effectiveQcResult: "pending" as const,
     };
   });
 
@@ -236,61 +241,36 @@ export function projectFinishing(finishingRows: SourceRow[], requirementRows: So
       hasStepFile: Boolean(stepFile),
       stepName: stepFile?.originalName ?? null,
       onshapeUrl: requirement["Onshape Source"] ? String(requirement["Onshape Source"]) : null,
+      storageLocation: null,
+      locationUpdatedBy: null,
+      locationUpdatedAt: null,
+      effectiveQcResult: "pending" as const,
     }];
   });
 
   return jobs.filter(job => job.active);
 }
-export interface ReviewRow { id: number; production_requirement_id: number | null; operation_id: number | null; result: "passed" | "failed"; notes: string; reviewed_by: string; reviewed_at: string; }
-export function projectQc(operationsInput: ManufacturingOperation[], reviewData: ReviewRow[], users: Array<{id:string;name:string}>) {
-    const manufacturingOperations = operationsInput.filter((operation) =>
-      operation.workType === "Manufacturing" && operation.requirementId !== null,
-    );
-    const requirementIdByOperation = new Map(manufacturingOperations.map((operation) => [operation.id, operation.requirementId as number]));
-    const operationsByRequirement = new Map<number, typeof manufacturingOperations>();
-    for (const operation of manufacturingOperations) {
-      const requirementId = operation.requirementId as number;
-      operationsByRequirement.set(requirementId, [...(operationsByRequirement.get(requirementId) ?? []), operation]);
-    }
+export type ReviewRow = Omit<QualityReviewRow, "storage_location" | "location_updated_by" | "location_updated_at"> &
+  Partial<Pick<QualityReviewRow, "storage_location" | "location_updated_by" | "location_updated_at">>;
 
-    const reviewsByRequirement = new Map<number, ReviewRow>();
-    for (const review of reviewData) {
-      const requirementId = review.production_requirement_id ?? (review.operation_id ? requirementIdByOperation.get(review.operation_id) : undefined);
-      if (!requirementId) continue;
-      const current = reviewsByRequirement.get(requirementId);
-      if (!current || new Date(review.reviewed_at).getTime() > new Date(current.reviewed_at).getTime()) {
-        reviewsByRequirement.set(requirementId, review);
-      }
-    }
-
-    const qualityControl: QualityControlItem[] = [...operationsByRequirement.entries()]
-      .filter(([requirementId, operations]) => operations.every((operation) => operation.status === "Complete") || reviewsByRequirement.has(requirementId))
-      .map(([requirementId, operations]) => {
-        const review = reviewsByRequirement.get(requirementId);
-        const latestCompletedAt = operations.reduce<string | null>((latest, operation) => {
-          if (!operation.completedAt) return latest;
-          return !latest || new Date(operation.completedAt).getTime() > new Date(latest).getTime() ? operation.completedAt : latest;
-        }, null);
-        const completedAfterReview = Boolean(
-          operations.every((operation) => operation.status === "Complete")
-          && latestCompletedAt
-          && review
-          && new Date(latestCompletedAt).getTime() > new Date(review.reviewed_at).getTime(),
-        );
-        const result: QualityResult = !review || completedAfterReview ? "pending" : review.result;
-        return {
-          requirementId,
-          operations: [...operations].sort((a, b) => a.operationNumber.localeCompare(b.operationNumber) || a.id - b.id),
-          result,
-          notes: result === "pending" ? "" : review?.notes ?? "",
-          reviewedAt: result === "pending" ? null : review?.reviewed_at ?? null,
-          reviewedBy: result === "pending" ? null : users.find((user) => user.id === review?.reviewed_by)?.name ?? null,
-        };
-      })
-      .sort((a, b) => Number(a.result !== "pending") - Number(b.result !== "pending") || a.operations[0].partNumber.localeCompare(b.operations[0].partNumber));
-
- return qualityControl;
+function normalizedReviews(reviews: ReviewRow[]): QualityReviewRow[] {
+  return reviews.map((review) => ({
+    ...review,
+    storage_location: review.storage_location ?? null,
+    location_updated_by: review.location_updated_by ?? null,
+    location_updated_at: review.location_updated_at ?? null,
+  }));
 }
+
+export function projectQc(operations: ManufacturingOperation[], reviews: ReviewRow[], users: Array<{id:string;name:string}>) {
+  return projectQualityControl(
+    operations,
+    normalizedReviews(reviews),
+    [],
+    users.map((user) => ({ id: user.id, display_name: user.name })),
+  );
+}
+
 function requirementStatus(operations: ManufacturingOperation[]): OperationStatus {
   if (operations.every((operation) => operation.status === "Complete")) return "Complete";
   if (operations.some((operation) => operation.status === "Blocked")) return "Blocked";
@@ -298,6 +278,11 @@ function requirementStatus(operations: ManufacturingOperation[]): OperationStatu
   if (operations.some((operation) => operation.status === "In Progress")) return "In Progress";
   if (operations.some((operation) => operation.status === "Ready")) return "Ready";
   return "Planned";
+}
+
+export function withFinishingQc(jobs: FabricationJob[], reviews: ReviewRow[], operations: ManufacturingOperation[]) {
+  const metadata = qualityMetadataByRequirement(operations, normalizedReviews(reviews), [], []).metadata;
+  return jobs.map((job) => ({ ...job, qcNotes: metadata.get(job.requirementId)?.notes ?? "" }));
 }
 
 export function projectProduction(operations: ManufacturingOperation[]) {
@@ -328,10 +313,4 @@ export function projectProduction(operations: ManufacturingOperation[]) {
         };
       });
 
-}
-export function withFinishingQc(jobs: FabricationJob[], reviews: ReviewRow[], operations: ManufacturingOperation[]) {
-  const requirementByOperation = new Map(operations.map(o=>[o.id,o.requirementId]));
-  const notes = new Map<number,{notes:string;reviewedAt:string}>();
-  for (const review of reviews) { const id=review.production_requirement_id ?? (review.operation_id ? requirementByOperation.get(review.operation_id) : null); if(!id) continue; const current=notes.get(id); if(!current || review.reviewed_at > current.reviewedAt) notes.set(id,{notes:review.notes,reviewedAt:review.reviewed_at}); }
-  return jobs.map(job=>({...job,qcNotes:notes.get(job.requirementId)?.notes ?? ""}));
 }

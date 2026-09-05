@@ -3,6 +3,7 @@ import { deduplicateOperations } from "../manufacturing-workflow.ts";
 import { supabaseApiHeaders, type AdapterConfig } from "./supabase-adapter.ts";
 import type { NormalizedRow } from "./model.ts";
 import type { FabricationAction, OperationPatch, OperationQuantityAction, QualityResult } from "../types.ts";
+import { isStorageLocation, type StorageLocation } from "../storage-locations.ts";
 
 export class ManufacturingWriteError extends Error {
   status: number;
@@ -11,7 +12,16 @@ export class ManufacturingWriteError extends Error {
 export interface WriteState {
   token: string;
   rows: Record<string, NormalizedRow[]>;
-  reviews: Array<{ id: number; production_requirement_id: number | null; operation_id: number | null; result: "passed" | "failed"; reviewed_at: string }>;
+  reviews: Array<{
+    id: number;
+    production_requirement_id: number | null;
+    operation_id: number | null;
+    result: "passed" | "failed";
+    reviewed_at: string;
+    storage_location?: StorageLocation | null;
+    location_updated_by?: string | null;
+    location_updated_at?: string | null;
+  }>;
   retractions: Array<{ review_id: number }>;
 }
 type Actor = { id: string; name: string };
@@ -43,8 +53,8 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       p_expected: state.token, p_changes: plan.changes(), p_qc: qc, p_result: result ?? null };
     // A transport failure can occur after commit. Repeat the identical request ID;
     // the database returns the recorded result instead of applying it twice.
-    try { return await rpc<T>("manufacturing_commit", body); }
-    catch (error) { if (error instanceof ManufacturingWriteError) throw error; return rpc<T>("manufacturing_commit", body); }
+    try { return await rpc<T>("manufacturing_commit_with_locations", body); }
+    catch (error) { if (error instanceof ManufacturingWriteError) throw error; return rpc<T>("manufacturing_commit_with_locations", body); }
   }
   function operation(state: WriteState, id: number) {
     const row = state.rows.operations.find(row => row.id === id);
@@ -56,6 +66,32 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     })));
     if (!canonical.some(row => row.id === id)) throw new ManufacturingWriteError("This duplicate operation is not the active production record", 409);
     return row;
+  }
+  function latestReview(state: WriteState, requirementId: number) {
+    return state.reviews.filter((review) => review.production_requirement_id === requirementId
+      || review.production_requirement_id === null
+        && state.rows.operations.some((candidate) => candidate.id === review.operation_id && candidate.requirement_id === requirementId))
+      .sort((a, b) => b.reviewed_at.localeCompare(a.reviewed_at) || b.id - a.id)[0];
+  }
+  function assertEffectivePassedReview(state: WriteState, requirementId: number) {
+    const review = latestReview(state, requirementId);
+    const manufacturingOperations = deduplicateOperations(state.rows.operations.filter((row) =>
+      row.active_in_routing && row.work_type === "Manufacturing" && row.requirement_id === requirementId,
+    ).map((row) => ({
+      id: row.id,
+      operationKey: String(row.operation_key ?? ""),
+      workType: "Manufacturing" as const,
+      status: row.status as import("../types.ts").OperationStatus,
+      completedAt: row.completed_at as string | null,
+    })));
+    const stale = manufacturingOperations.length === 0
+      || !manufacturingOperations.every((candidate) => candidate.status === "Complete")
+      || manufacturingOperations.some((candidate) => candidate.completedAt
+        && new Date(candidate.completedAt).getTime() > new Date(review?.reviewed_at ?? "").getTime());
+    if (!review || review.result !== "passed" || state.retractions.some((item) => item.review_id === review.id) || stale) {
+      throw new ManufacturingWriteError("A location can only be edited for the latest effective passed QC review", 409);
+    }
+    return review;
   }
   return {
     async retractedReviewIds() {
@@ -91,17 +127,37 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     renameMachinistAllocations(userId: string, oldName: string, newName: string) {
       return transact({ id: userId, name: newName }, "rename", plan => plan.renameMachinistAllocations(userId, oldName, newName));
     },
-    recordQualityReview(requirementId: number, result: Exclude<QualityResult, "pending">, notes: string, actor: Actor) {
+    recordQualityReview(requirementId: number, result: Exclude<QualityResult, "pending">, notes: string, actor: Actor, location: StorageLocation | null = null) {
+      if (location !== null && !isStorageLocation(location)) throw new ManufacturingWriteError("Invalid storage location", 400);
+      if (result === "failed" && location !== null) throw new ManufacturingWriteError("A failed QC review cannot assign a storage location", 400);
       const reviewedAt = new Date().toISOString();
       return transact(actor, "qc_review", async plan => {
         await plan.patchRequirementQualityOutcome(requirementId, result, actor.name, notes, reviewedAt);
-        return { requirementId, result, notes };
-      }, { requirement_id: requirementId, result, notes, reviewed_at: reviewedAt });
+        return {
+          requirementId,
+          result,
+          notes,
+          storageLocation: result === "passed" ? location : null,
+          locationUpdatedBy: result === "passed" && location ? actor.name : null,
+          locationUpdatedAt: result === "passed" && location ? reviewedAt : null,
+        };
+      }, { requirement_id: requirementId, result, notes, reviewed_at: reviewedAt, location: result === "passed" ? location : null });
+    },
+    updateQualityLocation(requirementId: number, location: StorageLocation | null, actor: Actor) {
+      if (location !== null && !isStorageLocation(location)) throw new ManufacturingWriteError("Invalid storage location", 400);
+      const updatedAt = new Date().toISOString();
+      return transact(actor, "qc_location", async (_plan, state) => {
+        assertEffectivePassedReview(state, requirementId);
+        return {
+          storageLocation: location,
+          locationUpdatedBy: actor.name,
+          locationUpdatedAt: updatedAt,
+        };
+      }, { requirement_id: requirementId, location, location_updated_at: updatedAt });
     },
     undoQualityReview(requirementId: number, actor: Actor) {
       return transact(actor, "qc_undo", async (plan, state) => {
-        const review = state.reviews.filter(r => r.production_requirement_id === requirementId || r.production_requirement_id === null && state.rows.operations.some(o => o.id === r.operation_id && o.requirement_id === requirementId))
-          .sort((a, b) => b.reviewed_at.localeCompare(a.reviewed_at) || b.id - a.id)[0];
+        const review = latestReview(state, requirementId);
         if (!review || review.result !== "passed" || state.retractions.some(r => r.review_id === review.id)) throw new ManufacturingWriteError("Only the latest passed QC review can be undone", 409);
         await plan.clearPassedRequirementQualityOutcome(requirementId);
         return { undone: true, requirementId };

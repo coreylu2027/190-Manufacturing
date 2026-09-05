@@ -7,6 +7,10 @@ transaction RPC with stale-write protection and audit history. PDFs and STEP
 files are served from private Supabase Storage, and their exact original names
 come from the private attachment catalog.
 
+Passed QC batches can also carry one optional shop-wide storage location. The
+current location is shown in Admin, Operations, Production, and Finishing and
+can be changed or cleared by any approved machinist or administrator.
+
 The historical [migration report](docs/baserow-supabase-staged-migration.md) and
 [shadow validation report](docs/supabase-shadow-migration.md) remain as offline
 cutover records. Onshape/BOM synchronization is maintained separately from this
@@ -86,6 +90,9 @@ The shop UI treats the Onshape document name and assembly part number as separat
 - Approval and role checks are repeated on protected server routes; hiding the Admin tab is not the security boundary.
 - Production requirements enter the administrator QC queue only after every active manufacturing operation is complete. Passing records the requirement-level review; failing records the review and returns the final operation to `Needs Rework`.
 - Supabase is the authoritative QC history by production requirement. Historical operation IDs are retained only as migration provenance. QC and its workflow update commit together in Supabase.
+- `supabase/migrations/202609050001_qc_storage_locations.sql` adds the nullable location and editor attribution columns. Apply it before deploying application code that reads locations, then apply `supabase/production/20260905_qc_storage_locations.sql` after the manufacturing write RPC.
+- A location is optional when QC passes. Only the latest effective passed review can be edited; an undone pass or a review made stale by later manufacturing completion is treated as pending and exposes no location.
+- Location edits replace the current value and record the editor and time. Clearing records who cleared it, while undoing the QC pass removes both the location and its attribution from that review.
 
 ## Notifications
 

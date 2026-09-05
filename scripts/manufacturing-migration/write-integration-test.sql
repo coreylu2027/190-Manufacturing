@@ -3,10 +3,16 @@
 begin;
 
 insert into auth.users (id, email, raw_user_meta_data)
-values ('00000000-0000-4000-8000-000000000190', 'admin@example.test', '{"full_name":"Test Admin"}');
+values
+  ('00000000-0000-4000-8000-000000000190', 'admin@example.test', '{"full_name":"Test Admin"}'),
+  ('00000000-0000-4000-8000-000000000198', 'machinist@example.test', '{"full_name":"Test Machinist"}'),
+  ('00000000-0000-4000-8000-000000000199', 'pending@example.test', '{"full_name":"Pending User"}');
 update public.profiles
 set display_name = 'Test Admin', role = 'admin', approved = true
 where id = '00000000-0000-4000-8000-000000000190';
+update public.profiles
+set display_name = 'Test Machinist', role = 'machinist', approved = true
+where id = '00000000-0000-4000-8000-000000000198';
 
 insert into manufacturing.requirements (
   id, source_row, production_key, required_quantity, finishing, active_in_bom,
@@ -86,9 +92,13 @@ $test$;
 do $test$
 declare
   actor constant uuid := '00000000-0000-4000-8000-000000000190';
+  mover constant uuid := '00000000-0000-4000-8000-000000000198';
+  pending_actor constant uuid := '00000000-0000-4000-8000-000000000199';
   review_request constant uuid := '00000000-0000-4000-8000-000000000193';
   undo_request constant uuid := '00000000-0000-4000-8000-000000000194';
   failed_request constant uuid := '00000000-0000-4000-8000-000000000195';
+  location_request constant uuid := '00000000-0000-4000-8000-000000000196';
+  rejected_location_request constant uuid := '00000000-0000-4000-8000-000000000197';
   state jsonb;
   rejected boolean := false;
 begin
@@ -99,21 +109,41 @@ begin
     where id=-190;
 
   state := public.manufacturing_write_state();
-  perform public.manufacturing_commit(
+  perform public.manufacturing_commit_with_locations(
     review_request, actor, 'qc_review', state->>'token',
     jsonb_build_array(jsonb_build_object('entity','requirements','id',-190,'patch',jsonb_build_object(
       'status','Complete','qc_outcome','Passed','qc_notes','Looks good',
       'qc_reviewed_by','Test Admin','qc_reviewed_at','2026-09-05T00:01:00Z'))),
-    jsonb_build_object('requirement_id',-190,'result','passed','notes','Looks good','reviewed_at','2026-09-05T00:01:00Z'),
+    jsonb_build_object('requirement_id',-190,'result','passed','notes','Looks good','reviewed_at','2026-09-05T00:01:00Z','location','Clarke 1'),
     '{"requirementId":-190,"result":"passed","notes":"Looks good"}'
   );
   if (select status from manufacturing.requirements where id=-190) <> 'Complete'
-    or (select count(*) from public.quality_control where production_requirement_id=-190 and result='passed') <> 1 then
+    or (select count(*) from public.quality_control where production_requirement_id=-190 and result='passed' and storage_location='Clarke 1') <> 1 then
     raise exception 'QC review was not committed atomically';
   end if;
 
   state := public.manufacturing_write_state();
-  perform public.manufacturing_commit(
+  begin
+    perform public.manufacturing_commit_with_locations(
+      rejected_location_request, pending_actor, 'qc_location', state->>'token', '[]',
+      jsonb_build_object('requirement_id',-190,'location','Shelf 3','location_updated_at','2026-09-05T00:01:20Z'), '{}'
+    );
+  exception when insufficient_privilege then rejected := true; end;
+  if not rejected then raise exception 'Unapproved user changed a QC location'; end if;
+
+  state := public.manufacturing_write_state();
+  perform public.manufacturing_commit_with_locations(
+    location_request, mover, 'qc_location', state->>'token', '[]',
+    jsonb_build_object('requirement_id',-190,'location','Shelf 3','location_updated_at','2026-09-05T00:01:30Z'),
+    '{"storageLocation":"Shelf 3","locationUpdatedBy":"Test Machinist","locationUpdatedAt":"2026-09-05T00:01:30Z"}'
+  );
+  if (select storage_location from public.quality_control where production_requirement_id=-190) is distinct from 'Shelf 3'
+    or (select location_updated_by from public.quality_control where production_requirement_id=-190) is distinct from mover then
+    raise exception 'QC location was not updated';
+  end if;
+
+  state := public.manufacturing_write_state();
+  perform public.manufacturing_commit_with_locations(
     undo_request, actor, 'qc_undo', state->>'token',
     jsonb_build_array(jsonb_build_object('entity','requirements','id',-190,'patch',jsonb_build_object(
       'status','Ready for QC','qc_outcome','Not Inspected','qc_notes','',
@@ -121,11 +151,13 @@ begin
     jsonb_build_object('requirement_id',-190), '{"undone":true,"requirementId":-190}'
   );
   if (select count(*) from manufacturing.quality_review_retractions) <> 1
-    or (select status from manufacturing.requirements where id=-190) <> 'Ready for QC' then
+    or (select status from manufacturing.requirements where id=-190) <> 'Ready for QC'
+    or (select storage_location from public.quality_control where production_requirement_id=-190) is not null then
     raise exception 'QC undo did not retain and retract history atomically';
   end if;
 
   state := public.manufacturing_write_state();
+  rejected := false;
   begin
     perform public.manufacturing_commit(
       failed_request, actor, 'qc_review', state->>'token',
@@ -149,9 +181,15 @@ begin
       'public.manufacturing_commit(uuid,uuid,text,text,jsonb,jsonb,jsonb)','EXECUTE') then
       raise exception 'Manufacturing commit exposed to %', role_name;
     end if;
+    if has_function_privilege(role_name,
+      'public.manufacturing_commit_with_locations(uuid,uuid,text,text,jsonb,jsonb,jsonb)','EXECUTE') then
+      raise exception 'Manufacturing location commit exposed to %', role_name;
+    end if;
   end loop;
   if not has_function_privilege('service_role',
     'public.manufacturing_commit(uuid,uuid,text,text,jsonb,jsonb,jsonb)','EXECUTE')
+    or not has_function_privilege('service_role',
+      'public.manufacturing_commit_with_locations(uuid,uuid,text,text,jsonb,jsonb,jsonb)','EXECUTE')
     or has_table_privilege('service_role','manufacturing.operations','UPDATE') then
     raise exception 'Service-role write boundary is incorrect';
   end if;

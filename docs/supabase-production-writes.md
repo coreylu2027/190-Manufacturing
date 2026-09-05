@@ -2,7 +2,7 @@
 
 The application now supports coordinated Supabase reads and writes for claims,
 releases, progress/completion and undo, claim stealing, CAM handoffs, finishing,
-profile allocation renames, and QC review/undo. Supabase is the only application
+profile allocation renames, QC review/undo, and post-QC storage locations. Supabase is the only application
 backend; missing server credentials fail closed.
 
 ## Safety model
@@ -18,6 +18,8 @@ set in one PostgreSQL transaction. It:
   the validated quantity ledger;
 - records immutable before/after audit rows;
 - stores QC review/retraction and workflow changes in the same transaction; and
+- accepts an optional canonical storage location with a passing review, and
+  permits later location changes only while that review remains an effective pass;
 - is callable only with the server-side secret key, which assumes the database
   `service_role`. Direct service-role table
   updates remain revoked.
@@ -52,17 +54,24 @@ must only be used with a new isolated database, never the hosted project.
 
 For a new Supabase environment:
 
-1. Apply `supabase/production/20260905_manufacturing_writes.sql` once after the
-   normalized manufacturing schema.
-2. Confirm the RPC and table privilege checks.
-3. Enable the database gate:
+1. Apply every file in `supabase/migrations` in filename order, including
+   `202609050001_qc_storage_locations.sql`.
+2. Apply `supabase/production/20260905_normalized_manufacturing.sql`.
+3. Apply `supabase/production/20260905_manufacturing_writes.sql`.
+4. Apply `supabase/production/20260905_qc_storage_locations.sql`. This adds the
+   location-aware write wrapper used by the application.
+5. Confirm the RPC and table privilege checks.
+6. Enable the database gate:
 
    ```sql
    update manufacturing.write_control set enabled = true;
    ```
 
-4. Deploy the application with the Supabase URL, publishable key, secret key,
+7. Deploy the application with the Supabase URL, publishable key, secret key,
    and bootstrap administrator list. There are no backend source-selection flags.
+
+For an existing normalized installation, apply only the new numbered location
+migration and the location wrapper, in that order, before deploying this code.
 
 After Supabase accepts its first production mutation, rollback must preserve the
 Supabase database as the authority. Disabling the write gate safely stops new

@@ -46,6 +46,7 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { AdminDashboard } from "@/components/admin-dashboard";
 import { FabricationDashboard } from "@/components/fabrication-dashboard";
 import { NotificationInbox } from "@/components/notification-inbox";
+import { StorageLocationEditor } from "@/components/storage-location-editor";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -118,6 +119,7 @@ interface ProductionRequirement {
   completedManufacturingOperations: number;
   totalManufacturingOperations: number;
   status: OperationStatus;
+  storageLocation: ManufacturingOperation["storageLocation"];
 }
 
 const gridTheme = themeQuartz.withParams({
@@ -299,6 +301,7 @@ function ProductionOverview({
           completedManufacturingOperations: routedOperations.filter((operation) => operation.workType === "Manufacturing" && operation.status === "Complete").length,
           totalManufacturingOperations: routedOperations.filter((operation) => operation.workType === "Manufacturing").length,
           status: requirementStatus(routedOperations),
+          storageLocation: first.effectiveQcResult === "passed" ? first.storageLocation : null,
         };
       });
   }, [operations]);
@@ -321,6 +324,7 @@ function ProductionOverview({
         requirement.partName,
         requirement.assemblyNumber,
         requirement.documentName,
+        requirement.storageLocation,
       ].join(" ").toLocaleLowerCase().includes(term)) return false;
       return true;
     });
@@ -411,7 +415,7 @@ function ProductionOverview({
             <div className="hidden overflow-x-auto md:block">
               <table className="w-full text-left text-sm">
                 <thead className="border-b bg-muted/20 text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
-                  <tr><th className="px-4 py-3">Part</th><th className="px-4 py-3">Revision</th><th className="px-4 py-3">Description</th><th className="px-4 py-3">Source document</th><th className="px-4 py-3 text-right">Qty</th><th className="px-4 py-3">Routing progress</th><th className="px-4 py-3">Status</th></tr>
+                  <tr><th className="px-4 py-3">Part</th><th className="px-4 py-3">Revision</th><th className="px-4 py-3">Description</th><th className="px-4 py-3">Source document</th><th className="px-4 py-3">Location</th><th className="px-4 py-3 text-right">Qty</th><th className="px-4 py-3">Routing progress</th><th className="px-4 py-3">Status</th></tr>
                 </thead>
                 <tbody className="divide-y">
                   {visibleRequirements.map((requirement) => {
@@ -422,6 +426,7 @@ function ProductionOverview({
                         <td className="px-4 py-3 font-mono text-xs font-semibold">{requirement.revision ?? "—"}</td>
                         <td className="px-4 py-3 font-semibold">{requirement.partName}</td>
                         <td className="px-4 py-3 font-mono text-xs">{requirement.documentName ?? "Not synced"}</td>
+                        <td className="px-4 py-3 text-xs font-medium">{requirement.storageLocation ?? "Not recorded"}</td>
                         <td className="px-4 py-3 text-right font-semibold">{requirement.quantity}</td>
                         <td className="min-w-56 px-4 py-3"><div className="mb-1.5 flex justify-between text-xs"><span>Mfg {requirement.completedManufacturingOperations}/{requirement.totalManufacturingOperations}{requirement.totalCamTasks > 0 ? ` · CAM ${requirement.completedCamTasks}/${requirement.totalCamTasks}` : ""}</span><span className="font-semibold">{percent}%</span></div><div className="h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary" style={{ width: `${percent}%` }} /></div></td>
                         <td className="px-4 py-3"><StatusBadge status={requirement.status} /></td>
@@ -436,7 +441,7 @@ function ProductionOverview({
                 const percent = Math.round((requirement.completedOperations / requirement.totalOperations) * 100);
                 return (
                   <article key={requirement.key} className="p-4">
-                    <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary">{requirement.partNumber}</p><h3 className="mt-1 font-semibold">{requirement.partName}</h3><p className="mt-1 font-mono text-[11px] text-muted-foreground">Rev {requirement.revision ?? "—"} · {requirement.documentName ?? "Document not synced"} · Qty {requirement.quantity}</p></div><StatusBadge status={requirement.status} /></div>
+                    <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary">{requirement.partNumber}</p><h3 className="mt-1 font-semibold">{requirement.partName}</h3><p className="mt-1 font-mono text-[11px] text-muted-foreground">Rev {requirement.revision ?? "—"} · {requirement.documentName ?? "Document not synced"} · Qty {requirement.quantity}</p><p className="mt-1 text-xs text-muted-foreground">Location: {requirement.storageLocation ?? "Not recorded"}</p></div><StatusBadge status={requirement.status} /></div>
                     <div className="mt-3"><div className="mb-1.5 flex justify-between text-xs text-muted-foreground"><span>Mfg {requirement.completedManufacturingOperations}/{requirement.totalManufacturingOperations}{requirement.totalCamTasks > 0 ? ` · CAM ${requirement.completedCamTasks}/${requirement.totalCamTasks}` : ""}</span><span className="font-semibold text-foreground">{percent}%</span></div><div className="h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary" style={{ width: `${percent}%` }} /></div></div>
                   </article>
                 );
@@ -660,7 +665,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
       const claimable = isOperationClaimable(operation);
       if (view === "available" && !claimable && !isOperationStealable(operation, query.data?.user ?? null)) return false;
       if (view === "mine" && allocation.claimed === 0) return false;
-      if (term && ![operation.partNumber, operation.revision, operation.partName, operation.documentName, operation.material, operation.machine, operation.operationNumber, operation.workType, operation.camProgramPath].join(" ").toLowerCase().includes(term)) return false;
+      if (term && ![operation.partNumber, operation.revision, operation.partName, operation.documentName, operation.material, operation.machine, operation.operationNumber, operation.workType, operation.camProgramPath, operation.storageLocation].join(" ").toLowerCase().includes(term)) return false;
       return true;
     });
   }, [machine, operations, query.data?.user, search, sourceDocument, view, workType]);
@@ -809,6 +814,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
     { field: "operationNumber", headerName: "OP", width: 125, filter: true, valueFormatter: ({ data, value }) => data ? operationLabel(data) : value },
     { field: "workType", headerName: "TYPE", width: 128, filter: true },
     { field: "machine", headerName: "MACHINE", minWidth: 175, filter: true },
+    { field: "storageLocation", headerName: "LOCATION", minWidth: 150, valueFormatter: ({ value }) => value || "Not recorded" },
     { field: "status", headerName: "STATUS", minWidth: 145, cellRenderer: StatusCell },
     { field: "machinist", headerName: "MACHINIST", minWidth: 180, valueFormatter: ({ value }) => value || "—" },
     { headerName: "", width: 102, pinned: "right", sortable: false, filter: false, resizable: false, cellRenderer: ActionCell, cellRendererParams: { onOpen: openOperation, user: query.data?.user ?? null } },
@@ -1075,6 +1081,18 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                     ].map(([label, value], index, details) => <div key={label} className={cn("p-3", index % 2 === 0 && "border-r", index < details.length - 2 && "border-b")}><p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{label}</p><p className="mt-1 text-sm font-semibold">{value}</p></div>)}
                   </div>
                 </section>
+
+                {selected.requirementId && selected.workType === "Manufacturing" && (
+                  <section>
+                    <StorageLocationEditor
+                      requirementId={selected.requirementId}
+                      value={selected.storageLocation}
+                      updatedBy={selected.locationUpdatedBy}
+                      updatedAt={selected.locationUpdatedAt}
+                      canEdit={selected.effectiveQcResult === "passed"}
+                    />
+                  </section>
+                )}
 
                 {(selected.workType === "CAM" || selected.camDependency) && (
                   <section>

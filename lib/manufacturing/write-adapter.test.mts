@@ -77,7 +77,7 @@ function harness(state: WriteState, commitResponse?: (body: Record<string, unkno
         assert.equal(init?.method, "GET");
         return Response.json(state);
       }
-      assert.ok(String(input).endsWith("/manufacturing_commit"));
+      assert.ok(String(input).endsWith("/manufacturing_commit_with_locations"));
       assert.equal(init?.method, "POST");
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       commits.push(body);
@@ -144,10 +144,49 @@ test("CAM completion, finishing, claim stealing, and QC use their atomic action 
     },
     requirement: { Status: { value: "Ready for QC" }, Machinist: "Alex A. (2)" },
   }));
-  await qc.adapter.recordQualityReview(20, "passed", "Looks good", ACTOR);
+  await qc.adapter.recordQualityReview(20, "passed", "Looks good", ACTOR, "Clarke 1");
   assert.equal(qc.commits[0].p_action, "qc_review");
   assert.equal((qc.commits[0].p_qc as { result: string }).result, "passed");
+  assert.equal((qc.commits[0].p_qc as { location: string }).location, "Clarke 1");
   assert.equal((qc.commits[0].p_changes as Array<{ entity: string }>).length, 1);
+});
+
+test("QC locations can be changed or cleared only for an effective passed review", async () => {
+  const reviewedAt = "2026-09-05T13:00:00Z";
+  const passedState = fixture({
+    operation: {
+      Status: { value: "Complete" }, "Completed Quantity": 2,
+      "Quantity Ledger": JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 2 }]),
+      "Completed At": "2026-09-05T12:00:00Z",
+    },
+    reviews: [{ id: 50, production_requirement_id: 20, operation_id: null, result: "passed", reviewed_at: reviewedAt }],
+  });
+  const changed = harness(passedState);
+  const changedResult = await changed.adapter.updateQualityLocation(20, "Kwolek 2-8", ACTOR);
+  assert.equal(changedResult.storageLocation, "Kwolek 2-8");
+  assert.equal(changed.commits[0].p_action, "qc_location");
+  assert.equal((changed.commits[0].p_qc as { location: string }).location, "Kwolek 2-8");
+  assert.deepEqual(changed.commits[0].p_changes, []);
+
+  const cleared = harness(passedState);
+  const clearedResult = await cleared.adapter.updateQualityLocation(20, null, ACTOR);
+  assert.equal(clearedResult.storageLocation, null);
+  assert.equal((cleared.commits[0].p_qc as { location: null }).location, null);
+
+  const invalidStates = [
+    fixture({ operation: passedState.rows.operations[0], reviews: [] }),
+    fixture({ operation: passedState.rows.operations[0], reviews: [{ id: 50, production_requirement_id: 20, operation_id: null, result: "failed", reviewed_at: reviewedAt }] }),
+    fixture({ operation: { ...passedState.rows.operations[0], "Completed At": "2026-09-05T14:00:00Z" }, reviews: passedState.reviews }),
+    fixture({ operation: passedState.rows.operations[0], reviews: passedState.reviews, retractions: [{ review_id: 50 }] }),
+  ];
+  for (const state of invalidStates) {
+    const invalid = harness(state);
+    await assert.rejects(
+      invalid.adapter.updateQualityLocation(20, "Shelf 3", ACTOR),
+      (error: unknown) => error instanceof ManufacturingWriteError && error.status === 409,
+    );
+    assert.equal(invalid.commits.length, 0);
+  }
 });
 
 test("release, completion undo, CAM edits, finishing completion, and QC undo are planned safely", async () => {

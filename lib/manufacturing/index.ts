@@ -3,6 +3,7 @@ import { createSupabaseManufacturingAdapter } from "./supabase-adapter";
 import { manufacturingSupabaseConfig } from "./config";
 import { createSupabaseWriteAdapter } from "./write-adapter";
 import type { FabricationAction, OperationPatch, OperationQuantityAction, QualityResult } from "../types";
+import type { StorageLocation } from "../storage-locations";
 
 type Actor = { id: string; name: string };
 
@@ -46,8 +47,12 @@ export async function renameMachinistAllocations(userId: string, oldName: string
   return writer().renameMachinistAllocations(userId, oldName, newName);
 }
 
-export async function recordQualityReview(requirementId: number, result: Exclude<QualityResult, "pending">, notes: string, actor: Actor) {
-  return writer().recordQualityReview(requirementId, result, notes, actor);
+export async function recordQualityReview(requirementId: number, result: Exclude<QualityResult, "pending">, notes: string, actor: Actor, location: StorageLocation | null = null) {
+  return writer().recordQualityReview(requirementId, result, notes, actor, location);
+}
+
+export async function updateQualityLocation(requirementId: number, location: StorageLocation | null, actor: Actor) {
+  return writer().updateQualityLocation(requirementId, location, actor);
 }
 
 export async function undoQualityReview(requirementId: number, actor: Actor) {
