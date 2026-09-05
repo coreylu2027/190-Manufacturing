@@ -15,14 +15,6 @@ export interface AppUser {
   approved: boolean;
 }
 
-export const DEMO_ADMIN: AppUser = {
-  id: "demo-admin",
-  name: "Demo A.",
-  email: null,
-  role: "admin",
-  approved: true,
-};
-
 const persistedBootstrapAdmins = new Set<string>();
 
 async function persistBootstrapAdmin(id: string, email: string | null, displayName: string) {
@@ -50,14 +42,6 @@ export function isBootstrapAdminEmail(email: string | null | undefined) {
     .map((value) => value.trim().toLowerCase())
     .filter(Boolean);
   return configured.includes(email.toLowerCase());
-}
-
-export function isAuthRequired() {
-  // Live manufacturing data must never be exposed through a demo identity.
-  return process.env.REQUIRE_AUTH === "true"
-    || Boolean(process.env.BASEROW_API_TOKEN)
-    || process.env.MANUFACTURING_READ_SOURCE === "supabase"
-    || process.env.MANUFACTURING_WRITE_SOURCE === "supabase";
 }
 
 export async function getAppUser(): Promise<AppUser | null> {
@@ -90,10 +74,6 @@ export async function getAppUser(): Promise<AppUser | null> {
   };
 }
 
-export async function getEffectiveAppUser() {
-  return (await getAppUser()) ?? (!isAuthRequired() ? DEMO_ADMIN : null);
-}
-
 export async function recordSiteVisit(userId: string) {
   const supabase = await createClient();
   if (!supabase) return;
@@ -104,9 +84,5 @@ export async function recordSiteVisit(userId: string) {
 }
 
 export async function getAdminActor() {
-  const user = await getAppUser();
-  if (user) return user;
-
-  const liveAdminDataConfigured = Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.BASEROW_API_TOKEN);
-  return !isAuthRequired() && !liveAdminDataConfigured ? DEMO_ADMIN : null;
+  return getAppUser();
 }

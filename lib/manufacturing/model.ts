@@ -1,4 +1,10 @@
 export type RawRow = Record<string, unknown> & { id: number };
+export interface ManufacturingAttachment {
+  partId: number;
+  kind: "drawing-pdf" | "step";
+  position: number;
+  originalName: string;
+}
 export type Kind = "text" | "number" | "boolean" | "select" | "link" | "date" | "json";
 export type Column = readonly [name: string, source: string, kind: Kind, owner: "engineering" | "shop"];
 export interface Entity { name: string; tableId: number; key: string; columns: readonly Column[] }

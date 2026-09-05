@@ -1,15 +1,15 @@
 import { NextResponse } from "next/server";
 
-import { getEffectiveAppUser, isAuthRequired } from "@/lib/auth";
+import { getAppUser } from "@/lib/auth";
 import { getFabricationJobs } from "@/lib/manufacturing";
 import { ManufacturingFileError, storedManufacturingFileResponse } from "@/lib/manufacturing/files";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(_request: Request, { params }: { params: Promise<{ id: string; kind: string }> }) {
-  const user = await getEffectiveAppUser();
-  if (isAuthRequired() && !user) return NextResponse.json({ error: "Authentication required" }, { status: 401 });
-  if (isAuthRequired() && !user?.approved) return NextResponse.json({ error: "Account approval required" }, { status: 403 });
+  const user = await getAppUser();
+  if (!user) return NextResponse.json({ error: "Authentication required" }, { status: 401 });
+  if (!user.approved) return NextResponse.json({ error: "Account approval required" }, { status: 403 });
 
   const { id, kind } = await params;
   const jobId = Number(id);

@@ -1,6 +1,6 @@
 import { createWritePlan } from "./write-plan.ts";
 import { deduplicateOperations } from "../manufacturing-workflow.ts";
-import type { AdapterConfig } from "./supabase-adapter.ts";
+import { supabaseApiHeaders, type AdapterConfig } from "./supabase-adapter.ts";
 import type { NormalizedRow } from "./model.ts";
 import type { FabricationAction, OperationPatch, OperationQuantityAction, QualityResult } from "../types.ts";
 
@@ -22,7 +22,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
   async function rpc<T>(name: string, body?: unknown): Promise<T> {
     const response = await request(`${config.url.replace(/\/$/, "")}/rest/v1/rpc/${name}`, {
       method: body === undefined ? "GET" : "POST",
-      headers: { apikey: config.serviceKey, Authorization: `Bearer ${config.serviceKey}`, "Content-Type": "application/json" },
+      headers: { ...supabaseApiHeaders(config.serviceKey), "Content-Type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
       cache: "no-store", redirect: "error", signal: AbortSignal.timeout(30_000),
     });

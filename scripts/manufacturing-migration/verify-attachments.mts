@@ -68,9 +68,9 @@ const expected = snapshot.attachments.map((attachment) => {
 });
 
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-if (!url || !serviceKey || !anonKey) throw new Error("Supabase service-role and anonymous configuration is required");
+const serviceKey = process.env.SUPABASE_SECRET_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY;
+const anonKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+if (!url || !serviceKey || !anonKey) throw new Error("Supabase secret and publishable configuration is required");
 const admin = createClient(url, serviceKey, { auth: { autoRefreshToken: false, persistSession: false } });
 const anonymous = createClient(url, anonKey, { auth: { autoRefreshToken: false, persistSession: false } });
 

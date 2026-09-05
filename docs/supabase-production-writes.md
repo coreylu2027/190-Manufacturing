@@ -2,8 +2,8 @@
 
 The application now supports coordinated Supabase reads and writes for claims,
 releases, progress/completion and undo, claim stealing, CAM handoffs, finishing,
-profile allocation renames, and QC review/undo. Baserow remains the safe default
-until the database gate and both source flags are changed explicitly.
+profile allocation renames, and QC review/undo. Supabase is the only application
+backend; missing server credentials fail closed.
 
 ## Safety model
 
@@ -18,7 +18,8 @@ set in one PostgreSQL transaction. It:
   the validated quantity ledger;
 - records immutable before/after audit rows;
 - stores QC review/retraction and workflow changes in the same transaction; and
-- is callable only with the server-side service role. Direct service-role table
+- is callable only with the server-side secret key, which assumes the database
+  `service_role`. Direct service-role table
   updates remain revoked.
 
 Supabase mode requires a real authenticated, approved profile. Configuring either
@@ -47,35 +48,25 @@ psql -d manufacturing_write_test -f scripts/manufacturing-migration/write-integr
 The integration test wraps all fixture writes in a rollback. The bootstrap file
 must only be used with a new isolated database, never the hosted project.
 
-## Coordinated cutover
+## Production activation
 
-Do not enable writes against an older candidate snapshot. First stop or otherwise
-exclude Baserow writers, capture a final stable source state, import it, and rerun
-read parity. Then:
+For a new Supabase environment:
 
 1. Apply `supabase/production/20260905_manufacturing_writes.sql` once after the
    normalized manufacturing schema.
-2. Confirm the RPC/table privilege checks and leave Baserow intact for recovery.
+2. Confirm the RPC and table privilege checks.
 3. Enable the database gate:
 
    ```sql
    update manufacturing.write_control set enabled = true;
    ```
 
-4. In the same deployment, set:
+4. Deploy the application with the Supabase URL, publishable key, secret key,
+   and bootstrap administrator list. There are no backend source-selection flags.
 
-   ```ini
-   REQUIRE_AUTH=true
-   MANUFACTURING_READ_SOURCE=supabase
-   MANUFACTURING_WRITE_SOURCE=supabase
-   MANUFACTURING_SHADOW_READS=false
-   ```
-
-The app intentionally rejects a mixed Baserow-read/Supabase-write configuration;
-otherwise a user could act on stale rows from the wrong authority. After Supabase
-accepts its first production mutation, changing the flags back to the old Baserow
-snapshot can discard visible work. Treat rollback as a data-reconciliation event,
-not only an environment-variable change.
+After Supabase accepts its first production mutation, rollback must preserve the
+Supabase database as the authority. Disabling the write gate safely stops new
+manufacturing mutations without redirecting traffic to another database.
 
 ## Attachment migration
 
@@ -94,9 +85,9 @@ idempotent and rejects changed metadata. A final database manifest must match al
 verified source files before the command succeeds.
 
 The operation and finishing file routes resolve the authenticated request through
-the requirement-to-part relationship and stream the private Supabase object. They
-do not use the retained Baserow URL. Keep the original attachment metadata as
-provenance until the application has been exercised after deployment.
+the requirement-to-part relationship and stream the private Supabase object.
+Availability and exact display/download names come from the private Supabase
+attachment catalog; retained source metadata is migration provenance only.
 
 ### Completed attachment transfer
 

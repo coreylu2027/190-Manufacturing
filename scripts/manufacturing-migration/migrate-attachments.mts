@@ -95,8 +95,8 @@ const identities = new Set(references.map((attachment) => `${attachment.row_id}/
 if (identities.size !== references.length) throw new Error("Duplicate attachment reference in snapshot");
 
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-if (!url || !serviceKey) throw new Error("Supabase service-role configuration is required");
+const serviceKey = process.env.SUPABASE_SECRET_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY;
+if (!url || !serviceKey) throw new Error("Supabase server-secret configuration is required");
 if (new URL(url).hostname.split(".")[0] !== linkedProject) throw new Error("Supabase URL and linked project differ");
 const supabase = createClient(url, serviceKey, { auth: { autoRefreshToken: false, persistSession: false } });
 

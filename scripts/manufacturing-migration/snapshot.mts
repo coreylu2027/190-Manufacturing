@@ -12,7 +12,7 @@ const excludedTableIds = [1119643, 1126322];
 const baserowUrl = (process.env.BASEROW_API_URL ?? "https://api.baserow.io").replace(/\/$/, "");
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.replace(/\/$/, "");
 const baserowToken = process.env.BASEROW_API_TOKEN;
-const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const serviceKey = process.env.SUPABASE_SECRET_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY;
 if (!supabaseUrl || !baserowToken || !serviceKey) throw new Error("Existing Baserow and Supabase credentials are required");
 if (process.argv.length > 2) throw new Error("snapshot takes no arguments; each invocation creates a new private snapshot");
 const projectRef = new URL(supabaseUrl).hostname.split(".")[0];

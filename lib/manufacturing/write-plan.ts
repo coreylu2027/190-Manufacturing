@@ -1,8 +1,8 @@
-// Workflow behavior captured from lib/baserow.ts; all I/O is confined to an in-memory transaction.
+// Manufacturing workflow planning is pure; all I/O is committed by the Supabase transaction adapter.
 import { deduplicateOperations, planRequirementWorkflow, validateCamAction } from '../manufacturing-workflow.ts';
 import type { FabricationAction, ManufacturingOperation, OperationAllocation, OperationPatch, OperationQuantityAction, OperationStatus, OperationWorkType, QualityResult } from '../types.ts';
 import { ENTITIES, denormalizeRow, normalizeRow, type NormalizedRow, type RawRow } from './model.ts';
-type BaserowRow = RawRow;
+type SourceRow = RawRow;
 function canonicalRows(rows: RawRow[]) {
   return deduplicateOperations(rows.filter(row => row["Active in Routing"]).map(row => ({
     id: row.id, operationKey: String(row.Operation ?? ""), workType: operationWorkType(row),
@@ -28,10 +28,10 @@ function selectValue(value: unknown, fallback = ""): string {
     ? String((value as { value: unknown }).value ?? fallback)
     : fallback;
 }
-function operationWorkType(row: BaserowRow): OperationWorkType {
+function operationWorkType(row: SourceRow): OperationWorkType {
   return selectValue(row["Work Type"], "Manufacturing") === "CAM" ? "CAM" : "Manufacturing";
 }
-function taskQuantityForRow(row: BaserowRow, requiredQuantity: number) {
+function taskQuantityForRow(row: SourceRow, requiredQuantity: number) {
   return operationWorkType(row) === "CAM" ? 1 : requiredQuantity;
 }
 function linkedId(value: unknown): number | null {
@@ -77,7 +77,7 @@ function parseQuantityLedger(value: unknown): OperationAllocation[] {
     return [];
   }
 }
-function quantitiesForRow(row: BaserowRow, requiredQuantity: number, status: OperationStatus) {
+function quantitiesForRow(row: SourceRow, requiredQuantity: number, status: OperationStatus) {
   const rawLedger = row["Quantity Ledger"];
   if (typeof rawLedger === "string" && rawLedger.trim()) {
     const ledger: unknown = JSON.parse(rawLedger);

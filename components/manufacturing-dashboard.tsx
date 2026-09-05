@@ -18,7 +18,6 @@ import {
   ClipboardCopy,
   Clock3,
   Cloud,
-  CloudOff,
   Code2,
   Download,
   Factory,
@@ -592,7 +591,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
     },
     onError: (error, variables) => toast.error(error instanceof Error ? error.message : `Unable to ${variables.action} selected operations`),
     onSettled: () => {
-      if (query.data?.source !== "demo") queryClient.invalidateQueries({ queryKey: ["operations"] });
+      queryClient.invalidateQueries({ queryKey: ["operations"] });
     },
   });
 
@@ -878,9 +877,9 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
             )}
           </nav>
           <div className="ml-auto flex items-center gap-2">
-            <div className={cn("hidden items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium sm:flex", query.data?.source !== "demo" ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-200 bg-amber-50 text-amber-900")}>
-              {query.data?.source !== "demo" ? <Cloud className="size-3.5" /> : <CloudOff className="size-3.5" />}
-              {query.data?.source === "supabase" ? "Supabase live" : query.data?.source === "baserow" ? "Baserow live" : "Demo data"}
+            <div className="hidden items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-800 sm:flex">
+              <Cloud className="size-3.5" />
+              Supabase live
             </div>
             <Button
               variant="ghost"
@@ -1123,8 +1122,8 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                   <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Files & source</h3>
                   <div className="grid gap-2 sm:grid-cols-2">
                     {[
-                      { label: "Drawing PDF", href: selected.drawingPdfUrl ? `/api/operations/${selected.id}/files/drawing-pdf` : null, fileName: selected.drawingPdfName, icon: FileText },
-                      { label: "STEP file", href: selected.stepUrl ? `/api/operations/${selected.id}/files/step` : null, fileName: selected.stepName, icon: Download },
+                      { label: "Drawing PDF", href: selected.hasDrawingPdf ? `/api/operations/${selected.id}/files/drawing-pdf` : null, fileName: selected.drawingPdfName, icon: FileText },
+                      { label: "STEP file", href: selected.hasStepFile ? `/api/operations/${selected.id}/files/step` : null, fileName: selected.stepName, icon: Download },
                       { label: "Onshape drawing", href: selected.drawingUrl, fileName: null, icon: ArrowUpRight },
                       { label: "BOM source", href: selected.onshapeUrl, fileName: null, icon: Cloud },
                     ].map(({ label, href, fileName, icon: Icon }) => href ? (

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {ENTITIES,normalizeRow,denormalizeRow,type NormalizedRow} from "./model.ts";
-import {manufacturingConfig,assertBaserowWriteSource} from "./config.ts";
+import {manufacturingSupabaseConfig} from "./config.ts";
 import {compareRows} from "./parity.ts";
 import {createSupabaseManufacturingAdapter} from "./supabase-adapter.ts";
 test("normalized rows preserve original claims, keys, nulls, select metadata and timestamp precision",()=>{
@@ -19,11 +19,24 @@ test("multi-links are rejected rather than silently collapsed",()=>{
  const entity=ENTITIES.find(e=>e.name==="requirements")!;
  assert.throws(()=>normalizeRow(entity,{id:1,Part:[{id:1},{id:2}]}),/refusing to collapse/);
 });
-test("source flags default to Baserow and cannot accidentally enable Supabase writes",()=>{
- assert.deepEqual(manufacturingConfig({}),{read:"baserow",write:"baserow",shadow:false});
- assert.doesNotThrow(()=>assertBaserowWriteSource({}));
- assert.throws(()=>assertBaserowWriteSource({MANUFACTURING_WRITE_SOURCE:"supabase"}),/only available/);
- assert.throws(()=>manufacturingConfig({MANUFACTURING_READ_SOURCE:"typo"}),/Invalid/);
+test("manufacturing configuration fails closed without both Supabase server credentials",()=>{
+ assert.throws(()=>manufacturingSupabaseConfig({}),/credentials are missing/);
+ assert.throws(()=>manufacturingSupabaseConfig({NEXT_PUBLIC_SUPABASE_URL:"https://example.test"}),/credentials are missing/);
+ assert.deepEqual(manufacturingSupabaseConfig({NEXT_PUBLIC_SUPABASE_URL:" https://example.test ",SUPABASE_SECRET_KEY:" secret "}),{url:"https://example.test",serviceKey:"secret"});
+ assert.deepEqual(manufacturingSupabaseConfig({NEXT_PUBLIC_SUPABASE_URL:"https://example.test",SUPABASE_SERVICE_ROLE_KEY:"legacy"}),{url:"https://example.test",serviceKey:"legacy"});
+});
+
+test("Supabase reader validates the private attachment catalog",async()=>{
+ const adapter=createSupabaseManufacturingAdapter({url:"https://example.test",serviceKey:"sb_secret_test",fetch:async(input,init)=>{
+  assert.match(String(input),/manufacturing_attachment_manifest$/);
+  assert.equal(init?.method,"POST");
+  assert.equal(new Headers(init?.headers).get("apikey"),"sb_secret_test");
+  assert.equal(new Headers(init?.headers).has("authorization"),false);
+  return Response.json([{part_id:3,kind:"drawing-pdf",position:0,original_name:"P-1 REV B.pdf"}]);
+ }});
+ assert.deepEqual(await adapter.readAttachments(),[{partId:3,kind:"drawing-pdf",position:0,originalName:"P-1 REV B.pdf"}]);
+ const invalid=createSupabaseManufacturingAdapter({url:"https://example.test",serviceKey:"test",fetch:async()=>Response.json([{part_id:3,kind:"drawing-pdf",position:-1,original_name:"bad.pdf"}])});
+ await assert.rejects(invalid.readAttachments(),/Invalid manufacturing attachment manifest row/);
 });
 test("parity reports meaningful differences without including private values",()=>{
  const report=compareRows([{id:1,notes:"secret-a"}],[{id:1,notes:"secret-b"}],"id");

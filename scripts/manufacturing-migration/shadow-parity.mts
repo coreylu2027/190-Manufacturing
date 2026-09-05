@@ -6,7 +6,7 @@ import { projectOperations, projectProduction, projectFinishing, projectQc, with
 import { compareRows, stable } from "../../lib/manufacturing/parity.ts";
 import { readBaserowPages } from "./core.mts";
 import { isShopName } from "../../lib/profile-name.ts";
-const url=process.env.NEXT_PUBLIC_SUPABASE_URL,serviceKey=process.env.SUPABASE_SERVICE_ROLE_KEY;
+const url=process.env.NEXT_PUBLIC_SUPABASE_URL,serviceKey=process.env.SUPABASE_SECRET_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY;
 const baserowUrl=(process.env.BASEROW_API_URL??"https://api.baserow.io").replace(/\/$/,"");
 const token=process.env.BASEROW_API_TOKEN;
 if(!url||!serviceKey||!token) throw new Error("Existing server-side credentials are required");

@@ -1,9 +1,8 @@
-export function manufacturingConfig(env: Record<string,string|undefined> = process.env) {
-  const read=env.MANUFACTURING_READ_SOURCE ?? "baserow";
-  const write=env.MANUFACTURING_WRITE_SOURCE ?? "baserow";
-  if(!["baserow","supabase"].includes(read) || !["baserow","supabase"].includes(write)) throw new Error("Invalid manufacturing source configuration");
-  return {read,write,shadow:env.MANUFACTURING_SHADOW_READS==="true"};
-}
-export function assertBaserowWriteSource(env: Record<string,string|undefined> = process.env) {
-  if(manufacturingConfig(env).write!=="baserow") throw new Error("This compatibility write is only available while Baserow is the configured manufacturing source");
+export function manufacturingSupabaseConfig(env: Record<string, string | undefined> = process.env) {
+  const url = env.NEXT_PUBLIC_SUPABASE_URL?.trim();
+  const serviceKey = (env.SUPABASE_SECRET_KEY ?? env.SUPABASE_SERVICE_ROLE_KEY)?.trim();
+  if (!url || !serviceKey) {
+    throw new Error("Supabase manufacturing credentials are missing");
+  }
+  return { url, serviceKey };
 }

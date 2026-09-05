@@ -1,23 +1,23 @@
 import { NextResponse } from "next/server";
 
-import { getEffectiveAppUser, isAuthRequired } from "@/lib/auth";
+import { getAppUser } from "@/lib/auth";
 import { getFabricationJobs, getOperations } from "@/lib/manufacturing";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const user = await getEffectiveAppUser();
-  if (isAuthRequired() && !user) {
+  const user = await getAppUser();
+  if (!user) {
     return NextResponse.json({ error: "Authentication required" }, { status: 401 });
   }
-  if (isAuthRequired() && !user?.approved) {
+  if (!user.approved) {
     return NextResponse.json({ error: "Account approval required", code: "APPROVAL_REQUIRED" }, { status: 403 });
   }
 
   try {
     const data = await getFabricationJobs();
-    if (data.source === "demo" || data.jobs.length === 0) {
+    if (data.jobs.length === 0) {
       return NextResponse.json({ ...data, syncedAt: new Date().toISOString(), user });
     }
 

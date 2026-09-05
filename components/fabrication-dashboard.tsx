@@ -170,7 +170,7 @@ export function FabricationDashboard({
       });
     },
     onSettled: () => {
-      if (query.data?.source !== "demo") queryClient.invalidateQueries({ queryKey: ["fabrication"] });
+      queryClient.invalidateQueries({ queryKey: ["fabrication"] });
     },
   });
 
@@ -342,8 +342,8 @@ export function FabricationDashboard({
                   <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Files & source</h3>
                   <div className="grid gap-2 sm:grid-cols-2">
                     {[
-                      { label: "Drawing PDF", href: selected.drawingPdfUrl ? `/api/fabrication/${selected.id}/files/drawing-pdf` : null, fileName: selected.drawingPdfName, icon: FileText },
-                      { label: "STEP file", href: selected.stepUrl ? `/api/fabrication/${selected.id}/files/step` : null, fileName: selected.stepName, icon: Download },
+                      { label: "Drawing PDF", href: selected.hasDrawingPdf ? `/api/fabrication/${selected.id}/files/drawing-pdf` : null, fileName: selected.drawingPdfName, icon: FileText },
+                      { label: "STEP file", href: selected.hasStepFile ? `/api/fabrication/${selected.id}/files/step` : null, fileName: selected.stepName, icon: Download },
                       { label: "Onshape drawing", href: selected.drawingUrl, fileName: null, icon: ArrowUpRight },
                       { label: "BOM source", href: selected.onshapeUrl, fileName: null, icon: Cloud },
                     ].map(({ label, href, fileName, icon: Icon }) => href ? (

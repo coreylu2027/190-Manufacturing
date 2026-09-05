@@ -1,17 +1,16 @@
 # FRC 190 Manufacturing OS
 
-The Baserow-to-Supabase migration has been staged, and an atomic production-write
-path is ready for an explicit coordinated cutover. See the
-[production-write runbook](docs/supabase-production-writes.md) and the
-[migration report](docs/baserow-supabase-staged-migration.md) for the remaining
-deployment gates.
-The [normalized candidate and shadow validation report](docs/supabase-shadow-migration.md)
-records the independent backup, captured Onshape source, normalized import, and clean read parity.
-Manufacturing PDFs and STEP files are served from a private Supabase Storage
-bucket after the verified attachment migration; download routes never expose the
-service credential or fetch Baserow-hosted file URLs.
+Supabase is the application's only manufacturing backend. Reads come from the
+normalized manufacturing schema; claims, progress, completion/undo, CAM
+handoffs, finishing, profile allocation renames, and QC use one atomic
+transaction RPC with stale-write protection and audit history. PDFs and STEP
+files are served from private Supabase Storage, and their exact original names
+come from the private attachment catalog.
 
-Shop-floor workflow for the `V3-26 FRC190 Summer 2026` Baserow database. Onshape/BOM sync creates production requirements and routed operations; machinists use this app to filter available work, claim an operation, and record progress and completion.
+The historical [migration report](docs/baserow-supabase-staged-migration.md) and
+[shadow validation report](docs/supabase-shadow-migration.md) remain as offline
+cutover records. Onshape/BOM synchronization is maintained separately from this
+application.
 
 ## To-Do List
 
@@ -33,22 +32,23 @@ Shop-floor workflow for the `V3-26 FRC190 Summer 2026` Baserow database. Onshape
 ## Local setup
 
 1. Copy `.env.example` to `.env.local`.
-2. Add a Baserow database token with access to tables `1169282` (Operations), `1119642` (Production Requirements), and `1170619` (Finishing).
-3. Add the Supabase project URL, public anonymous key, and server-only service role key.
-4. Run the SQL files in `supabase/migrations` in filename order in the Supabase SQL editor.
+2. Add the Supabase project URL, publishable key, and server-only secret key.
+3. Run the SQL files in `supabase/migrations` in filename order, followed by the
+   production manufacturing and attachment SQL documented in the
+   [production-write runbook](docs/supabase-production-writes.md).
+4. Enable `manufacturing.write_control` only after the production schema is ready.
 5. Set `INITIAL_ADMIN_EMAILS` to one or more comma-separated administrator emails. These accounts bootstrap user approval and role assignment.
 6. Enable email/password auth, with `/auth/callback` as an allowed redirect path for email confirmation and password recovery.
 7. Add `/auth/callback` and `/auth/callback?next=/reset-password` to the Supabase redirect allow list for each app origin.
-8. Set `REQUIRE_AUTH=true` after Supabase is configured.
-9. To deliver notification emails, create a Resend API key, verify the sender domain, and set `RESEND_API_KEY` plus `NOTIFICATION_EMAIL_FROM`.
-10. Run `npm run dev`.
+8. To deliver notification emails, create a Resend API key, verify the sender domain, and set `RESEND_API_KEY` plus `NOTIFICATION_EMAIL_FROM`.
+9. Run `npm run dev`.
 
-Without a Baserow token, the app intentionally loads realistic demo rows so the full workflow can be reviewed safely. All production credentials remain server-only.
+Authentication is mandatory. Missing Supabase server credentials fail closed
+instead of loading demo data or falling back to another backend.
 
 ## Manufacturing writes
 
-The safe default remains Baserow. With both manufacturing source flags set to
-`supabase`, operation actions use the atomic Supabase transaction RPC and also set:
+Operation actions use the atomic Supabase transaction RPC and also set:
 
 - `Started At` and the signed-in machinist when work begins.
 - `Completed At` and the signed-in machinist when work is completed.
@@ -70,9 +70,8 @@ regardless of part quantity and accepts an optional shared-drive program path
 when it is completed. It does not enter manufacturing QC.
 
 The Operations table stores `Work Type`, `CAM Program Path`, and `CAM Notes`.
-Run `npm run cam:migrate` to preview the Baserow-only reconciliation. The
-initial destructive reset requires the explicit `--apply --reset-all` flags.
-The command does not call Onshape APIs.
+Historical migration utilities are retained only under
+`scripts/manufacturing-migration` for offline audit and recovery.
 
 The Fabrication tab reads active rows from the Finishing table and joins their linked production requirements for part, assembly, status, and file details. A finishing job becomes claimable when its requirement reaches `Ready for Finishing`; claiming records the machinist on the Finishing row, and completing it advances the linked requirement to `Complete`. Release and undo actions reverse those changes.
 
@@ -82,13 +81,11 @@ The shop UI treats the Onshape document name and assembly part number as separat
 
 - New email/password accounts enter a pending state.
 - Registration and account settings collect a first name and last initial. Shop assignments use the normalized `FirstName L.` display name rather than an email identifier.
-- Any environment connected to live Baserow data requires authentication automatically; demo identities are available only when no Baserow token is configured.
+- Authentication and account approval are required in every environment.
 - An approved administrator assigns either the `machinist` or `admin` role.
 - Approval and role checks are repeated on protected server routes; hiding the Admin tab is not the security boundary.
 - Production requirements enter the administrator QC queue only after every active manufacturing operation is complete. Passing records the requirement-level review; failing records the review and returns the final operation to `Needs Rework`.
-- Supabase is the authoritative QC history by production requirement. Historical operation IDs are retained only as migration provenance. Before cutover, the latest QC details are mirrored onto the Baserow Production Requirement; after cutover, QC and its workflow update commit together in Supabase.
-- When upgrading an existing Supabase project, apply the migrations first and run `npm run qc:migrate -- --apply` once to backfill existing operation-level reviews without deleting them.
-- After adding the `QC Notes`, `QC Reviewed By`, and `QC Reviewed At` fields to Baserow, run `npm run qc:sync-baserow -- --apply` once to mirror existing reviews. While Baserow is the configured source, new reviews are mirrored automatically.
+- Supabase is the authoritative QC history by production requirement. Historical operation IDs are retained only as migration provenance. QC and its workflow update commit together in Supabase.
 
 ## Notifications
 
@@ -98,4 +95,4 @@ The reusable notification service in `lib/notifications.ts` stores an in-site al
 
 ## Vercel
 
-Import this directory as a Vercel project, add the values from `.env.example`, and deploy. Set `NEXT_PUBLIC_APP_URL` to the production origin for canonical metadata.
+Import this directory as a Vercel project, add the values from `.env.example`, and deploy. Set `NEXT_PUBLIC_APP_URL` to the production origin for canonical metadata. Do not add legacy backend tokens or manufacturing source-selection flags.

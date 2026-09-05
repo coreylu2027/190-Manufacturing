@@ -9,7 +9,6 @@ export const OPERATION_STATUSES = [
 
 export type OperationStatus = (typeof OPERATION_STATUSES)[number];
 
-export type DataSource = "baserow" | "supabase" | "demo";
 export type UserRole = "machinist" | "admin";
 export type OperationWorkType = "Manufacturing" | "CAM";
 export type OperationQuantityAction = "claim" | "release" | "complete" | "undo_complete";
@@ -59,16 +58,15 @@ export interface ManufacturingOperation {
   camNotes: string;
   camDependency: CamDependency | null;
   drawingUrl: string | null;
-  drawingPdfUrl: string | null;
+  hasDrawingPdf: boolean;
   drawingPdfName: string | null;
-  stepUrl: string | null;
+  hasStepFile: boolean;
   stepName: string | null;
   onshapeUrl: string | null;
 }
 
 export interface OperationsResponse {
   operations: ManufacturingOperation[];
-  source: DataSource;
   syncedAt: string;
   user: { id: string; name: string; email: string | null; role: UserRole; approved: boolean } | null;
 }
@@ -90,16 +88,15 @@ export interface FabricationJob {
   active: boolean;
   lastSyncedAt: string | null;
   drawingUrl: string | null;
-  drawingPdfUrl: string | null;
+  hasDrawingPdf: boolean;
   drawingPdfName: string | null;
-  stepUrl: string | null;
+  hasStepFile: boolean;
   stepName: string | null;
   onshapeUrl: string | null;
 }
 
 export interface FabricationResponse {
   jobs: FabricationJob[];
-  source: DataSource;
   syncedAt: string;
   user: OperationsResponse["user"];
 }
@@ -167,5 +164,4 @@ export interface QualityControlItem {
 export interface AdminResponse {
   users: AdminUserSummary[];
   qualityControl: QualityControlItem[];
-  source: DataSource;
 }

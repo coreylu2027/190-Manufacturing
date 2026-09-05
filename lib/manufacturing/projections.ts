@@ -1,18 +1,18 @@
-// Pure projections captured from the existing app. Baserow implementation remains unchanged.
+// Pure projections from normalized manufacturing rows and the Supabase attachment catalog.
 import { deduplicateOperations } from "../manufacturing-workflow.ts";
 import type { ManufacturingOperation, FabricationJob, OperationWorkType, OperationStatus, OperationAllocation, QualityControlItem, QualityResult } from "../types.ts";
-import type { RawRow as BaserowRow } from "./model.ts";
+import type { ManufacturingAttachment, RawRow as SourceRow } from "./model.ts";
 function selectValue(value: unknown, fallback = ""): string {
   return typeof value === "object" && value !== null && "value" in value
     ? String((value as { value: unknown }).value ?? fallback)
     : fallback;
 }
 
-function operationWorkType(row: BaserowRow): OperationWorkType {
+function operationWorkType(row: SourceRow): OperationWorkType {
   return selectValue(row["Work Type"], "Manufacturing") === "CAM" ? "CAM" : "Manufacturing";
 }
 
-function taskQuantityForRow(row: BaserowRow, requiredQuantity: number) {
+function taskQuantityForRow(row: SourceRow, requiredQuantity: number) {
   return operationWorkType(row) === "CAM" ? 1 : requiredQuantity;
 }
 
@@ -28,13 +28,13 @@ function linkedValue(value: unknown): string {
     : "";
 }
 
-function firstFile(value: unknown): { url: string; name: string } | null {
-  if (!Array.isArray(value) || !value[0] || typeof value[0] !== "object" || !("url" in value[0])) return null;
-
-  const file = value[0] as Record<string, unknown>;
-  const name = file.visible_name ?? file.original_name ?? file.name;
-  if (!file.url || !name) return null;
-  return { url: String(file.url), name: String(name) };
+function attachmentIndex(attachments: ManufacturingAttachment[]) {
+  const index = new Map<string, ManufacturingAttachment>();
+  for (const attachment of [...attachments].sort((a, b) => a.position - b.position)) {
+    const key = `${attachment.partId}|${attachment.kind}`;
+    if (!index.has(key)) index.set(key, attachment);
+  }
+  return index;
 }
 
 function textValue(value: unknown): string {
@@ -45,14 +45,14 @@ function textValue(value: unknown): string {
   return "";
 }
 
-function sourceDocumentName(requirement: BaserowRow | undefined): string | null {
+function sourceDocumentName(requirement: SourceRow | undefined): string | null {
   if (!requirement) return null;
   return textValue(requirement["Source Document"])
     || textValue(requirement["Onshape Document"])
     || null;
 }
 
-function revisionName(requirement: BaserowRow | undefined, part: BaserowRow | undefined): string | null {
+function revisionName(requirement: SourceRow | undefined, part: SourceRow | undefined): string | null {
   for (const value of [requirement?.Revision, part?.Revision]) {
     if (typeof value === "number") return String(value);
     const revision = textValue(value) || selectValue(value);
@@ -89,7 +89,7 @@ function parseQuantityLedger(value: unknown): OperationAllocation[] {
   }
 }
 
-function quantitiesForRow(row: BaserowRow, requiredQuantity: number, status: OperationStatus) {
+function quantitiesForRow(row: SourceRow, requiredQuantity: number, status: OperationStatus) {
   let allocations = parseQuantityLedger(row["Quantity Ledger"]);
   const hasStoredClaimed = row["Claimed Quantity"] !== null && row["Claimed Quantity"] !== undefined && row["Claimed Quantity"] !== "";
   const hasStoredCompleted = row["Completed Quantity"] !== null && row["Completed Quantity"] !== undefined && row["Completed Quantity"] !== "";
@@ -130,9 +130,10 @@ function fabricationStatus(requirementStatus: string, machinist: string): Manufa
   return "Planned";
 }
 
-export function projectOperations(operationRows: BaserowRow[], requirementRows: BaserowRow[], partRows: BaserowRow[]): ManufacturingOperation[] {
+export function projectOperations(operationRows: SourceRow[], requirementRows: SourceRow[], partRows: SourceRow[], attachments: ManufacturingAttachment[] = []): ManufacturingOperation[] {
   const requirements = new Map(requirementRows.map((row) => [row.id, row]));
   const parts = new Map(partRows.map((row) => [row.id, row]));
+  const files = attachmentIndex(attachments);
 
   const parsedOperations = operationRows.map((row) => {
     const requirementId = linkedId(row["Production Requirement"]);
@@ -146,8 +147,8 @@ export function projectOperations(operationRows: BaserowRow[], requirementRows: 
     const workType = operationWorkType(row);
     const taskQuantity = taskQuantityForRow(row, quantity);
     const quantities = quantitiesForRow(row, taskQuantity, status);
-    const drawingPdf = firstFile(requirement?.["Drawing PDF"]);
-    const stepFile = firstFile(requirement?.["STEP File"]);
+    const drawingPdf = partId ? files.get(`${partId}|drawing-pdf`) : undefined;
+    const stepFile = partId ? files.get(`${partId}|step`) : undefined;
     return {
       requirementId,
       id: row.id,
@@ -171,10 +172,10 @@ export function projectOperations(operationRows: BaserowRow[], requirementRows: 
       camNotes: textValue(row["CAM Notes"]),
       camDependency: null,
       drawingUrl: linkedValue(requirement?.Drawing) || null,
-      drawingPdfUrl: drawingPdf?.url ?? null,
-      drawingPdfName: drawingPdf?.name ?? null,
-      stepUrl: stepFile?.url ?? null,
-      stepName: stepFile?.name ?? null,
+      hasDrawingPdf: Boolean(drawingPdf),
+      drawingPdfName: drawingPdf?.originalName ?? null,
+      hasStepFile: Boolean(stepFile),
+      stepName: stepFile?.originalName ?? null,
       onshapeUrl: requirement?.["Onshape Source"] ? String(requirement["Onshape Source"]) : null,
     };
   });
@@ -200,8 +201,9 @@ export function projectOperations(operationRows: BaserowRow[], requirementRows: 
 
   return operations;
 }
-export function projectFinishing(finishingRows: BaserowRow[], requirementRows: BaserowRow[]): FabricationJob[] {
+export function projectFinishing(finishingRows: SourceRow[], requirementRows: SourceRow[], attachments: ManufacturingAttachment[] = []): FabricationJob[] {
   const requirements = new Map(requirementRows.map((row) => [row.id, row]));
+  const files = attachmentIndex(attachments);
 
   const jobs = finishingRows.flatMap((row): FabricationJob[] => {
     const requirementId = linkedId(row["Production Requirement"]);
@@ -211,8 +213,9 @@ export function projectFinishing(finishingRows: BaserowRow[], requirementRows: B
     const parsed = parseRequirement(linkedValue(row["Production Requirement"]));
     const machinist = String(row.Machinist ?? "").trim();
     const requirementStatus = selectValue(requirement.Status, "Needs Triage");
-    const drawingPdf = firstFile(requirement["Drawing PDF"]);
-    const stepFile = firstFile(requirement["STEP File"]);
+    const partId = linkedId(requirement.Part);
+    const drawingPdf = partId ? files.get(`${partId}|drawing-pdf`) : undefined;
+    const stepFile = partId ? files.get(`${partId}|step`) : undefined;
     return [{
       id: row.id,
       productionKey: String(row["Production Key"] ?? row.id),
@@ -228,10 +231,10 @@ export function projectFinishing(finishingRows: BaserowRow[], requirementRows: B
       active: Boolean(row.Active),
       lastSyncedAt: row["Last Synced At"] ? String(row["Last Synced At"]) : null,
       drawingUrl: linkedValue(requirement.Drawing) || null,
-      drawingPdfUrl: drawingPdf?.url ?? null,
-      drawingPdfName: drawingPdf?.name ?? null,
-      stepUrl: stepFile?.url ?? null,
-      stepName: stepFile?.name ?? null,
+      hasDrawingPdf: Boolean(drawingPdf),
+      drawingPdfName: drawingPdf?.originalName ?? null,
+      hasStepFile: Boolean(stepFile),
+      stepName: stepFile?.originalName ?? null,
       onshapeUrl: requirement["Onshape Source"] ? String(requirement["Onshape Source"]) : null,
     }];
   });

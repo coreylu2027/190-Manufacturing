@@ -25,7 +25,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   const admin = createAdminClient();
   if (!admin) {
     return NextResponse.json(
-      { error: "Supabase administration is not configured (SUPABASE_SERVICE_ROLE_KEY is missing)" },
+      { error: "Supabase administration is not configured (SUPABASE_SECRET_KEY is missing)" },
       { status: 503 },
     );
   }

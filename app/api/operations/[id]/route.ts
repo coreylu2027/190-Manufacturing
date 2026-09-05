@@ -1,12 +1,11 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { getEffectiveAppUser, isAuthRequired } from "@/lib/auth";
+import { getAppUser } from "@/lib/auth";
 import { applyQuantityAction, patchOperation, stealOperationClaim, updateCamHandoff } from "@/lib/manufacturing";
 import { createNotification } from "@/lib/notifications";
 import { isShopName } from "@/lib/profile-name";
 import { OPERATION_STATUSES } from "@/lib/types";
-import { manufacturingConfig } from "@/lib/manufacturing/config";
 import { ManufacturingWriteError } from "@/lib/manufacturing/write-adapter";
 
 const patchSchema = z.object({
@@ -40,11 +39,11 @@ const camHandoffSchema = z.object({
 const requestSchema = z.union([patchSchema, quantityActionSchema, stealActionSchema, camHandoffSchema]);
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const user = await getEffectiveAppUser();
-  if (isAuthRequired() && !user) {
+  const user = await getAppUser();
+  if (!user) {
     return NextResponse.json({ error: "Authentication required" }, { status: 401 });
   }
-  if (isAuthRequired() && !user?.approved) {
+  if (!user.approved) {
     return NextResponse.json({ error: "Account approval required", code: "APPROVAL_REQUIRED" }, { status: 403 });
   }
 
@@ -55,13 +54,13 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   const parsed = requestSchema.safeParse(await request.json());
   if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message }, { status: 400 });
 
-  const machinist = user?.name ?? "Demo Machinist";
+  const machinist = user.name;
   try {
     if ("action" in parsed.data && !isShopName(machinist)) {
       return NextResponse.json({ error: "Set your first name and last initial before claiming work", code: "PROFILE_NAME_REQUIRED" }, { status: 409 });
     }
     if ("action" in parsed.data && parsed.data.action === "steal") {
-      const stolen = await stealOperationClaim(operationId, { id: user?.id ?? "demo-admin", name: machinist });
+      const stolen = await stealOperationClaim(operationId, { id: user.id, name: machinist });
       const operationLabel = stolen.context.workType === "CAM"
         ? `CAM for ${stolen.context.operationNumber}`
         : stolen.context.operationNumber;
@@ -79,7 +78,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
           operationNumber: stolen.context.operationNumber,
           workType: stolen.context.workType,
           quantity: claimant.quantity,
-          stolenByUserId: user?.id ?? "demo-admin",
+          stolenByUserId: user.id,
           stolenByName: machinist,
         },
       })));
@@ -99,22 +98,22 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       if (user?.role !== "admin") {
         return NextResponse.json({ error: "Administrator access required" }, { status: 403 });
       }
-      const updated = await updateCamHandoff(operationId, parsed.data, user ?? undefined);
+      const updated = await updateCamHandoff(operationId, parsed.data, user);
       return NextResponse.json({ updated });
     }
 
-    if (!("action" in parsed.data) && manufacturingConfig().write === "supabase" && user?.role !== "admin") {
+    if (!("action" in parsed.data) && user.role !== "admin") {
       return NextResponse.json({ error: "Administrator access required for status overrides" }, { status: 403 });
     }
     const updated = "action" in parsed.data
       ? await applyQuantityAction(operationId, parsed.data.action, parsed.data.quantity, {
-          id: user?.id ?? "demo-admin",
+          id: user.id,
           name: machinist,
         }, {
           programPath: parsed.data.programPath,
           notes: parsed.data.notes,
         })
-      : await patchOperation(operationId, parsed.data, machinist, user?.id);
+      : await patchOperation(operationId, parsed.data, user);
     return NextResponse.json({ updated });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to update operation";
