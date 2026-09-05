@@ -79,14 +79,15 @@ export function QualityControlDashboard() {
 
   return (
     <section className="mx-auto max-w-[1800px] px-4 py-5 md:px-7 md:py-7">
-      <ForceQcPicker />
       <div className="mb-5 flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
         <div>
           <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-primary"><span className="size-2 rounded-full bg-violet-500 shadow-[0_0_0_4px_rgba(139,92,246,.12)]" /> Administrator workspace</div>
           <h1 className="text-3xl font-bold tracking-[-.035em] md:text-[2.55rem]">Quality control</h1>
           <p className="mt-1.5 max-w-2xl text-sm leading-6 text-muted-foreground">Inspect completed work, record results, and keep each part’s current location up to date.</p>
         </div>
-        <div className="grid grid-cols-3 gap-2">
+        <div className="flex flex-col items-stretch gap-2 sm:items-end">
+          <ForceQcPicker />
+          <div className="grid grid-cols-3 gap-2">
           {[
             { label: "Awaiting QC", value: stats.pending, icon: ClipboardCheck, tone: "bg-violet-50 text-violet-700" },
             { label: "Passed", value: stats.passed, icon: Check, tone: "bg-emerald-50 text-emerald-700" },
@@ -97,6 +98,7 @@ export function QualityControlDashboard() {
               <div><div className="text-lg font-bold leading-none">{value}</div><div className="mt-1 text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{label}</div></div>
             </div>
           ))}
+          </div>
         </div>
       </div>
 
