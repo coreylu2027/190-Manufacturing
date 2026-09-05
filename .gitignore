@@ -52,3 +52,12 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Private migration snapshots contain production records and QC notes.
+/migration-artifacts/
+
+# IDE database connections may contain hosts, usernames, or credentials.
+/.idea/dataSources*
+/.idea/**/dataSources*
+__pycache__/
+*.pyc

@@ -1,4 +1,5 @@
 "use client";
+import { ForceQcButton, hasUnfinishedQcPrerequisites } from "@/components/force-qc";
 
 import {
   AllCommunityModule,
@@ -8,16 +9,16 @@ import {
 } from "ag-grid-community";
 import { AgGridReact } from "ag-grid-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import Link from "next/link";
 import {
-  ArrowUpDown,
   ArrowUpRight,
   Check,
   ChevronRight,
   CircleDot,
+  ClipboardCheck,
   ClipboardCopy,
   Clock3,
   Cloud,
-  CloudOff,
   Code2,
   Download,
   Factory,
@@ -25,9 +26,11 @@ import {
   LayoutList,
   ListChecks,
   LoaderCircle,
+  MapPin,
   MoreHorizontal,
   PackageCheck,
   Paintbrush,
+  Pencil,
   RefreshCw,
   RotateCcw,
   Search,
@@ -45,6 +48,8 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { AdminDashboard } from "@/components/admin-dashboard";
 import { FabricationDashboard } from "@/components/fabrication-dashboard";
 import { NotificationInbox } from "@/components/notification-inbox";
+import { QualityControlDashboard } from "@/components/quality-control-dashboard";
+import { StorageLocationEditor } from "@/components/storage-location-editor";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -84,8 +89,11 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { mergeVisibleSelection } from "@/lib/bulk-selection";
 import { isShopName } from "@/lib/profile-name";
+import { canUseOnRobotLocation } from "@/lib/storage-locations";
 import { cn } from "@/lib/utils";
+import { WORKSPACE_ROUTES, type WorkspaceView } from "@/lib/workspace-routes";
 import {
+  type CamHandoffPatch,
   type ManufacturingOperation,
   type OperationActionPatch,
   type OperationQuantityAction,
@@ -98,15 +106,33 @@ ModuleRegistry.registerModules([AllCommunityModule]);
 
 type QueueView = "available" | "mine" | "all";
 type WorkTypeFilter = "all" | OperationWorkType;
-type WorkspaceView = "operations" | "fabrication" | "production" | "admin";
-type ProductionSort = "document" | "part" | "description" | "quantity" | "progress" | "status";
 
 interface ProductionRequirement {
   key: string;
+  requirementId: number | null;
+  requirementKey: string | null;
   partNumber: string;
+  revision: string | null;
   partName: string;
   assemblyNumber: string;
   documentName: string | null;
+  sourceRoot: string | null;
+  sourceAssemblyRevision: string | null;
+  requiredPartRevision: string | null;
+  configuration: string | null;
+  bomPositions: string | null;
+  material: string | null;
+  finishing: string | null;
+  finishingComplete: boolean;
+  requirementStatus: string;
+  requirementMachinist: string | null;
+  activeInBom: boolean;
+  engineeringChanged: boolean;
+  disposition: string | null;
+  effectiveQcResult: ManufacturingOperation["effectiveQcResult"];
+  qualityNotes: string;
+  qualityReviewedBy: string | null;
+  qualityReviewedAt: string | null;
   quantity: number;
   completedOperations: number;
   totalOperations: number;
@@ -114,7 +140,12 @@ interface ProductionRequirement {
   totalCamTasks: number;
   completedManufacturingOperations: number;
   totalManufacturingOperations: number;
+  routingProgress: number;
   status: OperationStatus;
+  storageLocation: ManufacturingOperation["storageLocation"];
+  locationUpdatedBy: string | null;
+  locationUpdatedAt: string | null;
+  operations: ManufacturingOperation[];
 }
 
 const gridTheme = themeQuartz.withParams({
@@ -164,6 +195,24 @@ function ActionCell({ data, onOpen, user }: { data?: ManufacturingOperation; onO
       </Button>
     </div>
   );
+}
+
+function ProductionProgressCell({ data }: { data?: ProductionRequirement }) {
+  if (!data) return null;
+  return (
+    <div className="flex h-full min-w-0 flex-col justify-center">
+      <div className="mb-1.5 flex justify-between gap-3 text-xs">
+        <span className="truncate">Mfg {data.completedManufacturingOperations}/{data.totalManufacturingOperations}{data.totalCamTasks > 0 ? ` · CAM ${data.completedCamTasks}/${data.totalCamTasks}` : ""}</span>
+        <span className="font-semibold">{data.routingProgress}%</span>
+      </div>
+      <div className="h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary" style={{ width: `${data.routingProgress}%` }} /></div>
+    </div>
+  );
+}
+
+function ProductionActionCell({ data, onOpen }: { data?: ProductionRequirement; onOpen: (requirement: ProductionRequirement) => void }) {
+  if (!data) return null;
+  return <div className="flex h-full items-center justify-end"><Button size="sm" variant="outline" onClick={() => onOpen(data)}>More details<ChevronRight /></Button></div>;
 }
 
 async function fetchOperations(): Promise<OperationsResponse> {
@@ -256,12 +305,14 @@ function requirementStatus(operations: ManufacturingOperation[]): OperationStatu
 }
 
 function ProductionOverview({
+  canForceQc,
   operations,
   isLoading,
   isError,
   errorMessage,
   onRetry,
 }: {
+  canForceQc: boolean;
   operations: ManufacturingOperation[];
   isLoading: boolean;
   isError: boolean;
@@ -270,12 +321,16 @@ function ProductionOverview({
 }) {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<"all" | OperationStatus>("all");
-  const [sort, setSort] = useState<ProductionSort>("document");
+  const [sourceDocument, setSourceDocument] = useState("all");
+  const [location, setLocation] = useState("all");
+  const [selectedRequirementKey, setSelectedRequirementKey] = useState<string | null>(null);
   const requirements = useMemo<ProductionRequirement[]>(() => {
     const grouped = new Map<string, ManufacturingOperation[]>();
 
     for (const operation of operations) {
-      const key = `${operation.assemblyNumber}|${operation.partNumber}`;
+      const key = operation.requirementId !== null
+        ? `requirement:${operation.requirementId}`
+        : `${operation.assemblyNumber}|${operation.partNumber}|${operation.revision ?? ""}`;
       grouped.set(key, [...(grouped.get(key) ?? []), operation]);
     }
 
@@ -283,10 +338,30 @@ function ProductionOverview({
         const first = routedOperations[0];
         return {
           key,
+          requirementId: first.requirementId,
+          requirementKey: first.requirementKey,
           partNumber: first.partNumber,
+          revision: first.revision,
           partName: first.partName,
           assemblyNumber: first.assemblyNumber,
           documentName: first.documentName,
+          sourceRoot: first.sourceRoot,
+          sourceAssemblyRevision: first.sourceAssemblyRevision,
+          requiredPartRevision: first.requiredPartRevision,
+          configuration: first.configuration,
+          bomPositions: first.bomPositions,
+          material: first.material,
+          finishing: first.finishing,
+          finishingComplete: first.finishingComplete,
+          requirementStatus: first.requirementStatus,
+          requirementMachinist: first.requirementMachinist,
+          activeInBom: first.activeInBom,
+          engineeringChanged: first.engineeringChanged,
+          disposition: first.disposition,
+          effectiveQcResult: first.effectiveQcResult,
+          qualityNotes: first.qualityNotes,
+          qualityReviewedBy: first.qualityReviewedBy,
+          qualityReviewedAt: first.qualityReviewedAt,
           quantity: first.quantity,
           completedOperations: routedOperations.filter((operation) => operation.status === "Complete").length,
           totalOperations: routedOperations.length,
@@ -294,44 +369,42 @@ function ProductionOverview({
           totalCamTasks: routedOperations.filter((operation) => operation.workType === "CAM").length,
           completedManufacturingOperations: routedOperations.filter((operation) => operation.workType === "Manufacturing" && operation.status === "Complete").length,
           totalManufacturingOperations: routedOperations.filter((operation) => operation.workType === "Manufacturing").length,
+          routingProgress: Math.round((routedOperations.filter((operation) => operation.status === "Complete").length / routedOperations.length) * 100),
           status: requirementStatus(routedOperations),
+          storageLocation: first.storageLocation,
+          locationUpdatedBy: first.locationUpdatedBy,
+          locationUpdatedAt: first.locationUpdatedAt,
+          operations: [...routedOperations].sort((a, b) => a.operationNumber.localeCompare(b.operationNumber)
+            || Number(a.workType === "Manufacturing") - Number(b.workType === "Manufacturing")
+            || a.id - b.id),
         };
       });
   }, [operations]);
 
   const visibleRequirements = useMemo(() => {
     const term = search.trim().toLocaleLowerCase();
-    const statusOrder: Record<OperationStatus, number> = {
-      Blocked: 0,
-      "Needs Rework": 1,
-      "In Progress": 2,
-      Ready: 3,
-      Planned: 4,
-      Complete: 5,
-    };
     const filtered = requirements.filter((requirement) => {
       if (status !== "all" && requirement.status !== status) return false;
+      if (sourceDocument === "missing" && requirement.documentName) return false;
+      if (sourceDocument !== "all" && sourceDocument !== "missing" && requirement.documentName !== sourceDocument) return false;
+      if (location === "unassigned" && requirement.storageLocation) return false;
+      if (location !== "all" && location !== "unassigned" && requirement.storageLocation !== location) return false;
       if (term && ![
         requirement.partNumber,
+        requirement.revision,
         requirement.partName,
         requirement.assemblyNumber,
         requirement.documentName,
+        requirement.storageLocation,
       ].join(" ").toLocaleLowerCase().includes(term)) return false;
       return true;
     });
 
-    return [...filtered].sort((a, b) => {
-      if (sort === "part") return a.partNumber.localeCompare(b.partNumber);
-      if (sort === "description") return a.partName.localeCompare(b.partName) || a.partNumber.localeCompare(b.partNumber);
-      if (sort === "quantity") return b.quantity - a.quantity || a.partNumber.localeCompare(b.partNumber);
-      if (sort === "progress") {
-        const progressDifference = (b.completedOperations / b.totalOperations) - (a.completedOperations / a.totalOperations);
-        return progressDifference || a.partNumber.localeCompare(b.partNumber);
-      }
-      if (sort === "status") return statusOrder[a.status] - statusOrder[b.status] || a.partNumber.localeCompare(b.partNumber);
-      return (a.documentName ?? "").localeCompare(b.documentName ?? "") || a.partNumber.localeCompare(b.partNumber);
-    });
-  }, [requirements, search, sort, status]);
+    return [...filtered].sort((a, b) => (a.documentName ?? "").localeCompare(b.documentName ?? "") || a.partNumber.localeCompare(b.partNumber));
+  }, [location, requirements, search, sourceDocument, status]);
+
+  const sourceDocuments = useMemo(() => [...new Set(requirements.flatMap((requirement) => requirement.documentName ? [requirement.documentName] : []))].sort(), [requirements]);
+  const locations = useMemo(() => [...new Set(requirements.flatMap((requirement) => requirement.storageLocation ? [requirement.storageLocation] : []))].sort(), [requirements]);
 
   const summary = useMemo(() => ({
     total: requirements.length,
@@ -339,6 +412,19 @@ function ProductionOverview({
     active: requirements.filter((requirement) => requirement.status === "In Progress").length,
     attention: requirements.filter((requirement) => requirement.status === "Blocked" || requirement.status === "Needs Rework").length,
   }), [requirements]);
+  const selectedRequirement = requirements.find((requirement) => requirement.key === selectedRequirementKey) ?? null;
+  const openRequirement = (requirement: ProductionRequirement) => setSelectedRequirementKey(requirement.key);
+  const columnDefs = useMemo<ColDef<ProductionRequirement>[]>(() => [
+    { field: "partNumber", headerName: "PART", minWidth: 155, pinned: "left", cellClass: "font-mono font-semibold" },
+    { field: "revision", headerName: "REVISION", width: 104, valueFormatter: ({ value }) => value || "—" },
+    { field: "partName", headerName: "DESCRIPTION", minWidth: 230, flex: 1 },
+    { field: "documentName", headerName: "SOURCE DOCUMENT", minWidth: 175, cellClass: "font-mono", valueFormatter: ({ value }) => value || "Not synced" },
+    { field: "storageLocation", headerName: "LOCATION", minWidth: 150, valueFormatter: ({ value }) => value || "Not recorded" },
+    { field: "quantity", headerName: "QTY", width: 90, filter: "agNumberColumnFilter" },
+    { field: "routingProgress", headerName: "ROUTING PROGRESS", minWidth: 230, cellRenderer: ProductionProgressCell },
+    { field: "status", headerName: "STATUS", minWidth: 145, cellRenderer: StatusCell },
+    { headerName: "", width: 142, pinned: "right", sortable: false, filter: false, resizable: false, cellRenderer: ProductionActionCell, cellRendererParams: { onOpen: openRequirement } },
+  ], []);
 
   return (
     <section className="mx-auto max-w-[1800px] px-4 py-5 md:px-7 md:py-7">
@@ -372,22 +458,19 @@ function ProductionOverview({
             </div>
             <div className="relative min-w-0 flex-1 xl:max-w-md">
               <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-              <Input value={search} onChange={(event) => setSearch(event.target.value)} className="h-9 bg-card pl-9" placeholder="Search part, assembly, document…" />
+              <Input value={search} onChange={(event) => setSearch(event.target.value)} className="h-9 bg-card pl-9" placeholder="Search part, revision, assembly, document…" />
             </div>
             <Select value={status} onValueChange={(value) => setStatus((value ?? "all") as "all" | OperationStatus)}>
               <SelectTrigger className="h-9 w-full bg-card xl:w-48"><SlidersHorizontal className="text-muted-foreground" /><SelectValue placeholder="All statuses" /></SelectTrigger>
               <SelectContent><SelectItem value="all">All statuses</SelectItem>{(["Planned", "Ready", "In Progress", "Blocked", "Needs Rework", "Complete"] as OperationStatus[]).map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
             </Select>
-            <Select value={sort} onValueChange={(value) => setSort((value ?? "document") as ProductionSort)}>
-              <SelectTrigger className="h-9 w-full bg-card xl:w-52"><ArrowUpDown className="text-muted-foreground" /><SelectValue placeholder="Sort requirements" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="document">Source document</SelectItem>
-                <SelectItem value="part">Part number</SelectItem>
-                <SelectItem value="description">Description</SelectItem>
-                <SelectItem value="quantity">Quantity: high to low</SelectItem>
-                <SelectItem value="progress">Progress: high to low</SelectItem>
-                <SelectItem value="status">Status: attention first</SelectItem>
-              </SelectContent>
+            <Select value={sourceDocument} onValueChange={(value) => setSourceDocument(value ?? "all")}>
+              <SelectTrigger className="h-9 w-full bg-card xl:w-56"><FileText className="text-muted-foreground" /><SelectValue placeholder="All source documents" /></SelectTrigger>
+              <SelectContent><SelectItem value="all">All source documents</SelectItem>{sourceDocuments.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}<SelectItem value="missing">Not synced</SelectItem></SelectContent>
+            </Select>
+            <Select value={location} onValueChange={(value) => setLocation(value ?? "all")}>
+              <SelectTrigger className="h-9 w-full bg-card xl:w-52"><MapPin className="text-muted-foreground" /><SelectValue placeholder="All locations" /></SelectTrigger>
+              <SelectContent><SelectItem value="all">All locations</SelectItem>{locations.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}<SelectItem value="unassigned">Not recorded</SelectItem></SelectContent>
             </Select>
             <div className="whitespace-nowrap text-xs text-muted-foreground">{visibleRequirements.length} of {requirements.length} shown</div>
           </div>
@@ -400,54 +483,184 @@ function ProductionOverview({
         ) : requirements.length === 0 ? (
           <div className="grid min-h-80 place-items-center p-6 text-center"><div><PackageCheck className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h2 className="font-semibold">No routed parts</h2><p className="mt-1 text-sm text-muted-foreground">Production requirements will appear after operations are added to an active routing.</p></div></div>
         ) : visibleRequirements.length === 0 ? (
-          <div className="grid min-h-80 place-items-center p-6 text-center"><div><Search className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h2 className="font-semibold">No requirements match</h2><p className="mt-1 text-sm text-muted-foreground">Try another status or clear the search.</p><Button variant="outline" className="mt-4" onClick={() => { setSearch(""); setStatus("all"); }}>Clear filters</Button></div></div>
+          <div className="grid min-h-80 place-items-center p-6 text-center"><div><Search className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h2 className="font-semibold">No requirements match</h2><p className="mt-1 text-sm text-muted-foreground">Try another status, source document, or location, or clear the search.</p><Button variant="outline" className="mt-4" onClick={() => { setSearch(""); setStatus("all"); setSourceDocument("all"); setLocation("all"); }}>Clear filters</Button></div></div>
         ) : (
           <>
-            <div className="hidden overflow-x-auto md:block">
-              <table className="w-full text-left text-sm">
-                <thead className="border-b bg-muted/20 text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
-                  <tr><th className="px-4 py-3">Part</th><th className="px-4 py-3">Description</th><th className="px-4 py-3">Source document</th><th className="px-4 py-3 text-right">Qty</th><th className="px-4 py-3">Routing progress</th><th className="px-4 py-3">Status</th></tr>
-                </thead>
-                <tbody className="divide-y">
-                  {visibleRequirements.map((requirement) => {
-                    const percent = Math.round((requirement.completedOperations / requirement.totalOperations) * 100);
-                    return (
-                      <tr key={requirement.key} className="transition hover:bg-muted/30">
-                        <td className="px-4 py-3 font-mono text-xs font-bold text-primary">{requirement.partNumber}</td>
-                        <td className="px-4 py-3 font-semibold">{requirement.partName}</td>
-                        <td className="px-4 py-3 font-mono text-xs">{requirement.documentName ?? "Not synced"}</td>
-                        <td className="px-4 py-3 text-right font-semibold">{requirement.quantity}</td>
-                        <td className="min-w-56 px-4 py-3"><div className="mb-1.5 flex justify-between text-xs"><span>Mfg {requirement.completedManufacturingOperations}/{requirement.totalManufacturingOperations}{requirement.totalCamTasks > 0 ? ` · CAM ${requirement.completedCamTasks}/${requirement.totalCamTasks}` : ""}</span><span className="font-semibold">{percent}%</span></div><div className="h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary" style={{ width: `${percent}%` }} /></div></td>
-                        <td className="px-4 py-3"><StatusBadge status={requirement.status} /></td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+            <div className="hidden h-[min(59vh,680px)] min-h-[430px] md:block">
+              <AgGridReact<ProductionRequirement>
+                theme={gridTheme}
+                rowData={visibleRequirements}
+                columnDefs={columnDefs}
+                defaultColDef={{ sortable: true, filter: false, resizable: true }}
+                initialState={{ sort: { sortModel: [{ colId: "documentName", sort: "asc" }] } }}
+                getRowId={({ data }) => data.key}
+                onRowDoubleClicked={({ data }) => data && openRequirement(data)}
+                pagination
+                paginationPageSize={25}
+                paginationPageSizeSelector={[10, 25, 50]}
+                animateRows
+              />
             </div>
             <div className="divide-y md:hidden">
               {visibleRequirements.map((requirement) => {
                 const percent = Math.round((requirement.completedOperations / requirement.totalOperations) * 100);
                 return (
                   <article key={requirement.key} className="p-4">
-                    <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary">{requirement.partNumber}</p><h3 className="mt-1 font-semibold">{requirement.partName}</h3><p className="mt-1 font-mono text-[11px] text-muted-foreground">{requirement.documentName ?? "Document not synced"} · Qty {requirement.quantity}</p></div><StatusBadge status={requirement.status} /></div>
-                    <div className="mt-3"><div className="mb-1.5 flex justify-between text-xs text-muted-foreground"><span>Mfg {requirement.completedManufacturingOperations}/{requirement.totalManufacturingOperations}{requirement.totalCamTasks > 0 ? ` · CAM ${requirement.completedCamTasks}/${requirement.totalCamTasks}` : ""}</span><span className="font-semibold text-foreground">{percent}%</span></div><div className="h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary" style={{ width: `${percent}%` }} /></div></div>
-                  </article>
+                    <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary">{requirement.partNumber}</p><h3 className="mt-1 font-semibold">{requirement.partName}</h3><p className="mt-1 font-mono text-[11px] text-muted-foreground">Rev {requirement.revision ?? "—"} · {requirement.documentName ?? "Document not synced"} · Qty {requirement.quantity}</p><p className="mt-1 text-xs text-muted-foreground">Location: {requirement.storageLocation ?? "Not recorded"}</p></div><StatusBadge status={requirement.status} /></div>
+                     <div className="mt-3"><div className="mb-1.5 flex justify-between text-xs text-muted-foreground"><span>Mfg {requirement.completedManufacturingOperations}/{requirement.totalManufacturingOperations}{requirement.totalCamTasks > 0 ? ` · CAM ${requirement.completedCamTasks}/${requirement.totalCamTasks}` : ""}</span><span className="font-semibold text-foreground">{percent}%</span></div><div className="h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary" style={{ width: `${percent}%` }} /></div></div>
+                     <Button className="mt-3 w-full" variant="outline" onClick={() => setSelectedRequirementKey(requirement.key)}>More details<ChevronRight /></Button>
+                   </article>
                 );
               })}
             </div>
           </>
         )}
       </div>
+
+      <Sheet open={Boolean(selectedRequirement)} onOpenChange={(open) => !open && setSelectedRequirementKey(null)}>
+        <SheetContent className="w-full overflow-y-auto sm:max-w-2xl">
+          {selectedRequirement && (
+            <>
+              <SheetHeader className="border-b p-6 pr-14">
+                <div className="mb-2 flex flex-wrap items-center gap-2">
+                  <StatusBadge status={selectedRequirement.status} />
+                  <Badge variant="outline">{selectedRequirement.requirementStatus}</Badge>
+                  <Badge variant="outline" className={cn(
+                    selectedRequirement.effectiveQcResult === "passed" && "border-emerald-200 bg-emerald-50 text-emerald-800",
+                    selectedRequirement.effectiveQcResult === "failed" && "border-rose-200 bg-rose-50 text-rose-800",
+                  )}>
+                    {selectedRequirement.effectiveQcResult === "passed" ? "QC passed" : selectedRequirement.effectiveQcResult === "failed" ? "QC failed" : "QC pending"}
+                  </Badge>
+                </div>
+                <SheetTitle className="text-2xl font-bold tracking-tight">{selectedRequirement.partName}</SheetTitle>
+                <SheetDescription className="font-mono text-xs font-semibold text-primary">{selectedRequirement.partNumber}{selectedRequirement.revision ? ` · Rev ${selectedRequirement.revision}` : ""}</SheetDescription>
+              </SheetHeader>
+
+              <div className="space-y-6 p-6">
+                <section>
+                  <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Requirement details</h3>
+                  <div className="grid grid-cols-2 overflow-hidden rounded-xl border">
+                    {[
+                      ["Production key", selectedRequirement.requirementKey || "Not synced"],
+                      ["Source document", selectedRequirement.documentName || "Not synced"],
+                      ["Source root", selectedRequirement.sourceRoot || "Not synced"],
+                      ["Assembly", selectedRequirement.assemblyNumber],
+                      ["Source assembly revision", selectedRequirement.sourceAssemblyRevision || "—"],
+                      ["Configuration", selectedRequirement.configuration || "Default"],
+                      ["Required part revision", selectedRequirement.requiredPartRevision || selectedRequirement.revision || "—"],
+                      ["Required quantity", String(selectedRequirement.quantity)],
+                      ["Material", selectedRequirement.material || "Not specified"],
+                      ["Finish", selectedRequirement.finishing || "None"],
+                      ["BOM positions", selectedRequirement.bomPositions || "Not specified"],
+                      ["Requirement assignment", selectedRequirement.requirementMachinist || "Unassigned"],
+                      ["Disposition", selectedRequirement.disposition || "Not recorded"],
+                      ["Active in BOM", selectedRequirement.activeInBom ? "Yes" : "No"],
+                      ["Engineering changed", selectedRequirement.engineeringChanged ? "Yes" : "No"],
+                      ["Relevant operations", String(selectedRequirement.totalOperations)],
+                    ].map(([label, value], index, details) => (
+                      <div key={label} className={cn("p-3", index % 2 === 0 && "border-r", index < details.length - 2 && "border-b")}>
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{label}</p>
+                        <p className="mt-1 break-words text-sm font-semibold">{value}</p>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+
+                {selectedRequirement.requirementId !== null && (
+                  <section>
+                    <StorageLocationEditor
+                      requirementId={selectedRequirement.requirementId}
+                      value={selectedRequirement.storageLocation}
+                      updatedBy={selectedRequirement.locationUpdatedBy}
+                      updatedAt={selectedRequirement.locationUpdatedAt}
+                      canEdit
+                      allowOnRobot={canUseOnRobotLocation(selectedRequirement.effectiveQcResult === "passed", selectedRequirement.finishingComplete)}
+                    />
+                    {!canUseOnRobotLocation(selectedRequirement.effectiveQcResult === "passed", selectedRequirement.finishingComplete) && (
+                      <p className="mt-2 text-xs text-muted-foreground">“On Robot” becomes available after QC passes and any required finishing is complete.</p>
+                    )}
+                  </section>
+                )}
+
+                <section>
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                    <h3 className="text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Quality review</h3>
+                    {canForceQc && selectedRequirement.requirementId !== null && selectedRequirement.activeInBom && selectedRequirement.effectiveQcResult !== "passed" && hasUnfinishedQcPrerequisites(selectedRequirement.operations) && (
+                      <ForceQcButton key={selectedRequirement.requirementId} requirementId={selectedRequirement.requirementId} label={selectedRequirement.partNumber} />
+                    )}
+                  </div>
+                  <div className="rounded-xl border bg-muted/20 p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-sm font-semibold">{selectedRequirement.effectiveQcResult === "passed" ? "Passed" : selectedRequirement.effectiveQcResult === "failed" ? "Failed" : "Not yet inspected"}</p>
+                      {selectedRequirement.qualityReviewedAt && <p className="text-xs text-muted-foreground">{formatDate(selectedRequirement.qualityReviewedAt)}{selectedRequirement.qualityReviewedBy ? ` · ${selectedRequirement.qualityReviewedBy}` : ""}</p>}
+                    </div>
+                    <p className={cn("mt-2 whitespace-pre-wrap text-sm", selectedRequirement.qualityNotes ? "text-foreground" : "text-muted-foreground")}>{selectedRequirement.qualityNotes || "No inspection notes recorded."}</p>
+                  </div>
+                </section>
+
+                <section>
+                  <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Files & source</h3>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {(() => {
+                      const operation = selectedRequirement.operations[0];
+                      return [
+                        { label: "Drawing PDF", href: operation.hasDrawingPdf ? `/api/operations/${operation.id}/files/drawing-pdf` : null, fileName: operation.drawingPdfName, icon: FileText },
+                        { label: "STEP file", href: operation.hasStepFile ? `/api/operations/${operation.id}/files/step` : null, fileName: operation.stepName, icon: Download },
+                        { label: "Onshape drawing", href: operation.drawingUrl, fileName: null, icon: ArrowUpRight },
+                        { label: "BOM source", href: operation.onshapeUrl, fileName: null, icon: Cloud },
+                      ].map(({ label, href, fileName, icon: Icon }) => href ? (
+                        <a key={label} href={href} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-3 rounded-xl border p-3 text-sm font-semibold transition hover:border-primary/40 hover:bg-accent/40"><div className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary"><Icon className="size-4" /></div><span className="min-w-0"><span className="block">{label}</span>{fileName && <span className="block truncate text-[10px] font-normal text-muted-foreground">{fileName}</span>}</span><ChevronRight className="ml-auto size-4 shrink-0 text-muted-foreground" /></a>
+                      ) : (
+                        <div key={label} className="flex items-center gap-3 rounded-xl border border-dashed p-3 text-sm text-muted-foreground"><div className="grid size-8 place-items-center rounded-lg bg-muted"><Icon className="size-4" /></div>{label}<span className="ml-auto text-[10px] uppercase">Missing</span></div>
+                      ));
+                    })()}
+                  </div>
+                </section>
+
+                <section>
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <h3 className="text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Relevant operations</h3>
+                    <span className="text-xs text-muted-foreground">{selectedRequirement.completedOperations}/{selectedRequirement.totalOperations} complete</span>
+                  </div>
+                  <div className="space-y-2">
+                    {selectedRequirement.operations.map((operation) => (
+                      <article key={operation.id} className="rounded-xl border p-4">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <div className="flex flex-wrap items-center gap-2"><Badge variant="outline">{operationLabel(operation)}</Badge><Badge variant="outline">{operation.workType}</Badge></div>
+                            <p className="mt-2 flex items-center gap-1.5 text-sm font-semibold"><Wrench className="size-4 text-muted-foreground" />{operation.machine}</p>
+                          </div>
+                          <StatusBadge status={operation.status} />
+                        </div>
+                        <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-xs sm:grid-cols-4">
+                          <div><span className="text-muted-foreground">Task qty</span><p className="mt-0.5 font-semibold">{operation.taskQuantity}</p></div>
+                          <div><span className="text-muted-foreground">Claimed</span><p className="mt-0.5 font-semibold">{operation.claimedQuantity}</p></div>
+                          <div><span className="text-muted-foreground">Completed</span><p className="mt-0.5 font-semibold">{operation.completedQuantity}</p></div>
+                          <div><span className="text-muted-foreground">Machinist</span><p className="mt-0.5 font-semibold">{operation.machinist || "Unclaimed"}</p></div>
+                        </div>
+                        {(operation.startedAt || operation.completedAt) && <p className="mt-3 text-xs text-muted-foreground">Started {formatDate(operation.startedAt)} · Finished {formatDate(operation.completedAt)}</p>}
+                        {operation.workType === "CAM" && (operation.camProgramPath || operation.camNotes) && (
+                          <div className="mt-3 rounded-lg bg-muted/50 p-3 text-xs"><p className="font-semibold">CAM handoff</p>{operation.camProgramPath && <p className="mt-1 break-all font-mono text-muted-foreground">{operation.camProgramPath}</p>}{operation.camNotes && <p className="mt-1 whitespace-pre-wrap text-muted-foreground">{operation.camNotes}</p>}</div>
+                        )}
+                      </article>
+                    ))}
+                  </div>
+                </section>
+              </div>
+
+              <SheetFooter className="sticky bottom-0 border-t bg-card/95 p-4 backdrop-blur"><Button variant="outline" onClick={() => setSelectedRequirementKey(null)}>Close</Button></SheetFooter>
+            </>
+          )}
+        </SheetContent>
+      </Sheet>
     </section>
   );
 }
 
-export function ManufacturingDashboard() {
+export function ManufacturingDashboard({ workspaceView }: { workspaceView: WorkspaceView }) {
   const router = useRouter();
   const queryClient = useQueryClient();
   const operationsGridRef = useRef<AgGridReact<ManufacturingOperation>>(null);
-  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("operations");
   const [view, setView] = useState<QueueView>("available");
   const [workType, setWorkType] = useState<WorkTypeFilter>("all");
   const [machine, setMachine] = useState("all");
@@ -461,6 +674,8 @@ export function ManufacturingDashboard() {
   const [quantityDialog, setQuantityDialog] = useState<{ action: OperationQuantityAction; max: number } | null>(null);
   const [quantityDraft, setQuantityDraft] = useState("1");
   const [camCompletionOpen, setCamCompletionOpen] = useState(false);
+  const [camHandoffEditOpen, setCamHandoffEditOpen] = useState(false);
+  const [camCompletedBy, setCamCompletedBy] = useState("");
   const [camProgramPath, setCamProgramPath] = useState("");
   const [camNotes, setCamNotes] = useState("");
   const [stealDialogOpen, setStealDialogOpen] = useState(false);
@@ -584,8 +799,27 @@ export function ManufacturingDashboard() {
     },
     onError: (error, variables) => toast.error(error instanceof Error ? error.message : `Unable to ${variables.action} selected operations`),
     onSettled: () => {
-      if (query.data?.source === "baserow") queryClient.invalidateQueries({ queryKey: ["operations"] });
+      queryClient.invalidateQueries({ queryKey: ["operations"] });
     },
+  });
+
+  const camHandoffMutation = useMutation({
+    mutationFn: async ({ id, patch }: { id: number; patch: CamHandoffPatch }) => {
+      const response = await fetch(`/api/operations/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error ?? "Unable to update the CAM handoff");
+      return body;
+    },
+    onSuccess: () => {
+      toast.success("CAM handoff updated");
+      setCamHandoffEditOpen(false);
+      queryClient.invalidateQueries({ queryKey: ["operations"] });
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to update the CAM handoff"),
   });
 
   const profileMutation = useMutation({
@@ -611,6 +845,13 @@ export function ManufacturingDashboard() {
 
   const operations = useMemo(() => query.data?.operations ?? [], [query.data?.operations]);
   const selected = selectedId === null ? null : operations.find((operation) => operation.id === selectedId) ?? null;
+  const selectedCamHandoff = selected?.workType === "CAM" ? {
+    operationId: selected.id,
+    status: selected.status,
+    completedBy: selected.machinist,
+    programPath: selected.camProgramPath,
+    notes: selected.camNotes,
+  } : selected?.camDependency ?? null;
   const selectedAllocation = selected ? allocationForUser(selected, query.data?.user ?? null) : { claimed: 0, completed: 0 };
   const selectedOtherClaimants = selected ? otherClaimants(selected, query.data?.user ?? null) : [];
   const machines = useMemo(() => [...new Set(operations.map((operation) => operation.machine))].sort(), [operations]);
@@ -627,7 +868,7 @@ export function ManufacturingDashboard() {
       const claimable = isOperationClaimable(operation);
       if (view === "available" && !claimable && !isOperationStealable(operation, query.data?.user ?? null)) return false;
       if (view === "mine" && allocation.claimed === 0) return false;
-      if (term && ![operation.partNumber, operation.partName, operation.documentName, operation.material, operation.machine, operation.operationNumber, operation.workType, operation.camProgramPath].join(" ").toLowerCase().includes(term)) return false;
+      if (term && ![operation.partNumber, operation.revision, operation.partName, operation.documentName, operation.material, operation.machine, operation.operationNumber, operation.workType, operation.camProgramPath, operation.storageLocation].join(" ").toLowerCase().includes(term)) return false;
       return true;
     });
   }, [machine, operations, query.data?.user, search, sourceDocument, view, workType]);
@@ -708,6 +949,25 @@ export function ManufacturingDashboard() {
       workType: "CAM",
     });
   };
+  const openCamHandoffEditor = () => {
+    if (!selectedCamHandoff || selectedCamHandoff.status !== "Complete") return;
+    setCamCompletedBy(selectedCamHandoff.completedBy);
+    setCamProgramPath(selectedCamHandoff.programPath ?? "");
+    setCamNotes(selectedCamHandoff.notes);
+    setCamHandoffEditOpen(true);
+  };
+  const saveCamHandoff = () => {
+    if (!selectedCamHandoff) return;
+    camHandoffMutation.mutate({
+      id: selectedCamHandoff.operationId,
+      patch: {
+        action: "edit_cam_handoff",
+        completedBy: camCompletedBy.trim(),
+        programPath: camProgramPath.trim(),
+        notes: camNotes.trim(),
+      },
+    });
+  };
   const copyProgramPath = async (programPath: string) => {
     try {
       await navigator.clipboard.writeText(programPath);
@@ -747,6 +1007,7 @@ export function ManufacturingDashboard() {
 
   const columnDefs = useMemo<ColDef<ManufacturingOperation>[]>(() => [
     { field: "partNumber", headerName: "PART", minWidth: 155, pinned: "left", cellClass: "font-mono font-semibold" },
+    { field: "revision", headerName: "REVISION", width: 104, valueFormatter: ({ value }) => value || "—" },
     { field: "partName", headerName: "DESCRIPTION", minWidth: 230, flex: 1 },
     { field: "material", headerName: "MATERIAL", minWidth: 165, valueFormatter: ({ value }) => value || "Unspecified" },
     { field: "documentName", headerName: "SOURCE DOCUMENT", minWidth: 175, valueFormatter: ({ value }) => value || "Not synced" },
@@ -756,6 +1017,7 @@ export function ManufacturingDashboard() {
     { field: "operationNumber", headerName: "OP", width: 125, filter: true, valueFormatter: ({ data, value }) => data ? operationLabel(data) : value },
     { field: "workType", headerName: "TYPE", width: 128, filter: true },
     { field: "machine", headerName: "MACHINE", minWidth: 175, filter: true },
+    { field: "storageLocation", headerName: "LOCATION", minWidth: 150, valueFormatter: ({ value }) => value || "Not recorded" },
     { field: "status", headerName: "STATUS", minWidth: 145, cellRenderer: StatusCell },
     { field: "machinist", headerName: "MACHINIST", minWidth: 180, valueFormatter: ({ value }) => value || "—" },
     { headerName: "", width: 102, pinned: "right", sortable: false, filter: false, resizable: false, cellRenderer: ActionCell, cellRendererParams: { onOpen: openOperation, user: query.data?.user ?? null } },
@@ -786,51 +1048,70 @@ export function ManufacturingDashboard() {
             <Button
               variant="ghost"
               className={cn("h-10", workspaceView === "operations" ? "bg-accent/70 text-primary" : "text-muted-foreground")}
-              aria-pressed={workspaceView === "operations"}
-              onClick={() => setWorkspaceView("operations")}
+              aria-current={workspaceView === "operations" ? "page" : undefined}
+              nativeButton={false}
+              render={<Link href={WORKSPACE_ROUTES.operations} />}
             >
               <LayoutList /><span className="hidden lg:inline">Operations</span>
             </Button>
             <Button
               variant="ghost"
               className={cn("h-10", workspaceView === "fabrication" ? "bg-accent/70 text-primary" : "text-muted-foreground")}
-              aria-pressed={workspaceView === "fabrication"}
+              aria-current={workspaceView === "fabrication" ? "page" : undefined}
               aria-label="Finishing"
-              onClick={() => setWorkspaceView("fabrication")}
+              nativeButton={false}
+              render={<Link href={WORKSPACE_ROUTES.fabrication} />}
             >
               <Paintbrush /><span className="hidden lg:inline">Finishing</span>
             </Button>
             <Button
               variant="ghost"
               className={cn("h-10", workspaceView === "production" ? "bg-accent/70 text-primary" : "text-muted-foreground")}
-              aria-pressed={workspaceView === "production"}
-              onClick={() => setWorkspaceView("production")}
+              aria-current={workspaceView === "production" ? "page" : undefined}
+              nativeButton={false}
+              render={<Link href={WORKSPACE_ROUTES.production} />}
             >
               <PackageCheck /><span className="hidden lg:inline">Production</span>
             </Button>
             {query.data?.user?.role === "admin" && (
-              <Button
-                variant="ghost"
-                className={cn("h-10", workspaceView === "admin" ? "bg-accent/70 text-primary" : "text-muted-foreground")}
-                aria-pressed={workspaceView === "admin"}
-                onClick={() => setWorkspaceView("admin")}
-              >
-                <ShieldCheck /><span className="hidden lg:inline">Admin</span>
-              </Button>
+              <>
+                <Button
+                  variant="ghost"
+                  className={cn("h-10", workspaceView === "qc" ? "bg-accent/70 text-primary" : "text-muted-foreground")}
+                  aria-current={workspaceView === "qc" ? "page" : undefined}
+                  nativeButton={false}
+                  render={<Link href={WORKSPACE_ROUTES.qc} />}
+                >
+                  <ClipboardCheck /><span className="hidden lg:inline">QC</span>
+                </Button>
+                <Button
+                  variant="ghost"
+                  className={cn("h-10", workspaceView === "admin" ? "bg-accent/70 text-primary" : "text-muted-foreground")}
+                  aria-current={workspaceView === "admin" ? "page" : undefined}
+                  nativeButton={false}
+                  render={<Link href={WORKSPACE_ROUTES.admin} />}
+                >
+                  <ShieldCheck /><span className="hidden lg:inline">Admin</span>
+                </Button>
+              </>
             )}
           </nav>
           <div className="ml-auto flex items-center gap-2">
-            <div className={cn("hidden items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium sm:flex", query.data?.source === "baserow" ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-200 bg-amber-50 text-amber-900")}>
-              {query.data?.source === "baserow" ? <Cloud className="size-3.5" /> : <CloudOff className="size-3.5" />}
-              {query.data?.source === "baserow" ? "Baserow live" : "Demo data"}
+            <div className="hidden items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-800 sm:flex">
+              <Cloud className="size-3.5" />
+              Supabase live
             </div>
             <Button
               variant="ghost"
               size="icon"
               aria-label="Refresh data"
-              onClick={() => workspaceView === "fabrication" ? queryClient.invalidateQueries({ queryKey: ["fabrication"] }) : query.refetch()}
-              disabled={workspaceView !== "fabrication" && query.isFetching}
-            ><RefreshCw className={cn(workspaceView !== "fabrication" && query.isFetching && "animate-spin")} /></Button>
+              onClick={() => workspaceView === "fabrication"
+                ? queryClient.invalidateQueries({ queryKey: ["fabrication"] })
+                : workspaceView === "qc" || workspaceView === "admin"
+                  ? queryClient.invalidateQueries({ queryKey: [workspaceView] })
+                  : query.refetch()}
+              disabled={["operations", "production"].includes(workspaceView) && query.isFetching}
+            ><RefreshCw className={cn(["operations", "production"].includes(workspaceView) && query.isFetching && "animate-spin")} /></Button>
             <DropdownMenu>
               <DropdownMenuTrigger render={<Button variant="outline" className="h-10 gap-2 px-2 pr-3" />}>
                 <Avatar size="sm"><AvatarFallback className="bg-primary/10 font-bold text-primary">{initials(userName)}</AvatarFallback></Avatar>
@@ -849,19 +1130,22 @@ export function ManufacturingDashboard() {
             </DropdownMenu>
           </div>
         </div>
-        <nav className={cn("grid gap-1 border-t px-3 py-1.5 md:hidden", query.data?.user?.role === "admin" ? "grid-cols-4" : "grid-cols-3")}>
+        <nav className={cn("grid gap-1 border-t px-3 py-1.5 md:hidden", query.data?.user?.role === "admin" ? "grid-cols-5" : "grid-cols-3")}>
           {[
             { id: "operations" as const, label: "Operations", icon: LayoutList },
             { id: "fabrication" as const, label: "Finishing", icon: Paintbrush },
             { id: "production" as const, label: "Production", icon: PackageCheck },
-            ...(query.data?.user?.role === "admin" ? [{ id: "admin" as const, label: "Admin", icon: ShieldCheck }] : []),
+            ...(query.data?.user?.role === "admin" ? [
+              { id: "qc" as const, label: "QC", icon: ClipboardCheck },
+              { id: "admin" as const, label: "Admin", icon: ShieldCheck },
+            ] : []),
           ].map(({ id, label, icon: Icon }) => (
-            <Button key={id} size="sm" variant="ghost" className={cn("min-w-0 gap-1 px-1 text-[11px]", workspaceView === id ? "bg-accent/70 text-primary" : "text-muted-foreground")} aria-pressed={workspaceView === id} onClick={() => setWorkspaceView(id)}><Icon />{label}</Button>
+            <Button key={id} size="sm" variant="ghost" className={cn("min-w-0 gap-1 px-1 text-[11px]", workspaceView === id ? "bg-accent/70 text-primary" : "text-muted-foreground")} aria-current={workspaceView === id ? "page" : undefined} nativeButton={false} render={<Link href={WORKSPACE_ROUTES[id]} />}><Icon />{label}</Button>
           ))}
         </nav>
       </header>
 
-      {workspaceView === "admin" && query.data?.user?.role === "admin" ? <AdminDashboard /> : workspaceView === "operations" ? <section className="mx-auto max-w-[1800px] px-4 py-5 md:px-7 md:py-7">
+      {workspaceView === "admin" ? <AdminDashboard /> : workspaceView === "qc" ? <QualityControlDashboard /> : workspaceView === "operations" ? <section className="mx-auto max-w-[1800px] px-4 py-5 md:px-7 md:py-7">
         <div className="mb-5 flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
           <div>
             <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-primary"><span className="size-2 rounded-full bg-emerald-500 shadow-[0_0_0_4px_rgba(16,185,129,.12)]" /> Shop queue</div>
@@ -895,7 +1179,7 @@ export function ManufacturingDashboard() {
               </div>
               <div className="relative min-w-0 flex-1">
                 <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-                <Input value={search} onChange={(event) => setSearch(event.target.value)} className="h-9 bg-card pl-9" placeholder="Search part, assembly, operation…" />
+                <Input value={search} onChange={(event) => setSearch(event.target.value)} className="h-9 bg-card pl-9" placeholder="Search part, revision, assembly, operation…" />
               </div>
               <Select value={workType} onValueChange={(value) => setWorkType((value ?? "all") as WorkTypeFilter)}>
                 <SelectTrigger className="h-9 w-full bg-card xl:w-48"><Code2 className="text-muted-foreground" /><SelectValue placeholder="All work types" /></SelectTrigger>
@@ -968,7 +1252,7 @@ export function ManufacturingDashboard() {
                       />
                       <button onClick={() => openOperation(operation)} className="min-w-0 flex-1 text-left">
                         <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary">{operation.partNumber}</p><h3 className="mt-1 font-semibold">{operation.partName}</h3></div><StatusBadge status={operation.status} /></div>
-                        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground"><span>{operationLabel(operation)}</span><Badge variant="outline">{operation.workType}</Badge><span className="flex items-center gap-1"><Wrench className="size-3" />{operation.machine}</span><span>{operation.completedQuantity}/{operation.taskQuantity} done</span><span>{operation.availableQuantity} available</span></div>
+                        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground"><span>Rev {operation.revision ?? "—"}</span><span>{operationLabel(operation)}</span><Badge variant="outline">{operation.workType}</Badge><span className="flex items-center gap-1"><Wrench className="size-3" />{operation.machine}</span><span>{operation.completedQuantity}/{operation.taskQuantity} done</span><span>{operation.availableQuantity} available</span></div>
                       </button>
                     </article>
                   );
@@ -985,6 +1269,7 @@ export function ManufacturingDashboard() {
         <FabricationDashboard user={query.data?.user ?? null} onProfileRequired={openProfile} />
       ) : (
         <ProductionOverview
+          canForceQc={query.data?.user?.role === "admin" && query.data.user.approved}
           operations={operations}
           isLoading={query.isLoading}
           isError={query.isError}
@@ -1009,6 +1294,7 @@ export function ManufacturingDashboard() {
                   <div className="grid grid-cols-2 overflow-hidden rounded-xl border">
                     {[
                       [selected.workType === "CAM" ? "Target machine" : "Machine", selected.machine], ["Work", operationLabel(selected)],
+                      ["Revision", selected.revision || "—"], ["Assembly", selected.assemblyNumber],
                       ["Part quantity", String(selected.quantity)], ["Task quantity", String(selected.taskQuantity)],
                       ["Available", String(selected.availableQuantity)], ["Claimed", String(selected.claimedQuantity)],
                       ["Completed", String(selected.completedQuantity)], ["Your claim", String(selectedAllocation.claimed)],
@@ -1018,12 +1304,33 @@ export function ManufacturingDashboard() {
                   </div>
                 </section>
 
+                {selected.requirementId && selected.workType === "Manufacturing" && (
+                  <section>
+                    <StorageLocationEditor
+                      requirementId={selected.requirementId}
+                      value={selected.storageLocation}
+                      updatedBy={selected.locationUpdatedBy}
+                      updatedAt={selected.locationUpdatedAt}
+                      canEdit
+                      allowOnRobot={canUseOnRobotLocation(selected.effectiveQcResult === "passed", selected.finishingComplete)}
+                    />
+                  </section>
+                )}
+
                 {(selected.workType === "CAM" || selected.camDependency) && (
                   <section>
-                    <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">CAM handoff</h3>
+                    <div className="mb-3 flex items-center justify-between gap-3">
+                      <h3 className="text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">CAM handoff</h3>
+                      {query.data?.user?.role === "admin" && selectedCamHandoff?.status === "Complete" && (
+                        <Button size="sm" variant="outline" onClick={openCamHandoffEditor}><Pencil /> Edit handoff</Button>
+                      )}
+                    </div>
                     <div className="space-y-3 rounded-xl border bg-muted/20 p-4">
                       {selected.workType === "Manufacturing" && selected.camDependency && (
                         <div className="flex flex-wrap items-center gap-2"><StatusBadge status={selected.camDependency.status} /><span className="text-xs text-muted-foreground">CAM for {selected.operationNumber}</span></div>
+                      )}
+                      {selectedCamHandoff?.status === "Complete" && (
+                        <div><p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Completed by</p><p className="mt-1 text-sm font-semibold">{selectedCamHandoff.completedBy || "Not recorded"}</p></div>
                       )}
                       {(selected.workType === "CAM" ? selected.camProgramPath : selected.camDependency?.programPath) ? (
                         <div>
@@ -1056,8 +1363,8 @@ export function ManufacturingDashboard() {
                   <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Files & source</h3>
                   <div className="grid gap-2 sm:grid-cols-2">
                     {[
-                      { label: "Drawing PDF", href: selected.drawingPdfUrl ? `/api/operations/${selected.id}/files/drawing-pdf` : null, fileName: selected.drawingPdfName, icon: FileText },
-                      { label: "STEP file", href: selected.stepUrl ? `/api/operations/${selected.id}/files/step` : null, fileName: selected.stepName, icon: Download },
+                      { label: "Drawing PDF", href: selected.hasDrawingPdf ? `/api/operations/${selected.id}/files/drawing-pdf` : null, fileName: selected.drawingPdfName, icon: FileText },
+                      { label: "STEP file", href: selected.hasStepFile ? `/api/operations/${selected.id}/files/step` : null, fileName: selected.stepName, icon: Download },
                       { label: "Onshape drawing", href: selected.drawingUrl, fileName: null, icon: ArrowUpRight },
                       { label: "BOM source", href: selected.onshapeUrl, fileName: null, icon: Cloud },
                     ].map(({ label, href, fileName, icon: Icon }) => href ? (
@@ -1120,10 +1427,36 @@ export function ManufacturingDashboard() {
               </div>
               <div>
                 <label className="mb-1.5 block text-xs font-semibold" htmlFor="cam-notes">Setup notes <span className="font-normal text-muted-foreground">(optional)</span></label>
-                <textarea id="cam-notes" value={camNotes} onChange={(event) => setCamNotes(event.target.value)} maxLength={5000} placeholder="Workholding, tooling, post-processor, or setup details…" className="min-h-28 w-full resize-y rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring focus:ring-3 focus:ring-ring/50" />
+                <textarea id="cam-notes" value={camNotes} onChange={(event) => setCamNotes(event.target.value)} maxLength={5000} placeholder="Workholding, tooling, or setup detail. Include here if your CAM has been checked." className="min-h-28 w-full resize-y rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring focus:ring-3 focus:ring-ring/50" />
               </div>
             </div>
             <DialogFooter><Button type="button" variant="outline" onClick={() => setCamCompletionOpen(false)}>Cancel</Button><Button type="submit" disabled={mutation.isPending}>{mutation.isPending && <LoaderCircle className="animate-spin" />}Complete CAM</Button></DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={camHandoffEditOpen} onOpenChange={setCamHandoffEditOpen}>
+        <DialogContent>
+          <form onSubmit={(event) => { event.preventDefault(); saveCamHandoff(); }}>
+            <DialogHeader>
+              <DialogTitle>Edit CAM handoff</DialogTitle>
+              <DialogDescription>Administrators can correct the CAM attribution and the details handed to the machine operator.</DialogDescription>
+            </DialogHeader>
+            <div className="my-5 space-y-4">
+              <div>
+                <label className="mb-1.5 block text-xs font-semibold" htmlFor="cam-completed-by">Completed by</label>
+                <Input id="cam-completed-by" value={camCompletedBy} onChange={(event) => setCamCompletedBy(event.target.value)} maxLength={120} required autoFocus />
+              </div>
+              <div>
+                <label className="mb-1.5 block text-xs font-semibold" htmlFor="cam-edit-program-path">Shared-drive program path <span className="font-normal text-muted-foreground">(optional)</span></label>
+                <Input id="cam-edit-program-path" value={camProgramPath} onChange={(event) => setCamProgramPath(event.target.value)} placeholder="\\\\server\\manufacturing\\program.nc" maxLength={1024} />
+              </div>
+              <div>
+                <label className="mb-1.5 block text-xs font-semibold" htmlFor="cam-edit-notes">Setup notes <span className="font-normal text-muted-foreground">(optional)</span></label>
+                <textarea id="cam-edit-notes" value={camNotes} onChange={(event) => setCamNotes(event.target.value)} maxLength={5000} className="min-h-28 w-full resize-y rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring focus:ring-3 focus:ring-ring/50" />
+              </div>
+            </div>
+            <DialogFooter><Button type="button" variant="outline" onClick={() => setCamHandoffEditOpen(false)}>Cancel</Button><Button type="submit" disabled={camHandoffMutation.isPending || !camCompletedBy.trim()}>{camHandoffMutation.isPending && <LoaderCircle className="animate-spin" />}Save handoff</Button></DialogFooter>
           </form>
         </DialogContent>
       </Dialog>

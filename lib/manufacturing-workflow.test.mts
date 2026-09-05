@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   deduplicateOperations,
   planRequirementWorkflow,
+  targetMachineHasStarted,
   validateCamAction,
   type WorkflowOperation,
 } from "./manufacturing-workflow.ts";
@@ -131,6 +132,36 @@ test("completed manufacturing advances to QC while downstream lifecycle states a
   assert.equal(planRequirementWorkflow(rows, "Complete").requirementStatus, "Complete");
 });
 
+test("threaded inserts remain planned until QC and finishing release them", () => {
+  const rows = [
+    operation({ id: 1, operationNumber: "OP1", machine: "Mill", status: "Complete" }),
+    operation({ id: 2, operationNumber: "OP2", machine: "Threaded Insert", status: "Planned" }),
+  ];
+
+  const awaitingQc = planRequirementWorkflow(rows, "Ready for Manufacturing", {
+    qcPassed: false, finishingRequired: false, finishingComplete: true,
+  });
+  assert.equal(awaitingQc.requirementStatus, "Ready for QC");
+  assert.deepEqual(awaitingQc.operationPatches, []);
+
+  const awaitingFinishing = planRequirementWorkflow(rows, "Ready for Finishing", {
+    qcPassed: true, finishingRequired: true, finishingComplete: false,
+  });
+  assert.equal(awaitingFinishing.requirementStatus, "Ready for Finishing");
+  assert.deepEqual(awaitingFinishing.operationPatches, []);
+
+  const released = planRequirementWorkflow(rows, "Ready for Manufacturing", {
+    qcPassed: true, finishingRequired: true, finishingComplete: true,
+  });
+  assert.equal(released.requirementStatus, "Ready for Manufacturing");
+  assert.deepEqual(released.operationPatches, [{ id: 2, status: "Ready" }]);
+
+  const complete = planRequirementWorkflow([{ ...rows[0] }, { ...rows[1], status: "Complete" }], "On Machine", {
+    qcPassed: true, finishingRequired: true, finishingComplete: true,
+  });
+  assert.equal(complete.requirementStatus, "Complete");
+});
+
 test("CAM actions require one task unit while the program path remains optional", () => {
   assert.throws(() => validateCamAction({ action: "claim", quantity: 2 }), /single task/);
   assert.doesNotThrow(() => validateCamAction({ action: "complete", quantity: 1 }));
@@ -139,4 +170,33 @@ test("CAM actions require one task unit while the program path remains optional"
 test("CAM cannot be reopened after its target starts", () => {
   assert.throws(() => validateCamAction({ action: "undo_complete", quantity: 1, targetStarted: true }), /cannot be reopened/);
   assert.doesNotThrow(() => validateCamAction({ action: "undo_complete", quantity: 1, targetStarted: false }));
+});
+
+test("a released target with only a stale start timestamp does not block CAM reopening", () => {
+  assert.equal(targetMachineHasStarted(operation({
+    id: 1,
+    operationNumber: "OP1",
+    machine: "Haas CNC",
+    status: "Ready",
+    claimedQuantity: 0,
+    completedQuantity: 0,
+    startedAt: "2026-09-05T12:00:00.000Z",
+  })), false);
+});
+
+test("active claims and partial completions still block CAM reopening", () => {
+  assert.equal(targetMachineHasStarted(operation({
+    id: 1,
+    operationNumber: "OP1",
+    machine: "Haas CNC",
+    status: "In Progress",
+    claimedQuantity: 1,
+  })), true);
+  assert.equal(targetMachineHasStarted(operation({
+    id: 2,
+    operationNumber: "OP1",
+    machine: "Haas CNC",
+    status: "Ready",
+    completedQuantity: 1,
+  })), true);
 });

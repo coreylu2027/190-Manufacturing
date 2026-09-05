@@ -7,8 +7,14 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --experimental-strip-types --test lib/manufacturing-workflow.test.mts lib/bulk-selection.test.mts",
-    "cam:migrate": "node --experimental-strip-types scripts/migrate-cam-workflow.mts"
+    "test": "node --experimental-strip-types --test lib/manufacturing-workflow.test.mts lib/bulk-selection.test.mts lib/storage-locations.test.mts lib/quality-control.test.mts",
+    "manufacturing:snapshot": "node --experimental-strip-types --env-file=.env.local scripts/manufacturing-migration/snapshot.mts",
+    "manufacturing:prepare": "node --experimental-strip-types scripts/manufacturing-migration/prepare.mts",
+    "manufacturing:test-migration": "node --experimental-strip-types --test scripts/manufacturing-migration/core.test.mts lib/manufacturing/model.test.mts lib/manufacturing/projections.test.mts lib/manufacturing/write-adapter.test.mts",
+    "manufacturing:import-prepare": "node --experimental-strip-types scripts/manufacturing-migration/import-normalized.mts",
+    "manufacturing:shadow": "node --experimental-strip-types --env-file=.env.local scripts/manufacturing-migration/shadow-parity.mts",
+    "manufacturing:migrate-attachments": "node --experimental-strip-types --env-file=.env.local scripts/manufacturing-migration/migrate-attachments.mts",
+    "manufacturing:verify-attachments": "node --experimental-strip-types --env-file=.env.local scripts/manufacturing-migration/verify-attachments.mts"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

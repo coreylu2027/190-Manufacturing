@@ -1,6 +1,22 @@
 # FRC 190 Manufacturing OS
 
-Shop-floor workflow for the `V3-26 FRC190 Summer 2026` Baserow database. Onshape/BOM sync creates production requirements and routed operations; machinists use this app to filter available work, claim an operation, and record progress and completion.
+Supabase is the application's only manufacturing backend. Reads come from the
+normalized manufacturing schema; claims, progress, completion/undo, CAM
+handoffs, finishing, profile allocation renames, and QC use one atomic
+transaction RPC with stale-write protection and audit history. PDFs and STEP
+files are served from private Supabase Storage, and their exact original names
+come from the private attachment catalog.
+
+Each production requirement can carry one optional shop-wide part location at
+any workflow stage. The current location is shown in Admin, Operations,
+Production, and Finishing and can be changed or cleared by any approved
+machinist or administrator. The guarded `On Robot` location is available only
+after QC passes and any required finishing is complete.
+
+The historical [migration report](docs/baserow-supabase-staged-migration.md) and
+[shadow validation report](docs/supabase-shadow-migration.md) remain as offline
+cutover records. Onshape/BOM synchronization is maintained separately from this
+application.
 
 ## To-Do List
 
@@ -16,27 +32,29 @@ Shop-floor workflow for the `V3-26 FRC190 Summer 2026` Baserow database. Onshape
 - AG Grid Community for editable shop-floor tables
 - TanStack Query for cached data and optimistic mutations
 - Supabase Auth for email and password sign-in
-- Next.js Route Handlers as the server-only Baserow proxy
+- Next.js Route Handlers as the server-only manufacturing data gateway
 - Vercel deployment
 
 ## Local setup
 
 1. Copy `.env.example` to `.env.local`.
-2. Add a Baserow database token with access to tables `1169282` (Operations), `1119642` (Production Requirements), and `1170619` (Finishing).
-3. Add the Supabase project URL, public anonymous key, and server-only service role key.
-4. Run the SQL files in `supabase/migrations` in filename order in the Supabase SQL editor.
+2. Add the Supabase project URL, publishable key, and server-only secret key.
+3. Run the SQL files in `supabase/migrations` in filename order, followed by the
+   production manufacturing and attachment SQL documented in the
+   [production-write runbook](docs/supabase-production-writes.md).
+4. Enable `manufacturing.write_control` only after the production schema is ready.
 5. Set `INITIAL_ADMIN_EMAILS` to one or more comma-separated administrator emails. These accounts bootstrap user approval and role assignment.
 6. Enable email/password auth, with `/auth/callback` as an allowed redirect path for email confirmation and password recovery.
 7. Add `/auth/callback` and `/auth/callback?next=/reset-password` to the Supabase redirect allow list for each app origin.
-8. Set `REQUIRE_AUTH=true` after Supabase is configured.
-9. To deliver notification emails, create a Resend API key, verify the sender domain, and set `RESEND_API_KEY` plus `NOTIFICATION_EMAIL_FROM`.
-10. Run `npm run dev`.
+8. To deliver notification emails, create a Resend API key, verify the sender domain, and set `RESEND_API_KEY` plus `NOTIFICATION_EMAIL_FROM`.
+9. Run `npm run dev`.
 
-Without a Baserow token, the app intentionally loads realistic demo rows so the full workflow can be reviewed safely. All production credentials remain server-only.
+Authentication is mandatory. Missing Supabase server credentials fail closed
+instead of loading demo data or falling back to another backend.
 
-## Baserow writes
+## Manufacturing writes
 
-Operation actions update the Baserow Operations table and also set:
+Operation actions use the atomic Supabase transaction RPC and also set:
 
 - `Started At` and the signed-in machinist when work begins.
 - `Completed At` and the signed-in machinist when work is completed.
@@ -58,11 +76,10 @@ regardless of part quantity and accepts an optional shared-drive program path
 when it is completed. It does not enter manufacturing QC.
 
 The Operations table stores `Work Type`, `CAM Program Path`, and `CAM Notes`.
-Run `npm run cam:migrate` to preview the Baserow-only reconciliation. The
-initial destructive reset requires the explicit `--apply --reset-all` flags.
-The command does not call Onshape APIs.
+Historical migration utilities are retained only under
+`scripts/manufacturing-migration` for offline audit and recovery.
 
-The Fabrication tab reads active rows from the Finishing table and joins their linked production requirements for part, assembly, status, and file details. A finishing job becomes claimable when its requirement reaches `Ready for Finishing`; claiming records the machinist on the Finishing row, and completing it advances the linked requirement to `Complete`. Release and undo actions reverse those changes.
+The Fabrication tab reads active rows from the Finishing table and joins their linked production requirements for part, assembly, status, and file details. A finishing job becomes claimable when its requirement reaches `Ready for Finishing`; claiming records the machinist on the Finishing row. Completing it advances the linked requirement to `Complete` unless the route contains a `Threaded Insert` operation, in which case finishing releases that operation and the requirement completes after the inserts are installed. Release and undo actions reverse those changes.
 
 The shop UI treats the Onshape document name and assembly part number as separate identifiers. It reads the document name from a `Source Document` text field on Production Requirements (with `Onshape Document` supported as a compatibility alias) and displays values such as `A-26C-0001`. The linked `Assembly` value, such as `A-190B-26…`, remains available for internal requirement identity and is not presented as the source document.
 
@@ -70,11 +87,14 @@ The shop UI treats the Onshape document name and assembly part number as separat
 
 - New email/password accounts enter a pending state.
 - Registration and account settings collect a first name and last initial. Shop assignments use the normalized `FirstName L.` display name rather than an email identifier.
-- Any environment connected to live Baserow data requires authentication automatically; demo identities are available only when no Baserow token is configured.
+- Authentication and account approval are required in every environment.
 - An approved administrator assigns either the `machinist` or `admin` role.
 - Approval and role checks are repeated on protected server routes; hiding the Admin tab is not the security boundary.
-- Completed operations enter the administrator QC queue. Passing records the review; failing records the review and returns the operation to `Needs Rework`.
-- QC notes and reviewer details are stored in Supabase. The operation status and linked production requirement's QC outcome remain stored in Baserow.
+- Production requirements enter the administrator QC queue after every active pre-QC manufacturing operation is complete. `Threaded Insert` is the sole post-QC exception: it remains planned until QC passes and, when required, powder-coat finishing completes. Passing records the requirement-level review; failing records the review and returns the final pre-QC operation to `Needs Rework`.
+- Supabase is the authoritative QC history by production requirement. Historical operation IDs are retained only as migration provenance. QC and its workflow update commit together in Supabase.
+- `supabase/migrations/20260905165307_part_locations.sql` extends the canonical location choices. Apply it before the normalized production schema, then apply `supabase/production/20260905_part_locations.sql` after the location-aware manufacturing write RPC.
+- Part location is independent from QC and can be changed at any workflow stage. The `On Robot` choice is enforced in both the application and the database and requires an effective passed review plus completed finishing (or no required finish).
+- Location edits replace the current value and record the editor and time. Clearing records who cleared it. Existing QC-era locations are copied into the requirement-level location during migration.
 
 ## Notifications
 
@@ -84,4 +104,4 @@ The reusable notification service in `lib/notifications.ts` stores an in-site al
 
 ## Vercel
 
-Import this directory as a Vercel project, add the values from `.env.example`, and deploy. Set `NEXT_PUBLIC_APP_URL` to the production origin for canonical metadata.
+Import this directory as a Vercel project, add the values from `.env.example`, and deploy. Set `NEXT_PUBLIC_APP_URL` to the production origin for canonical metadata. Do not add legacy backend tokens or manufacturing source-selection flags.
