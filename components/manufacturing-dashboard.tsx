@@ -558,9 +558,6 @@ function ProductionOverview({
                   </div>
                 </section>
 
-                {canForceQc && selectedRequirement.requirementId !== null && selectedRequirement.activeInBom && selectedRequirement.effectiveQcResult !== "passed" && hasUnfinishedQcPrerequisites(selectedRequirement.operations) && (
-                  <ForceQcButton key={selectedRequirement.requirementId} requirementId={selectedRequirement.requirementId} label={selectedRequirement.partNumber} />
-                )}
                 {selectedRequirement.requirementId !== null && (
                   <section>
                     <StorageLocationEditor
@@ -578,7 +575,12 @@ function ProductionOverview({
                 )}
 
                 <section>
-                  <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Quality review</h3>
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                    <h3 className="text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Quality review</h3>
+                    {canForceQc && selectedRequirement.requirementId !== null && selectedRequirement.activeInBom && selectedRequirement.effectiveQcResult !== "passed" && hasUnfinishedQcPrerequisites(selectedRequirement.operations) && (
+                      <ForceQcButton key={selectedRequirement.requirementId} requirementId={selectedRequirement.requirementId} label={selectedRequirement.partNumber} />
+                    )}
+                  </div>
                   <div className="rounded-xl border bg-muted/20 p-4">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <p className="text-sm font-semibold">{selectedRequirement.effectiveQcResult === "passed" ? "Passed" : selectedRequirement.effectiveQcResult === "failed" ? "Failed" : "Not yet inspected"}</p>
