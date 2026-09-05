@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   deduplicateOperations,
   planRequirementWorkflow,
+  targetMachineHasStarted,
   validateCamAction,
   type WorkflowOperation,
 } from "./manufacturing-workflow.ts";
@@ -169,4 +170,33 @@ test("CAM actions require one task unit while the program path remains optional"
 test("CAM cannot be reopened after its target starts", () => {
   assert.throws(() => validateCamAction({ action: "undo_complete", quantity: 1, targetStarted: true }), /cannot be reopened/);
   assert.doesNotThrow(() => validateCamAction({ action: "undo_complete", quantity: 1, targetStarted: false }));
+});
+
+test("a released target with only a stale start timestamp does not block CAM reopening", () => {
+  assert.equal(targetMachineHasStarted(operation({
+    id: 1,
+    operationNumber: "OP1",
+    machine: "Haas CNC",
+    status: "Ready",
+    claimedQuantity: 0,
+    completedQuantity: 0,
+    startedAt: "2026-09-05T12:00:00.000Z",
+  })), false);
+});
+
+test("active claims and partial completions still block CAM reopening", () => {
+  assert.equal(targetMachineHasStarted(operation({
+    id: 1,
+    operationNumber: "OP1",
+    machine: "Haas CNC",
+    status: "In Progress",
+    claimedQuantity: 1,
+  })), true);
+  assert.equal(targetMachineHasStarted(operation({
+    id: 2,
+    operationNumber: "OP1",
+    machine: "Haas CNC",
+    status: "Ready",
+    completedQuantity: 1,
+  })), true);
 });

@@ -1,5 +1,5 @@
 // Manufacturing workflow planning is pure; all I/O is committed by the Supabase transaction adapter.
-import { deduplicateOperations, planRequirementWorkflow, requiresPassedQc, validateCamAction } from '../manufacturing-workflow.ts';
+import { deduplicateOperations, planRequirementWorkflow, requiresPassedQc, targetMachineHasStarted, validateCamAction } from '../manufacturing-workflow.ts';
 import type { FabricationAction, ManufacturingOperation, OperationAllocation, OperationPatch, OperationQuantityAction, OperationStatus, OperationWorkType, QualityResult } from '../types.ts';
 import { ENTITIES, denormalizeRow, normalizeRow, type NormalizedRow, type RawRow } from './model.ts';
 type SourceRow = RawRow;
@@ -364,13 +364,13 @@ async function applyQuantityAction(
       linkedId(candidate["Production Requirement"]) === requirementId
       && operationWorkType(candidate) === "Manufacturing"
       && Boolean(candidate["Active in Routing"])
-      && selectValue(candidate["Operation Number"], "OP1") === selectValue(operation["Operation Number"], "OP1")
-      && (["In Progress", "Complete"].includes(selectValue(candidate.Status, "Planned")) || Boolean(candidate["Started At"])),
+      && selectValue(candidate["Operation Number"], "OP1") === selectValue(operation["Operation Number"], "OP1"),
     );
-    if (target && (
-      ["In Progress", "Complete"].includes(selectValue(target.Status, "Planned"))
-      || Boolean(target["Started At"])
-    )) {
+    if (target && targetMachineHasStarted({
+      status: selectValue(target.Status, "Planned") as OperationStatus,
+      claimedQuantity: Number(target["Claimed Quantity"] ?? 0),
+      completedQuantity: Number(target["Completed Quantity"] ?? 0),
+    })) {
       validateCamAction({ action, quantity, targetStarted: true });
     }
   }
@@ -427,6 +427,7 @@ async function applyQuantityAction(
     "Completed At": nextStatus === "Complete" ? timestamp : null,
   };
   if (action === "claim" && !operation["Started At"]) operationPatch["Started At"] = timestamp;
+  if (action === "release" && claimedQuantity === 0 && completedQuantity === 0) operationPatch["Started At"] = null;
   if (workType === "CAM" && action === "complete") {
     if (camHandoff?.programPath !== undefined) {
       operationPatch["CAM Program Path"] = camHandoff.programPath.trim();
@@ -449,7 +450,9 @@ async function applyQuantityAction(
     completedQuantity,
     availableQuantity: Math.max(0, taskQuantity - claimedQuantity - completedQuantity),
     allocations: activeAllocations,
-    startedAt: operationPatch["Started At"] ?? operation["Started At"] ?? null,
+    startedAt: Object.hasOwn(operationPatch, "Started At")
+      ? operationPatch["Started At"] as string | null
+      : operation["Started At"] ? String(operation["Started At"]) : null,
     completedAt: operationPatch["Completed At"],
     camProgramPath: workType === "CAM" && action === "complete"
       ? camHandoff?.programPath === undefined
