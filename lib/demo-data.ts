@@ -1,6 +1,7 @@
 import type { FabricationJob, ManufacturingOperation } from "@/lib/types";
 
 const shared = {
+  requirementId: null,
   revision: "A",
   activeInRouting: true,
   claimedQuantity: 0,
@@ -49,10 +50,15 @@ const DEMO_OPERATION_ROWS: ManufacturingOperation[] = [
 ];
 
 const DEMO_OPERATIONS_WITH_QUANTITIES: ManufacturingOperation[] = DEMO_OPERATION_ROWS.map((operation) => {
+  const matchingRequirementIndex = DEMO_OPERATION_ROWS.findIndex((candidate) =>
+    candidate.assemblyNumber === operation.assemblyNumber && candidate.partNumber === operation.partNumber,
+  );
+  const requirementId = 1000 + matchingRequirementIndex;
   const taskQuantity = operation.workType === "CAM" ? 1 : operation.quantity;
   if (operation.status === "Complete") {
     return {
       ...operation,
+      requirementId,
       taskQuantity,
       completedQuantity: taskQuantity,
       allocations: [{ userId: "demo-admin", name: "Demo M.", claimed: 0, completed: taskQuantity }],
@@ -62,13 +68,14 @@ const DEMO_OPERATIONS_WITH_QUANTITIES: ManufacturingOperation[] = DEMO_OPERATION
   if (operation.status === "In Progress") {
     return {
       ...operation,
+      requirementId,
       taskQuantity,
       claimedQuantity: taskQuantity,
       allocations: [{ userId: "demo-machinist", name: "Demo M.", claimed: taskQuantity, completed: 0 }],
       machinist: "Demo M.",
     };
   }
-  return { ...operation, taskQuantity, availableQuantity: operation.status === "Ready" ? taskQuantity : 0 };
+  return { ...operation, requirementId, taskQuantity, availableQuantity: operation.status === "Ready" ? taskQuantity : 0 };
 });
 
 export const DEMO_OPERATIONS: ManufacturingOperation[] = DEMO_OPERATIONS_WITH_QUANTITIES.map((operation) => {

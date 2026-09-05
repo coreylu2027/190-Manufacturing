@@ -17,7 +17,9 @@ interface ProfileRow {
 }
 
 interface ReviewRow {
-  operation_id: number;
+  id: number;
+  production_requirement_id: number | null;
+  operation_id: number | null;
   result: "passed" | "failed";
   notes: string;
   reviewed_by: string;
@@ -42,7 +44,7 @@ export async function GET() {
     const [{ data: authData, error: authError }, { data: profileData, error: profileError }, { data: reviewData, error: reviewError }, operationData] = await Promise.all([
       admin.auth.admin.listUsers({ page: 1, perPage: 200 }),
       admin.from("profiles").select("id, display_name, role, approved, last_seen_at"),
-      admin.from("quality_control").select("operation_id, result, notes, reviewed_by, reviewed_at"),
+      admin.from("quality_control").select("id, production_requirement_id, operation_id, result, notes, reviewed_by, reviewed_at"),
       getOperations(),
     ]);
 
@@ -67,27 +69,51 @@ export async function GET() {
       };
     }).sort((a, b) => Number(a.approved) - Number(b.approved) || a.name.localeCompare(b.name));
 
-    const reviews = new Map((reviewData as ReviewRow[]).map((review) => [review.operation_id, review]));
-    const qualityControl: QualityControlItem[] = operationData.operations
-      .filter((operation) => operation.workType === "Manufacturing" && (operation.status === "Complete" || reviews.has(operation.id)))
-      .map((operation) => {
-        const review = reviews.get(operation.id);
+    const manufacturingOperations = operationData.operations.filter((operation) =>
+      operation.workType === "Manufacturing" && operation.requirementId !== null,
+    );
+    const requirementIdByOperation = new Map(manufacturingOperations.map((operation) => [operation.id, operation.requirementId as number]));
+    const operationsByRequirement = new Map<number, typeof manufacturingOperations>();
+    for (const operation of manufacturingOperations) {
+      const requirementId = operation.requirementId as number;
+      operationsByRequirement.set(requirementId, [...(operationsByRequirement.get(requirementId) ?? []), operation]);
+    }
+
+    const reviewsByRequirement = new Map<number, ReviewRow>();
+    for (const review of reviewData as ReviewRow[]) {
+      const requirementId = review.production_requirement_id ?? (review.operation_id ? requirementIdByOperation.get(review.operation_id) : undefined);
+      if (!requirementId) continue;
+      const current = reviewsByRequirement.get(requirementId);
+      if (!current || new Date(review.reviewed_at).getTime() > new Date(current.reviewed_at).getTime()) {
+        reviewsByRequirement.set(requirementId, review);
+      }
+    }
+
+    const qualityControl: QualityControlItem[] = [...operationsByRequirement.entries()]
+      .filter(([requirementId, operations]) => operations.every((operation) => operation.status === "Complete") || reviewsByRequirement.has(requirementId))
+      .map(([requirementId, operations]) => {
+        const review = reviewsByRequirement.get(requirementId);
+        const latestCompletedAt = operations.reduce<string | null>((latest, operation) => {
+          if (!operation.completedAt) return latest;
+          return !latest || new Date(operation.completedAt).getTime() > new Date(latest).getTime() ? operation.completedAt : latest;
+        }, null);
         const completedAfterReview = Boolean(
-          operation.status === "Complete"
-          && operation.completedAt
+          operations.every((operation) => operation.status === "Complete")
+          && latestCompletedAt
           && review
-          && new Date(operation.completedAt).getTime() > new Date(review.reviewed_at).getTime(),
+          && new Date(latestCompletedAt).getTime() > new Date(review.reviewed_at).getTime(),
         );
         const result: QualityResult = !review || completedAfterReview ? "pending" : review.result;
         return {
-          operation,
+          requirementId,
+          operations: [...operations].sort((a, b) => a.operationNumber.localeCompare(b.operationNumber) || a.id - b.id),
           result,
           notes: result === "pending" ? "" : review?.notes ?? "",
           reviewedAt: result === "pending" ? null : review?.reviewed_at ?? null,
           reviewedBy: result === "pending" ? null : users.find((user) => user.id === review?.reviewed_by)?.name ?? null,
         };
       })
-      .sort((a, b) => Number(a.result !== "pending") - Number(b.result !== "pending") || a.operation.partNumber.localeCompare(b.operation.partNumber));
+      .sort((a, b) => Number(a.result !== "pending") - Number(b.result !== "pending") || a.operations[0].partNumber.localeCompare(b.operations[0].partNumber));
 
     return NextResponse.json({ users, qualityControl, source: operationData.source } satisfies AdminResponse);
   } catch (error) {

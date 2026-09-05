@@ -73,8 +73,10 @@ The shop UI treats the Onshape document name and assembly part number as separat
 - Any environment connected to live Baserow data requires authentication automatically; demo identities are available only when no Baserow token is configured.
 - An approved administrator assigns either the `machinist` or `admin` role.
 - Approval and role checks are repeated on protected server routes; hiding the Admin tab is not the security boundary.
-- Completed operations enter the administrator QC queue. Passing records the review; failing records the review and returns the operation to `Needs Rework`.
-- QC notes and reviewer details are stored in Supabase. The operation status and linked production requirement's QC outcome remain stored in Baserow.
+- Production requirements enter the administrator QC queue only after every active manufacturing operation is complete. Passing records the requirement-level review; failing records the review and returns the final operation to `Needs Rework`.
+- Supabase is the authoritative QC history by production requirement. Historical operation IDs are retained only as migration provenance. The latest QC notes, reviewer, review time, outcome, and workflow status are mirrored onto the Baserow Production Requirement for shop-floor visibility.
+- When upgrading an existing Supabase project, apply the migrations first and run `npm run qc:migrate -- --apply` once to backfill existing operation-level reviews without deleting them.
+- After adding the `QC Notes`, `QC Reviewed By`, and `QC Reviewed At` fields to Baserow, run `npm run qc:sync-baserow -- --apply` once to mirror existing reviews. New reviews are mirrored automatically.
 
 ## Notifications
 

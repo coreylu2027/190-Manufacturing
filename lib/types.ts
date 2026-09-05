@@ -33,6 +33,7 @@ export interface CamDependency {
 
 export interface ManufacturingOperation {
   id: number;
+  requirementId: number | null;
   operationKey: string;
   partNumber: string;
   revision: string | null;
@@ -155,7 +156,8 @@ export interface AdminUserSummary {
 export type QualityResult = "pending" | "passed" | "failed";
 
 export interface QualityControlItem {
-  operation: ManufacturingOperation;
+  requirementId: number;
+  operations: ManufacturingOperation[];
   result: QualityResult;
   notes: string;
   reviewedAt: string | null;

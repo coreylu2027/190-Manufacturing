@@ -8,7 +8,9 @@
     "start": "next start",
     "lint": "eslint",
     "test": "node --experimental-strip-types --test lib/manufacturing-workflow.test.mts lib/bulk-selection.test.mts",
-    "cam:migrate": "node --experimental-strip-types scripts/migrate-cam-workflow.mts"
+    "cam:migrate": "node --experimental-strip-types scripts/migrate-cam-workflow.mts",
+    "qc:migrate": "node --experimental-strip-types --env-file=.env.local scripts/migrate-quality-control-requirements.mts",
+    "qc:sync-baserow": "node --experimental-strip-types --env-file=.env.local scripts/sync-quality-control-to-baserow.mts"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

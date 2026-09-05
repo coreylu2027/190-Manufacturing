@@ -252,19 +252,12 @@ function fabricationStatus(requirementStatus: string, machinist: string): Manufa
   return "Planned";
 }
 
-export async function getFabricationJobs(): Promise<{
-  jobs: FabricationJob[];
-  source: "baserow" | "demo";
-  qualityOperationLinks: { operationId: number; requirementId: number }[];
-}> {
-  if (!hasBaserowCredentials()) {
-    return { jobs: [...DEMO_FABRICATION_STATE.values()], source: "demo", qualityOperationLinks: [] };
-  }
+export async function getFabricationJobs(): Promise<{ jobs: FabricationJob[]; source: "baserow" | "demo" }> {
+  if (!hasBaserowCredentials()) return { jobs: [...DEMO_FABRICATION_STATE.values()], source: "demo" };
 
-  const [finishingRows, requirementRows, operationRows] = await Promise.all([
+  const [finishingRows, requirementRows] = await Promise.all([
     listAllRows(FINISHING_TABLE_ID),
     listAllRows(REQUIREMENTS_TABLE_ID),
-    listAllRows(OPERATIONS_TABLE_ID),
   ]);
   const requirements = new Map(requirementRows.map((row) => [row.id, row]));
 
@@ -301,16 +294,7 @@ export async function getFabricationJobs(): Promise<{
     }];
   });
 
-  const activeJobs = jobs.filter((job) => job.active);
-  const finishingRequirementIds = new Set(activeJobs.map((job) => job.requirementId));
-  const qualityOperationLinks = operationRows.flatMap((row) => {
-    const requirementId = linkedId(row["Production Requirement"]);
-    return requirementId && finishingRequirementIds.has(requirementId) && operationWorkType(row) === "Manufacturing"
-      ? [{ operationId: row.id, requirementId }]
-      : [];
-  });
-
-  return { jobs: activeJobs, source: "baserow", qualityOperationLinks };
+  return { jobs: jobs.filter((job) => job.active), source: "baserow" };
 }
 
 export async function applyFabricationAction(id: number, action: FabricationAction, actor: { name: string }) {
@@ -435,9 +419,9 @@ export async function getOperations(): Promise<{ operations: ManufacturingOperat
   const camByTarget = new Map(canonicalOperations
     .filter((operation) => operation.workType === "CAM" && operation.requirementId)
     .map((operation) => [`${operation.requirementId}|${operation.operationNumber}`, operation]));
-  const operations: ManufacturingOperation[] = canonicalOperations.map(({ requirementId, ...operation }) => {
-    if (operation.workType !== "Manufacturing" || !requirementId) return operation;
-    const cam = camByTarget.get(`${requirementId}|${operation.operationNumber}`);
+  const operations: ManufacturingOperation[] = canonicalOperations.map((operation) => {
+    if (operation.workType !== "Manufacturing" || !operation.requirementId) return operation;
+    const cam = camByTarget.get(`${operation.requirementId}|${operation.operationNumber}`);
     return cam ? {
       ...operation,
       camDependency: {
@@ -981,15 +965,53 @@ export async function renameMachinistAllocations(userId: string, oldName: string
   }));
 }
 
-export async function patchQualityOutcome(operationId: number, result: Exclude<QualityResult, "pending">) {
-  if (!hasBaserowCredentials()) return { result };
+export async function patchRequirementQualityOutcome(
+  requirementId: number,
+  result: Exclude<QualityResult, "pending">,
+  actorName: string,
+  notes: string,
+  reviewedAt: string,
+) {
+  if (!hasBaserowCredentials()) {
+    const operations = [...DEMO_STATE.values()].filter((operation) =>
+      operation.requirementId === requirementId
+      && operation.workType === "Manufacturing"
+      && operation.activeInRouting,
+    );
+    if (operations.length === 0) throw new Error("Production requirement not found");
+    if (!operations.every((operation) => operation.status === "Complete")) {
+      throw new Error("All manufacturing operations must be complete before QC");
+    }
+    if (result === "failed") {
+      const reworkOperation = [...operations].sort((a, b) =>
+        b.operationNumber.localeCompare(a.operationNumber) || b.id - a.id,
+      )[0];
+      await patchOperation(reworkOperation.id, { status: "Needs Rework" }, actorName);
+    }
+    return { result };
+  }
 
-  const operation = await getRow(OPERATIONS_TABLE_ID, operationId);
-  if (operationWorkType(operation) !== "Manufacturing") throw new Error("CAM tasks do not enter manufacturing QC");
-  const requirementId = linkedId(operation["Production Requirement"]);
-  if (!requirementId) throw new Error("Operation is not linked to a production requirement");
+  const [requirement, operationRows] = await Promise.all([
+    getRow(REQUIREMENTS_TABLE_ID, requirementId),
+    listAllRows(OPERATIONS_TABLE_ID),
+  ]);
+  const manufacturingRows = operationRows.filter((row) =>
+    linkedId(row["Production Requirement"]) === requirementId
+    && operationWorkType(row) === "Manufacturing"
+    && Boolean(row["Active in Routing"]),
+  );
+  if (manufacturingRows.length === 0) throw new Error("Production requirement has no active manufacturing operations");
+  if (!manufacturingRows.every((row) => selectValue(row.Status, "Planned") === "Complete")) {
+    throw new Error("All manufacturing operations must be complete before QC");
+  }
 
-  const requirement = await getRow(REQUIREMENTS_TABLE_ID, requirementId);
+  if (result === "failed") {
+    const reworkOperation = [...manufacturingRows].sort((a, b) =>
+      selectValue(b["Operation Number"], "OP1").localeCompare(selectValue(a["Operation Number"], "OP1")) || b.id - a.id,
+    )[0];
+    await patchOperation(reworkOperation.id, { status: "Needs Rework" }, actorName);
+  }
+
   const finishing = selectValue(requirement.Finishing);
   const status = result === "failed"
     ? "Needs Rework"
@@ -999,22 +1021,30 @@ export async function patchQualityOutcome(operationId: number, result: Exclude<Q
 
   return patchRow(REQUIREMENTS_TABLE_ID, requirementId, {
     "QC Outcome": result === "passed" ? "Passed" : "Failed",
+    "QC Notes": notes,
+    "QC Reviewed By": actorName,
+    "QC Reviewed At": reviewedAt,
     Status: status,
   });
 }
 
-export async function clearPassedQualityOutcome(operationId: number) {
+export async function clearPassedRequirementQualityOutcome(requirementId: number) {
   if (!hasBaserowCredentials()) return;
 
-  const operation = await getRow(OPERATIONS_TABLE_ID, operationId);
-  if (operationWorkType(operation) !== "Manufacturing") throw new Error("CAM tasks do not enter manufacturing QC");
-  if (selectValue(operation.Status, "Planned") !== "Complete") {
-    throw new Error("Only a passed QC review on completed work can be undone");
+  const operationRows = await listAllRows(OPERATIONS_TABLE_ID);
+  const manufacturingRows = operationRows.filter((row) =>
+    linkedId(row["Production Requirement"]) === requirementId
+    && operationWorkType(row) === "Manufacturing"
+    && Boolean(row["Active in Routing"]),
+  );
+  if (manufacturingRows.length === 0 || !manufacturingRows.every((row) => selectValue(row.Status, "Planned") === "Complete")) {
+    throw new Error("Only a passed QC review with all operations complete can be undone");
   }
-  const requirementId = linkedId(operation["Production Requirement"]);
-  if (!requirementId) throw new Error("Operation is not linked to a production requirement");
   await patchRow(REQUIREMENTS_TABLE_ID, requirementId, {
     "QC Outcome": "Not Inspected",
+    "QC Notes": "",
+    "QC Reviewed By": "",
+    "QC Reviewed At": null,
     Status: "Ready for QC",
   });
 }

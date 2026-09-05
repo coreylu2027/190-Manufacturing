@@ -31,7 +31,7 @@ async function updateUser(user: AdminUserSummary, role: UserRole, approved: bool
 }
 
 async function submitReview(item: QualityControlItem, result: "passed" | "failed", notes: string) {
-  const response = await fetch(`/api/admin/qc/${item.operation.id}`, {
+  const response = await fetch(`/api/admin/qc/${item.requirementId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ result, notes }),
@@ -42,7 +42,7 @@ async function submitReview(item: QualityControlItem, result: "passed" | "failed
 }
 
 async function undoPassedReview(item: QualityControlItem) {
-  const response = await fetch(`/api/admin/qc/${item.operation.id}`, { method: "DELETE" });
+  const response = await fetch(`/api/admin/qc/${item.requirementId}`, { method: "DELETE" });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error ?? "Unable to undo the QC pass");
   return body;
@@ -69,7 +69,7 @@ export function AdminDashboard() {
   });
 
   const reviewMutation = useMutation({
-    mutationFn: ({ item, result }: { item: QualityControlItem; result: "passed" | "failed" }) => submitReview(item, result, notes[item.operation.id] ?? item.notes),
+    mutationFn: ({ item, result }: { item: QualityControlItem; result: "passed" | "failed" }) => submitReview(item, result, notes[item.requirementId] ?? item.notes),
     onSuccess: (_data, variables) => {
       toast.success(variables.result === "passed" ? "Quality check passed" : "Operation returned for rework", variables.result === "passed" ? { action: { label: "Undo", onClick: () => undoReviewMutation.mutate(variables.item) } } : undefined);
       queryClient.invalidateQueries({ queryKey: ["admin"] });
@@ -125,26 +125,26 @@ export function AdminDashboard() {
       ) : (
         <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1.2fr)_minmax(420px,.8fr)]">
           <div className="overflow-hidden rounded-2xl border bg-card shadow-[0_14px_42px_rgba(15,23,42,.055)]">
-            <div className="border-b bg-muted/25 px-4 py-3"><h2 className="font-semibold">Quality control queue</h2><p className="mt-0.5 text-xs text-muted-foreground">Completed operations require an administrator’s pass or rework decision.</p></div>
+            <div className="border-b bg-muted/25 px-4 py-3"><h2 className="font-semibold">Quality control queue</h2><p className="mt-0.5 text-xs text-muted-foreground">Production requirements appear after every manufacturing operation is complete.</p></div>
             {query.data?.qualityControl.length ? (
               <div className="divide-y">
                 {query.data.qualityControl.map((item) => (
-                  <article key={item.operation.id} className="p-4 md:p-5">
+                  <article key={item.requirementId} className="p-4 md:p-5">
                     <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-                      <div><div className="flex flex-wrap items-center gap-2"><span className="font-mono text-xs font-bold text-primary">{item.operation.partNumber}</span><Badge variant="outline">{item.operation.operationNumber}</Badge><Badge variant="outline" className={cn(item.result === "passed" && "border-emerald-200 bg-emerald-50 text-emerald-800", item.result === "failed" && "border-rose-200 bg-rose-50 text-rose-800", item.result === "pending" && "border-amber-200 bg-amber-50 text-amber-800")}>{item.result === "pending" ? "Awaiting QC" : item.result === "passed" ? "QC passed" : "QC failed"}</Badge></div><h3 className="mt-2 font-semibold">{item.operation.partName}</h3><p className="mt-1 text-xs text-muted-foreground">{item.operation.machine} · Qty {item.operation.quantity} · Completed by {item.operation.machinist || "machinist"}</p></div>
+                      <div><div className="flex flex-wrap items-center gap-2"><span className="font-mono text-xs font-bold text-primary">{item.operations[0].partNumber}</span>{item.operations.map((operation) => <Badge key={operation.id} variant="outline">{operation.operationNumber}</Badge>)}<Badge variant="outline" className={cn(item.result === "passed" && "border-emerald-200 bg-emerald-50 text-emerald-800", item.result === "failed" && "border-rose-200 bg-rose-50 text-rose-800", item.result === "pending" && "border-amber-200 bg-amber-50 text-amber-800")}>{item.result === "pending" ? "Awaiting QC" : item.result === "passed" ? "QC passed" : "QC failed"}</Badge></div><h3 className="mt-2 font-semibold">{item.operations[0].partName}</h3><p className="mt-1 text-xs text-muted-foreground">{item.operations.length} operation{item.operations.length === 1 ? "" : "s"} complete · Qty {item.operations[0].quantity} · Completed by {[...new Set(item.operations.flatMap((operation) => operation.allocations.filter((allocation) => allocation.completed > 0).map((allocation) => allocation.name)))].join(", ") || "machinist"}</p></div>
                       {item.reviewedAt && <p className="shrink-0 text-xs text-muted-foreground">{formatDate(item.reviewedAt)}<br />{item.reviewedBy}</p>}
                     </div>
-                    <label className="mt-4 block text-xs font-semibold text-muted-foreground" htmlFor={`qc-notes-${item.operation.id}`}>Inspection notes</label>
-                    <textarea id={`qc-notes-${item.operation.id}`} value={notes[item.operation.id] ?? item.notes} onChange={(event) => setNotes((current) => ({ ...current, [item.operation.id]: event.target.value }))} placeholder="Measurements, defects, or acceptance notes…" className="mt-1.5 min-h-20 w-full resize-y rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring focus:ring-3 focus:ring-ring/50" />
+                    <label className="mt-4 block text-xs font-semibold text-muted-foreground" htmlFor={`qc-notes-${item.requirementId}`}>Inspection notes</label>
+                    <textarea id={`qc-notes-${item.requirementId}`} value={notes[item.requirementId] ?? item.notes} onChange={(event) => setNotes((current) => ({ ...current, [item.requirementId]: event.target.value }))} placeholder="Measurements, defects, or acceptance notes…" className="mt-1.5 min-h-20 w-full resize-y rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring focus:ring-3 focus:ring-ring/50" />
                     <div className="mt-3 flex flex-wrap items-center gap-2">
-                      <Button variant="outline" nativeButton={!item.operation.drawingPdfUrl} render={item.operation.drawingPdfUrl ? <a href={`/api/operations/${item.operation.id}/files/drawing-pdf`} target="_blank" rel="noreferrer" /> : undefined} disabled={!item.operation.drawingPdfUrl}><FileText /> Drawing PDF</Button>
-                      <Button variant="outline" nativeButton={!item.operation.onshapeUrl} render={item.operation.onshapeUrl ? <a href={item.operation.onshapeUrl} target="_blank" rel="noreferrer" /> : undefined} disabled={!item.operation.onshapeUrl}><ExternalLink /> Onshape source</Button>
-                      <div className="ml-auto flex flex-wrap items-center justify-end gap-2">{item.result === "pending" ? <><Button variant="destructive" onClick={() => reviewMutation.mutate({ item, result: "failed" })} disabled={reviewMutation.isPending || item.operation.status !== "Complete"}><X /> Fail QC</Button><Button className="bg-emerald-600 hover:bg-emerald-700" onClick={() => reviewMutation.mutate({ item, result: "passed" })} disabled={reviewMutation.isPending || item.operation.status !== "Complete"}>{reviewMutation.isPending ? <LoaderCircle className="animate-spin" /> : <Check />} Pass QC</Button></> : item.result === "passed" ? <Button variant="outline" onClick={() => undoReviewMutation.mutate(item)} disabled={undoReviewMutation.isPending}><Clock3 /> Undo QC pass</Button> : <p className="text-xs text-muted-foreground">Complete the rework to request QC again.</p>}</div>
+                      <Button variant="outline" nativeButton={!item.operations[0].drawingPdfUrl} render={item.operations[0].drawingPdfUrl ? <a href={`/api/operations/${item.operations[0].id}/files/drawing-pdf`} target="_blank" rel="noreferrer" /> : undefined} disabled={!item.operations[0].drawingPdfUrl}><FileText /> Drawing PDF</Button>
+                      <Button variant="outline" nativeButton={!item.operations[0].onshapeUrl} render={item.operations[0].onshapeUrl ? <a href={item.operations[0].onshapeUrl} target="_blank" rel="noreferrer" /> : undefined} disabled={!item.operations[0].onshapeUrl}><ExternalLink /> Onshape source</Button>
+                      <div className="ml-auto flex flex-wrap items-center justify-end gap-2">{item.result === "pending" ? <><Button variant="destructive" onClick={() => reviewMutation.mutate({ item, result: "failed" })} disabled={reviewMutation.isPending || !item.operations.every((operation) => operation.status === "Complete")}><X /> Fail QC</Button><Button className="bg-emerald-600 hover:bg-emerald-700" onClick={() => reviewMutation.mutate({ item, result: "passed" })} disabled={reviewMutation.isPending || !item.operations.every((operation) => operation.status === "Complete")}>{reviewMutation.isPending ? <LoaderCircle className="animate-spin" /> : <Check />} Pass QC</Button></> : item.result === "passed" ? <Button variant="outline" onClick={() => undoReviewMutation.mutate(item)} disabled={undoReviewMutation.isPending}><Clock3 /> Undo QC pass</Button> : <p className="text-xs text-muted-foreground">Complete the rework to request QC again.</p>}</div>
                     </div>
                   </article>
                 ))}
               </div>
-            ) : <div className="grid min-h-60 place-items-center p-6 text-center"><div><ClipboardCheck className="mx-auto mb-3 size-10 text-emerald-600" /><h3 className="font-semibold">QC queue is clear</h3><p className="mt-1 text-sm text-muted-foreground">Completed operations will appear here automatically.</p></div></div>}
+            ) : <div className="grid min-h-60 place-items-center p-6 text-center"><div><ClipboardCheck className="mx-auto mb-3 size-10 text-emerald-600" /><h3 className="font-semibold">QC queue is clear</h3><p className="mt-1 text-sm text-muted-foreground">Requirements will appear after all manufacturing operations are complete.</p></div></div>}
           </div>
 
           <div className="overflow-hidden rounded-2xl border bg-card shadow-[0_14px_42px_rgba(15,23,42,.055)]">
