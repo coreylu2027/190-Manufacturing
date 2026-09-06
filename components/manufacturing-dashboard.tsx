@@ -46,6 +46,7 @@ import { toast } from "sonner";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { AdminDashboard } from "@/components/admin-dashboard";
+import { ExpandableText } from "@/components/expandable-text";
 import { FabricationDashboard } from "@/components/fabrication-dashboard";
 import { NotificationInbox } from "@/components/notification-inbox";
 import { QualityControlDashboard } from "@/components/quality-control-dashboard";
@@ -560,7 +561,11 @@ function ProductionOverview({
                     ].map(([label, value], index, details) => (
                       <div key={label} className={cn("p-3", index % 2 === 0 && "border-r", index < details.length - 2 && "border-b")}>
                         <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{label}</p>
-                        <p className="mt-1 break-words text-sm font-semibold">{value}</p>
+                        <p className="mt-1 break-words text-sm font-semibold">
+                          {label === "Configuration" || label === "Production key"
+                            ? <ExpandableText text={value} maxLength={100} />
+                            : value}
+                        </p>
                       </div>
                     ))}
                   </div>
@@ -586,7 +591,14 @@ function ProductionOverview({
                   <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                     <h3 className="text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Quality review</h3>
                     {canForceQc && selectedRequirement.requirementId !== null && selectedRequirement.activeInBom && selectedRequirement.effectiveQcResult !== "passed" && hasUnfinishedQcPrerequisites(selectedRequirement.operations) && (
-                      <ForceQcButton key={selectedRequirement.requirementId} requirementId={selectedRequirement.requirementId} label={selectedRequirement.partNumber} />
+                      <ForceQcButton
+                        key={selectedRequirement.requirementId}
+                        requirementId={selectedRequirement.requirementId}
+                        label={selectedRequirement.partNumber}
+                        storageLocation={selectedRequirement.storageLocation}
+                        locationUpdatedBy={selectedRequirement.locationUpdatedBy}
+                        locationUpdatedAt={selectedRequirement.locationUpdatedAt}
+                      />
                     )}
                   </div>
                   <div className="rounded-xl border bg-muted/20 p-4">

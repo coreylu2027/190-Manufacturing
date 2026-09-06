@@ -110,9 +110,9 @@ export function QualityControlDashboard() {
         <div className="overflow-hidden rounded-2xl border bg-card shadow-[0_14px_42px_rgba(15,23,42,.055)]">
           <div className="border-b bg-muted/25 px-4 py-3"><h2 className="font-semibold">Quality control queue</h2><p className="mt-0.5 text-xs text-muted-foreground">Production requirements appear after every pre-QC manufacturing operation is complete.</p></div>
           {query.data?.qualityControl.length ? (
-            <div className="divide-y">
+            <div className="grid gap-3 bg-muted/20 p-3">
               {query.data.qualityControl.map((item) => (
-                <article key={item.requirementId} className="p-4 md:p-5">
+                <article key={item.requirementId} className="rounded-xl border bg-card p-4 md:p-5">
                   <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
                     <div><div className="flex flex-wrap items-center gap-2"><span className="font-mono text-xs font-bold text-primary">{item.operations[0].partNumber}</span>{item.operations.map((operation) => <Badge key={operation.id} variant="outline">{operation.operationNumber}</Badge>)}<Badge variant="outline" className={cn(item.result === "passed" && "border-emerald-200 bg-emerald-50 text-emerald-800", item.result === "failed" && "border-rose-200 bg-rose-50 text-rose-800", item.result === "pending" && "border-amber-200 bg-amber-50 text-amber-800")}>{item.result === "pending" ? "Awaiting QC" : item.result === "passed" ? "QC passed" : "QC failed"}</Badge></div><h3 className="mt-2 font-semibold">{item.operations[0].partName}</h3><p className="mt-1 text-xs text-muted-foreground">{item.operations.length} operation{item.operations.length === 1 ? "" : "s"} complete · Qty {item.operations[0].quantity} · Completed by {[...new Set(item.operations.flatMap((operation) => operation.allocations.filter((allocation) => allocation.completed > 0).map((allocation) => allocation.name)))].join(", ") || "machinist"}</p></div>
                     {item.reviewedAt && <p className="shrink-0 text-xs text-muted-foreground">{formatDate(item.reviewedAt)}<br />{item.reviewedBy}</p>}
