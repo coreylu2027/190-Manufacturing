@@ -922,6 +922,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
 
   const stats = useMemo(() => ({
     ready: operations.filter((operation) => ["Ready", "In Progress", "Needs Rework"].includes(operation.status) && operation.availableQuantity > 0).length,
+    planned: operations.filter((operation) => operation.status === "Planned").length,
     active: operations.filter((operation) => operation.status === "In Progress").length,
     attention: operations.filter((operation) => operation.status === "Blocked" || operation.status === "Needs Rework").length,
     complete: operations.filter((operation) => operation.status === "Complete").length,
@@ -1164,9 +1165,10 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
             <h1 className="text-3xl font-bold tracking-[-.035em] md:text-[2.55rem]">Ready operations</h1>
             <p className="mt-1.5 max-w-2xl text-sm leading-6 text-muted-foreground">Filter to a machine, claim the next operation, and record who performed the work.</p>
           </div>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
             {[
               { label: "Ready", value: stats.ready, icon: CircleDot, tone: "text-emerald-700 bg-emerald-50" },
+              { label: "Planned", value: stats.planned, icon: ListChecks, tone: "text-slate-700 bg-slate-100" },
               { label: "In progress", value: stats.active, icon: Clock3, tone: "text-blue-700 bg-blue-50" },
               { label: "Attention", value: stats.attention, icon: TriangleAlert, tone: "text-amber-800 bg-amber-50" },
               { label: "Complete", value: stats.complete, icon: Check, tone: "text-violet-700 bg-violet-50" },
