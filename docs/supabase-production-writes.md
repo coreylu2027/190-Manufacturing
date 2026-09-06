@@ -64,19 +64,25 @@ For a new Supabase environment:
 5. Apply `supabase/production/20260905_part_locations.sql`. This moves location
    ownership onto production requirements and preserves existing values; its
    numbered prerequisite was applied in step 1.
-6. Confirm the RPC and table privilege checks.
-7. Enable the database gate:
+6. Apply `supabase/production/20260905_manufacturing_attachments.sql` to create
+   the private attachment catalog and resolver.
+7. Apply `supabase/production/20260906_manufacturing_realtime.sql`. This creates
+   a private `manufacturing:changes` Broadcast topic for approved users. The
+   payload is only an invalidation signal; browsers continue reading the
+   projected data through authenticated application routes.
+8. Confirm the RPC, table privilege, Realtime policy, and trigger checks.
+9. Enable the database gate:
 
    ```sql
    update manufacturing.write_control set enabled = true;
    ```
 
-8. Deploy the application with the Supabase URL, publishable key, secret key,
+10. Deploy the application with the Supabase URL, publishable key, secret key,
    and bootstrap administrator list. There are no backend source-selection flags.
 
 For an existing normalized installation, apply the new numbered part-location
 migration and the part-location production wrapper, in that order, before
-deploying this code.
+applying the Realtime production script and deploying this code.
 
 After Supabase accepts its first production mutation, rollback must preserve the
 Supabase database as the authority. Disabling the write gate safely stops new

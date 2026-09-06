@@ -40,7 +40,7 @@ import {
   Wrench,
   XCircle,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 
@@ -90,6 +90,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { mergeVisibleSelection } from "@/lib/bulk-selection";
 import { isShopName } from "@/lib/profile-name";
+import { createClient } from "@/lib/supabase/client";
 import { canUseOnRobotLocation } from "@/lib/storage-locations";
 import { cn } from "@/lib/utils";
 import { WORKSPACE_ROUTES, type WorkspaceView } from "@/lib/workspace-routes";
@@ -107,6 +108,11 @@ ModuleRegistry.registerModules([AllCommunityModule]);
 
 type QueueView = "available" | "mine" | "all";
 type WorkTypeFilter = "all" | OperationWorkType;
+type ManufacturingRealtimeStatus = "connecting" | "subscribed" | "disconnected";
+
+const MANUFACTURING_QUERY_KEYS = ["operations", "fabrication", "qc", "admin"] as const;
+const REALTIME_REFRESH_DEBOUNCE_MS = 300;
+const REALTIME_FALLBACK_POLL_MS = 10_000;
 
 interface ProductionRequirement {
   key: string;
@@ -694,9 +700,79 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
   const [profileOpen, setProfileOpen] = useState(false);
   const [firstName, setFirstName] = useState("");
   const [lastInitial, setLastInitial] = useState("");
+  const [realtimeStatus, setRealtimeStatus] = useState<ManufacturingRealtimeStatus>(() => (
+    process.env.NEXT_PUBLIC_SUPABASE_URL
+      && (process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY)
+      ? "connecting"
+      : "disconnected"
+  ));
 
   const query = useQuery({ queryKey: ["operations"], queryFn: fetchOperations });
   const userName = query.data?.user?.name ?? "Machinist";
+
+  const refreshManufacturingData = useCallback(() => {
+    for (const key of MANUFACTURING_QUERY_KEYS) {
+      void queryClient.invalidateQueries({ queryKey: [key] });
+    }
+  }, [queryClient]);
+
+  useEffect(() => {
+    const userId = query.data?.user?.id;
+    if (!userId) return;
+
+    const supabase = createClient();
+    if (!supabase) return;
+
+    let cancelled = false;
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+    let channel: ReturnType<typeof supabase.channel> | null = null;
+    const scheduleRefresh = () => {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => {
+        if (!cancelled) refreshManufacturingData();
+      }, REALTIME_REFRESH_DEBOUNCE_MS);
+    };
+
+    const subscribe = async () => {
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+      if (sessionError || !session) {
+        if (!cancelled) setRealtimeStatus("disconnected");
+        console.error("Manufacturing realtime authentication failed", sessionError);
+        return;
+      }
+
+      await supabase.realtime.setAuth(session.access_token);
+      if (cancelled) return;
+
+      channel = supabase
+        .channel("manufacturing:changes", { config: { private: true } })
+        .on("broadcast", { event: "changed" }, scheduleRefresh)
+        .subscribe((status, error) => {
+          if (cancelled) return;
+          if (status === "SUBSCRIBED") {
+            setRealtimeStatus("subscribed");
+            // Close the gap between the initial HTTP read and channel join.
+            scheduleRefresh();
+          } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
+            setRealtimeStatus("disconnected");
+            if (status !== "CLOSED") console.error("Manufacturing realtime subscription failed", error);
+          }
+        });
+    };
+    void subscribe();
+
+    return () => {
+      cancelled = true;
+      if (refreshTimer) clearTimeout(refreshTimer);
+      if (channel) void supabase.removeChannel(channel);
+    };
+  }, [query.data?.user?.id, refreshManufacturingData]);
+
+  useEffect(() => {
+    if (realtimeStatus === "subscribed") return;
+    const interval = setInterval(refreshManufacturingData, REALTIME_FALLBACK_POLL_MS);
+    return () => clearInterval(interval);
+  }, [realtimeStatus, refreshManufacturingData]);
 
   useEffect(() => {
     if (query.error instanceof Error && query.error.message === "AUTH_REQUIRED") router.replace("/login");
@@ -1110,9 +1186,17 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
             )}
           </nav>
           <div className="ml-auto flex items-center gap-2">
-            <div className="hidden items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-800 sm:flex">
+            <div
+              className={cn(
+                "hidden items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium sm:flex",
+                realtimeStatus === "subscribed"
+                  ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                  : "border-amber-200 bg-amber-50 text-amber-800",
+              )}
+              title={realtimeStatus === "subscribed" ? "Changes refresh automatically" : "Realtime unavailable; refreshing every 10 seconds"}
+            >
               <Cloud className="size-3.5" />
-              Supabase live
+              {realtimeStatus === "subscribed" ? "Live updates" : realtimeStatus === "connecting" ? "Connecting" : "10s refresh"}
             </div>
             <Button
               variant="ghost"

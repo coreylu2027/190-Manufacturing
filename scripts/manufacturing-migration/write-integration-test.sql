@@ -14,6 +14,18 @@ update public.profiles
 set display_name = 'Test Machinist', role = 'machinist', approved = true
 where id = '00000000-0000-4000-8000-000000000198';
 
+delete from realtime.messages;
+update public.profiles
+set last_seen_at = '2026-09-05T00:00:00Z'
+where id = '00000000-0000-4000-8000-000000000190';
+do $test$
+begin
+  if exists(select 1 from realtime.messages) then
+    raise exception 'Profile heartbeat unexpectedly broadcast a manufacturing change';
+  end if;
+end;
+$test$;
+
 insert into manufacturing.requirements (
   id, source_row, production_key, required_quantity, finishing, active_in_bom,
   status, machinist, qc_outcome, qc_notes, qc_reviewed_by
@@ -215,6 +227,20 @@ begin
       'public.manufacturing_commit_with_locations(uuid,uuid,text,text,jsonb,jsonb,jsonb)','EXECUTE')
     or has_table_privilege('service_role','manufacturing.operations','UPDATE') then
     raise exception 'Service-role write boundary is incorrect';
+  end if;
+  if not exists (
+    select 1 from realtime.messages
+    where topic = 'manufacturing:changes'
+      and event = 'changed'
+      and payload = '{}'::jsonb
+      and private
+  ) then
+    raise exception 'Manufacturing changes did not emit a private generic broadcast';
+  end if;
+  if (select count(*) from pg_trigger
+      where tgname in ('broadcast_manufacturing_change', 'broadcast_manufacturing_profile_change')
+        and not tgisinternal) <> 10 then
+    raise exception 'Manufacturing Realtime trigger coverage is incomplete';
   end if;
 end;
 $test$;
