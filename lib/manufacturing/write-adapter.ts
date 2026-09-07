@@ -45,6 +45,9 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       const error = await response.json().catch(() => ({})) as { code?: string; message?: string };
       if (error.code === "40001") throw new ManufacturingWriteError("Manufacturing changed while you were editing. Refresh and try again.", 409);
       if (error.code === "42501") throw new ManufacturingWriteError("Supabase writes are disabled or this account is not authorized.", 403);
+      if (error.code === "57014" || error.code === "55P03") {
+        throw new ManufacturingWriteError("The manufacturing database is busy. Wait a moment and try again.", 503);
+      }
       throw new ManufacturingWriteError("Supabase manufacturing transaction failed; no partial transaction was committed.", 502);
     }
     return response.json();

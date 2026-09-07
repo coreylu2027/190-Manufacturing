@@ -242,9 +242,9 @@ export function AdminDashboard() {
           </div>
         </div>
 
-        {query.isLoading ? (
+        {query.isPending ? (
           <div className="space-y-3 p-5">{Array.from({ length: 7 }).map((_, index) => <Skeleton key={index} className="h-14 w-full" />)}</div>
-        ) : query.isError ? (
+        ) : query.isError && !query.data ? (
           <div className="grid min-h-80 place-items-center p-6 text-center"><div><ShieldCheck className="mx-auto mb-3 size-10 text-destructive" /><h2 className="font-semibold">Couldn’t load the admin workspace</h2><p className="mt-1 text-sm text-muted-foreground">{query.error.message}</p><Button className="mt-4" onClick={() => query.refetch()}>Try again</Button></div></div>
         ) : users.length === 0 ? (
           <div className="grid min-h-60 place-items-center p-6 text-center"><div><Users className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h3 className="font-semibold">No users to manage</h3><p className="mt-1 text-sm text-muted-foreground">Registered accounts will appear here.</p></div></div>

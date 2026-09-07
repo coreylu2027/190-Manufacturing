@@ -172,7 +172,7 @@ export function FabricationDashboard({
       });
     },
     onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ["fabrication"] });
+      queryClient.invalidateQueries({ queryKey: ["fabrication"] }, { cancelRefetch: false });
     },
   });
 
@@ -264,9 +264,9 @@ export function FabricationDashboard({
           </div>
         </div>
 
-        {query.isLoading ? (
+        {query.isPending ? (
           <div className="space-y-3 p-5">{Array.from({ length: 7 }).map((_, index) => <Skeleton key={index} className="h-11 w-full" />)}</div>
-        ) : query.isError ? (
+        ) : query.isError && !query.data ? (
           <div className="grid min-h-80 place-items-center p-6 text-center"><div><XCircle className="mx-auto mb-3 size-9 text-destructive" /><h2 className="font-semibold">Couldn’t load finishing</h2><p className="mt-1 max-w-md text-sm text-muted-foreground">{query.error.message}</p><Button className="mt-4" onClick={() => query.refetch()}>Try again</Button></div></div>
         ) : filtered.length === 0 ? (
           <div className="grid min-h-80 place-items-center p-6 text-center"><div><Sparkles className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h2 className="font-semibold">No finishing jobs match</h2><p className="mt-1 text-sm text-muted-foreground">Try another finish or clear the search.</p><Button variant="outline" className="mt-4" onClick={() => { setColor("all"); setSearch(""); setView("all"); }}>Clear filters</Button></div></div>

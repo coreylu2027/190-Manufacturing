@@ -112,6 +112,12 @@ type ManufacturingRealtimeStatus = "connecting" | "subscribed" | "disconnected";
 
 const MANUFACTURING_QUERY_KEYS = ["operations", "fabrication", "qc", "admin"] as const;
 const REALTIME_REFRESH_DEBOUNCE_MS = 300;
+const REALTIME_REFRESH_JITTER_MS = 1_200;
+
+function activeManufacturingQueryKey(workspaceView: WorkspaceView) {
+  if (workspaceView === "production") return "operations";
+  return workspaceView;
+}
 
 interface ProductionRequirement {
   key: string;
@@ -710,10 +716,20 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
   const userName = query.data?.user?.name ?? "Machinist";
 
   const refreshManufacturingData = useCallback(() => {
+    const activeKey = activeManufacturingQueryKey(workspaceView);
+    void queryClient.invalidateQueries(
+      { queryKey: [activeKey] },
+      // Realtime may arrive while the mutation's own refresh is running. Keep
+      // that request instead of cancelling it and starting another cold read.
+      { cancelRefetch: false },
+    );
+
+    // Other workspaces can refresh when opened; marking them stale does not
+    // fan out more HTTP requests while they are not visible.
     for (const key of MANUFACTURING_QUERY_KEYS) {
-      void queryClient.invalidateQueries({ queryKey: [key] });
+      if (key !== activeKey) void queryClient.invalidateQueries({ queryKey: [key], refetchType: "none" });
     }
-  }, [queryClient]);
+  }, [queryClient, workspaceView]);
 
   useEffect(() => {
     const userId = query.data?.user?.id;
@@ -729,7 +745,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
       if (refreshTimer) clearTimeout(refreshTimer);
       refreshTimer = setTimeout(() => {
         if (!cancelled) refreshManufacturingData();
-      }, REALTIME_REFRESH_DEBOUNCE_MS);
+      }, REALTIME_REFRESH_DEBOUNCE_MS + Math.random() * REALTIME_REFRESH_JITTER_MS);
     };
 
     const subscribe = async () => {
@@ -821,7 +837,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
       setCamCompletionOpen(false);
     },
     onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ["operations"] });
+      queryClient.invalidateQueries({ queryKey: ["operations"] }, { cancelRefetch: false });
     },
   });
 
@@ -880,7 +896,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
     },
     onError: (error, variables) => toast.error(error instanceof Error ? error.message : `Unable to ${variables.action} selected operations`),
     onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ["operations"] });
+      queryClient.invalidateQueries({ queryKey: ["operations"] }, { cancelRefetch: false });
     },
   });
 
@@ -1293,9 +1309,9 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
             </div>
           </div>
 
-          {query.isLoading ? (
+          {query.isPending ? (
             <div className="space-y-3 p-5">{Array.from({ length: 7 }).map((_, index) => <Skeleton key={index} className="h-11 w-full" />)}</div>
-          ) : query.isError ? (
+          ) : query.isError && !query.data ? (
             <div className="grid min-h-80 place-items-center p-6 text-center"><div><XCircle className="mx-auto mb-3 size-9 text-destructive" /><h2 className="font-semibold">Couldn’t load the queue</h2><p className="mt-1 max-w-md text-sm text-muted-foreground">{query.error.message}</p><Button className="mt-4" onClick={() => query.refetch()}>Try again</Button></div></div>
           ) : filtered.length === 0 ? (
             <div className="grid min-h-80 place-items-center p-6 text-center"><div><PackageCheck className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h2 className="font-semibold">No operations match</h2><p className="mt-1 text-sm text-muted-foreground">Try another work type, machine, or source document, or clear the search.</p><Button variant="outline" className="mt-4" onClick={() => { setWorkType("all"); setMachine("all"); setSourceDocument("all"); setSearch(""); setView("all"); }}>Clear filters</Button></div></div>
@@ -1362,8 +1378,8 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
         <ProductionOverview
           canForceQc={query.data?.user?.role === "admin" && query.data.user.approved}
           operations={operations}
-          isLoading={query.isLoading}
-          isError={query.isError}
+          isLoading={query.isPending}
+          isError={query.isError && !query.data}
           errorMessage={query.error instanceof Error ? query.error.message : undefined}
           onRetry={() => query.refetch()}
         />

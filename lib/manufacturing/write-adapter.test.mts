@@ -95,6 +95,11 @@ test("Force QC transport retries reuse the atomic payload and database conflicts
   const conflict = harness(fixture(), () => Response.json({ code: "40001" }, { status: 409 }));
   await assert.rejects(conflict.adapter.forceQualityReview(20, "", "fixture-token", ACTOR), error => error instanceof ManufacturingWriteError && error.status === 409);
   assert.equal(conflict.commits.length, 1);
+
+  const timeout = harness(fixture(), () => Response.json({ code: "57014" }, { status: 500 }));
+  await assert.rejects(timeout.adapter.forceQualityReview(20, "", "fixture-token", ACTOR), error => error instanceof ManufacturingWriteError
+    && error.status === 503 && /database is busy/.test(error.message));
+  assert.equal(timeout.commits.length, 1);
 });
 
 test("Force QC accepts rework and propagates database permission rejection without changing its input state", async () => {

@@ -69,6 +69,21 @@ test("Supabase reader exhausts pagination and rejects duplicates and source coun
  await assert.rejects(drift.readEntity("operations"),/changed/);
 });
 
+test("snapshot reads omit unused assemblies and bound entity concurrency", async () => {
+ let activeEntityReads=0;let maxEntityReads=0;const requestedEntities:string[]=[];
+ const adapter=createSupabaseManufacturingAdapter({url:"https://example.test",serviceKey:"test",fetch:async(input)=>{
+  const url=new URL(String(input));
+  if(url.pathname.endsWith("manufacturing_attachment_manifest")) return Response.json([]);
+  const entity=url.searchParams.get("p_entity");
+  assert.ok(entity);requestedEntities.push(entity);activeEntityReads++;maxEntityReads=Math.max(maxEntityReads,activeEntityReads);
+  await new Promise(resolve=>setTimeout(resolve,5));activeEntityReads--;
+  return Response.json({total:0,rows:[]});
+ }});
+ assert.deepEqual(await adapter.readSnapshot(),{operations:[],jobs:[]});
+ assert.deepEqual(requestedEntities.sort(),["finishing","operations","parts","requirements"]);
+ assert.equal(maxEntityReads,2);
+});
+
 test("timestamp comparison detects microsecond changes",()=>{
  const entity=ENTITIES.find(e=>e.name==="operations")!;const raw={id:1,"Started At":"2026-09-01T00:00:00.123456Z"};const row=normalizeRow(entity,raw) as NormalizedRow;row.started_at="2026-09-01T00:00:00.123789+00:00";assert.equal(denormalizeRow(entity,row)["Started At"],row.started_at);
 });

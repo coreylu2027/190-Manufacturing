@@ -2,6 +2,8 @@ import { ENTITIES, denormalizeRow, type ManufacturingAttachment, type Normalized
 import { projectOperations, projectFinishing } from "./projections.ts";
 export interface AdapterConfig { url: string; serviceKey: string; fetch?: typeof fetch }
 export type ManufacturingRows = Record<string, RawRow[]>;
+const SNAPSHOT_ENTITY_NAMES = new Set(["parts", "requirements", "operations", "finishing"]);
+const READ_CONCURRENCY = 2;
 export function supabaseApiHeaders(key: string): Record<string, string> {
   const headers: Record<string, string> = { apikey: key };
   if (!key.startsWith("sb_")) headers.Authorization = `Bearer ${key}`;
@@ -77,22 +79,30 @@ export function createSupabaseManufacturingAdapter(config: AdapterConfig) {
     }
     return data;
   }
-  async function readRows(): Promise<ManufacturingRows> {
-    const entries = await Promise.all(ENTITIES.map(async entity => [entity.name,
-      (await readEntity(entity.name)).map(row => {
-        const raw = denormalizeRow(entity, row);
-        return entity.name === "requirements" ? {
-          ...raw,
-          "Part Location": row.part_location ?? null,
-          "Location Updated By": row.location_updated_by ?? null,
-          "Location Updated At": row.location_updated_at ?? null,
-        } : raw;
-      })
-        .sort((a,b)=>Number(a.order??a.id)-Number(b.order??b.id) || a.id-b.id)] as const));
+  async function readRows(entities = ENTITIES): Promise<ManufacturingRows> {
+    const entries: Array<readonly [string, RawRow[]]> = [];
+    // Keep cold-cache reconstruction from opening one database statement per
+    // entity at the same instant. A small amount of bounded parallelism is
+    // faster in the normal case without causing a refresh stampede under load.
+    for (let index = 0; index < entities.length; index += READ_CONCURRENCY) {
+      const batch = await Promise.all(entities.slice(index, index + READ_CONCURRENCY).map(async entity => [entity.name,
+        (await readEntity(entity.name)).map(row => {
+          const raw = denormalizeRow(entity, row);
+          return entity.name === "requirements" ? {
+            ...raw,
+            "Part Location": row.part_location ?? null,
+            "Location Updated By": row.location_updated_by ?? null,
+            "Location Updated At": row.location_updated_at ?? null,
+          } : raw;
+        })
+          .sort((a,b)=>Number(a.order??a.id)-Number(b.order??b.id) || a.id-b.id)] as const));
+      entries.push(...batch);
+    }
     return Object.fromEntries(entries);
   }
   async function readSnapshot() {
-    const [rows, attachments] = await Promise.all([readRows(), readAttachments()]);
+    const snapshotEntities = ENTITIES.filter(entity => SNAPSHOT_ENTITY_NAMES.has(entity.name));
+    const [rows, attachments] = await Promise.all([readRows(snapshotEntities), readAttachments()]);
     return {
       operations: projectOperations(rows.operations, rows.requirements, rows.parts, attachments),
       jobs: projectFinishing(rows.finishing, rows.requirements, attachments, rows.operations),
