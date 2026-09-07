@@ -5,6 +5,7 @@ import { getAppUser } from "@/lib/auth";
 import { applyQuantityAction, patchOperation, stealOperationClaim, updateCamHandoff } from "@/lib/manufacturing";
 import { createNotification } from "@/lib/notifications";
 import { isShopName } from "@/lib/profile-name";
+import { scheduleSlackManufacturingEvent } from "@/lib/slack-notifications";
 import { OPERATION_STATUSES } from "@/lib/types";
 import { ManufacturingWriteError } from "@/lib/manufacturing/write-adapter";
 
@@ -82,6 +83,19 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
           stolenByName: machinist,
         },
       })));
+      scheduleSlackManufacturingEvent({
+        type: "operation_claimed",
+        actorName: machinist,
+        requirementId: stolen.context.requirementId,
+        partNumber: stolen.context.partNumber,
+        partName: stolen.context.partName,
+        assemblyNumber: stolen.context.assemblyNumber,
+        operationNumber: stolen.context.operationNumber,
+        workType: stolen.context.workType,
+        machine: stolen.context.machine,
+        quantity: stolen.context.quantity,
+        tookOver: true,
+      });
       return NextResponse.json({
         updated: stolen.updated,
         displaced: stolen.displaced,
@@ -98,22 +112,92 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       if (user?.role !== "admin") {
         return NextResponse.json({ error: "Administrator access required" }, { status: 403 });
       }
-      const updated = await updateCamHandoff(operationId, parsed.data, user);
+      const result = await updateCamHandoff(operationId, parsed.data, user);
+      const { notificationContext, ...updated } = result;
+      const changedFields = [
+        notificationContext.previousCompletedBy !== parsed.data.completedBy ? "completed by" : "",
+        notificationContext.previousProgramPath !== parsed.data.programPath ? "program path" : "",
+        notificationContext.previousNotes !== parsed.data.notes ? "notes" : "",
+      ].filter(Boolean);
+      if (changedFields.length > 0) {
+        scheduleSlackManufacturingEvent({
+          type: "cam_handoff_edited",
+          actorName: user.name,
+          requirementId: notificationContext.requirementId,
+          partNumber: notificationContext.partNumber,
+          partName: notificationContext.partName,
+          assemblyNumber: notificationContext.assemblyNumber,
+          operationNumber: notificationContext.operationNumber,
+          machine: notificationContext.machine,
+          changedFields,
+        });
+      }
       return NextResponse.json({ updated });
     }
 
     if (!("action" in parsed.data) && user.role !== "admin") {
       return NextResponse.json({ error: "Administrator access required for status overrides" }, { status: 403 });
     }
-    const updated = "action" in parsed.data
-      ? await applyQuantityAction(operationId, parsed.data.action, parsed.data.quantity, {
+    if ("action" in parsed.data) {
+      const result = await applyQuantityAction(operationId, parsed.data.action, parsed.data.quantity, {
           id: user.id,
           name: machinist,
         }, {
           programPath: parsed.data.programPath,
           notes: parsed.data.notes,
-        })
-      : await patchOperation(operationId, parsed.data, user);
+        });
+      const { notificationContext, ...updated } = result;
+      const eventType = {
+        claim: "operation_claimed",
+        complete: "operation_completed",
+        release: "operation_released",
+        undo_complete: "operation_reopened",
+      } as const;
+      scheduleSlackManufacturingEvent({
+        type: eventType[parsed.data.action],
+        actorName: machinist,
+        requirementId: notificationContext.requirementId,
+        partNumber: notificationContext.partNumber,
+        partName: notificationContext.partName,
+        assemblyNumber: notificationContext.assemblyNumber,
+        operationNumber: notificationContext.operationNumber,
+        workType: notificationContext.workType,
+        machine: notificationContext.machine,
+        quantity: parsed.data.quantity,
+        becameReadyForQc: notificationContext.previousRequirementStatus !== "Ready for QC"
+          && notificationContext.requirementStatus === "Ready for QC",
+        becameComplete: notificationContext.previousRequirementStatus !== "Complete"
+          && notificationContext.requirementStatus === "Complete",
+      });
+      return NextResponse.json({ updated });
+    }
+
+    const result = await patchOperation(operationId, parsed.data, user);
+    const { notificationContext, ...updated } = result;
+    const changes = [
+      parsed.data.status !== undefined && parsed.data.status !== notificationContext.previousOperationStatus
+        ? `status ${notificationContext.previousOperationStatus} → ${parsed.data.status}` : "",
+      parsed.data.machinist !== undefined && parsed.data.machinist !== notificationContext.previousMachinist
+        ? `machinist ${notificationContext.previousMachinist || "Unassigned"} → ${parsed.data.machinist || "Unassigned"}` : "",
+    ].filter(Boolean);
+    if (changes.length > 0) {
+      scheduleSlackManufacturingEvent({
+        type: "admin_override",
+        actorName: user.name,
+        requirementId: notificationContext.requirementId,
+        partNumber: notificationContext.partNumber,
+        partName: notificationContext.partName,
+        assemblyNumber: notificationContext.assemblyNumber,
+        operationNumber: notificationContext.operationNumber,
+        workType: notificationContext.workType,
+        machine: notificationContext.machine,
+        changes,
+        becameReadyForQc: notificationContext.previousRequirementStatus !== "Ready for QC"
+          && notificationContext.requirementStatus === "Ready for QC",
+        becameComplete: notificationContext.previousRequirementStatus !== "Complete"
+          && notificationContext.requirementStatus === "Complete",
+      });
+    }
     return NextResponse.json({ updated });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to update operation";

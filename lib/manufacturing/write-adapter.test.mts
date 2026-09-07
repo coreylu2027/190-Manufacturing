@@ -213,6 +213,17 @@ test("quantity claims are planned and sent as one compare-and-swap transaction",
   const { adapter, commits } = harness(fixture());
   const result = await adapter.applyQuantityAction(10, "claim", 1, ACTOR);
   assert.equal(result.status, "In Progress");
+  assert.deepEqual(result.notificationContext, {
+    requirementId: 20,
+    partNumber: "P-1",
+    partName: "Fixture",
+    assemblyNumber: "A-1",
+    operationNumber: "OP1",
+    workType: "Manufacturing",
+    machine: "Mill",
+    previousRequirementStatus: "Ready for Manufacturing",
+    requirementStatus: "On Machine",
+  });
   assert.equal(commits.length, 1);
   const commit = commits[0];
   assert.equal(commit.p_action, "claim");
@@ -265,7 +276,15 @@ test("CAM completion, finishing, claim stealing, and QC use their atomic action 
     },
     requirement: { Status: { value: "Ready for QC" }, Machinist: "Alex A. (2)" },
   }));
-  await qc.adapter.recordQualityReview(20, "passed", "Looks good", ACTOR, "Clarke 1");
+  const qcResult = await qc.adapter.recordQualityReview(20, "passed", "Looks good", ACTOR, "Clarke 1");
+  assert.deepEqual(qcResult.notificationContext, {
+    requirementId: 20,
+    partNumber: "P-1",
+    partName: "Fixture",
+    assemblyNumber: "A-1",
+    previousRequirementStatus: "Ready for QC",
+    requirementStatus: "Complete",
+  });
   assert.equal(qc.commits[0].p_action, "qc_review");
   assert.equal((qc.commits[0].p_qc as { result: string }).result, "passed");
   assert.equal((qc.commits[0].p_qc as { location: string }).location, "Clarke 1");
@@ -286,6 +305,7 @@ test("part locations are editable before QC while On Robot requires passed QC an
   const changed = harness(fixture());
   const changedResult = await changed.adapter.updatePartLocation(20, "Kwolek 2-8", ACTOR);
   assert.equal(changedResult.storageLocation, "Kwolek 2-8");
+  assert.equal(changedResult.notificationContext.previousLocation, null);
   assert.equal(changed.commits[0].p_action, "part_location");
   assert.equal((changed.commits[0].p_qc as { location: string }).location, "Kwolek 2-8");
   assert.deepEqual(changed.commits[0].p_changes, []);
@@ -447,7 +467,16 @@ test("release, completion undo, CAM edits, finishing completion, and QC undo are
     reviews: [{ id: 50, production_requirement_id: 20, operation_id: null, result: "passed", reviewed_at: passedAt }],
   }));
   const reviewUndoResult = await qcUndo.adapter.undoQualityReview(20, ACTOR);
-  assert.deepEqual(reviewUndoResult, { undone: true, requirementId: 20 });
+  assert.deepEqual(reviewUndoResult, {
+    undone: true,
+    requirementId: 20,
+    notificationContext: {
+      requirementId: 20,
+      partNumber: "P-1",
+      partName: "Fixture",
+      assemblyNumber: "A-1",
+    },
+  });
   assert.equal(qcUndo.commits[0].p_action, "qc_undo");
   assert.deepEqual(qcUndo.commits[0].p_qc, { requirement_id: 20 });
 });

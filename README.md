@@ -47,7 +47,8 @@ application.
 6. Enable email/password auth, with `/auth/callback` as an allowed redirect path for email confirmation and password recovery.
 7. Add `/auth/callback` and `/auth/callback?next=/reset-password` to the Supabase redirect allow list for each app origin.
 8. To deliver notification emails, create a Resend API key, verify the sender domain, and set `RESEND_API_KEY` plus `NOTIFICATION_EMAIL_FROM`.
-9. Run `npm run dev`.
+9. To post manufacturing activity to Slack, create an incoming webhook for the desired channel and set the server-only `SLACK_WEBHOOK_URL` variable.
+10. Run `npm run dev`.
 
 Authentication is mandatory. Missing Supabase server credentials fail closed
 instead of loading demo data or falling back to another backend.
@@ -101,6 +102,8 @@ The shop UI treats the Onshape document name and assembly part number as separat
 The reusable notification service in `lib/notifications.ts` stores an in-site alert before attempting email delivery. Delivery state (`pending`, `sent`, `failed`, or `skipped`) and provider details remain attached to the notification so failed email delivery can be diagnosed or retried later. The dashboard presents unread alerts one at a time, subscribes to new alerts through Supabase Realtime, and marks each read only after it is acknowledged. The initial unread-alert request remains as a reconnect fallback.
 
 `RESEND_API_KEY` and `NOTIFICATION_EMAIL_FROM` are server-only. Without both values, website alerts still work and email delivery is recorded as skipped.
+
+`SLACK_WEBHOOK_URL` is optional and server-only. When configured, successful operation and finishing claims, releases, completions, and reopenings are posted to the webhook's channel. Messages also highlight Ready for QC, Ready for Finishing, post-QC-work-ready, and fully complete milestones. Passed, failed, forced, and undone QC reviews; part-location changes; CAM handoff edits; claim takeovers; and administrator operation overrides are also posted. Slack delivery runs after the API response, retries one HTTP 429 response using Slack's `Retry-After` value, and never changes the result of the manufacturing transaction. No-op edits do not post. Keep the webhook URL out of source control; anyone holding it can post to the configured channel.
 
 ## Vercel
 

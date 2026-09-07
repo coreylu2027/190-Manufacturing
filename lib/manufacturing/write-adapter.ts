@@ -27,6 +27,11 @@ export interface WriteState {
 type Actor = { id: string; name: string };
 type Plan = ReturnType<typeof createWritePlan>;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+function sourceSelectValue(value: unknown, fallback = "") {
+  return typeof value === "object" && value !== null && "value" in value
+    ? String((value as { value: unknown }).value ?? fallback)
+    : fallback;
+}
 export function createSupabaseWriteAdapter(config: AdapterConfig) {
   const request = config.fetch ?? fetch;
   async function rpc<T>(name: string, body?: unknown): Promise<T> {
@@ -78,6 +83,23 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     if (!row) throw new ManufacturingWriteError("Production requirement no longer exists", 409);
     return row;
   }
+  function notificationPartContext(state: WriteState, requirementId: number) {
+    const requirementRow = requirement(state, requirementId);
+    const linkedRow = state.rows.operations.find((candidate) => Number(candidate.requirement_id) === requirementId)
+      ?? state.rows.finishing.find((candidate) => Number(candidate.requirement_id) === requirementId);
+    const sourceLink = linkedRow?.source_row?.["Production Requirement"];
+    const display = Array.isArray(sourceLink) && sourceLink[0] && typeof sourceLink[0] === "object" && "value" in sourceLink[0]
+      ? String((sourceLink[0] as { value: unknown }).value ?? "")
+      : "";
+    const parsed = display.match(/^(.+?)\s+—\s+(.+?)\s+\[([^\]]+)]$/);
+    const fallback = display.trim() || String(requirementRow.production_key ?? `Requirement ${requirementId}`);
+    return {
+      requirementId,
+      partNumber: parsed?.[1] ?? fallback.split(" ")[0] ?? "Unknown",
+      partName: parsed?.[2] ?? fallback,
+      assemblyNumber: parsed?.[3] ?? "Unassigned",
+    };
+  }
   function assertEffectivePassedReview(
     state: WriteState,
     requirementId: number,
@@ -124,8 +146,17 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
         assertForceEligible(state, requirementId);
         try { await plan.forceCompletePrerequisites(requirementId, actor, reviewedAt); }
         catch (error) { throw new ManufacturingWriteError(error instanceof Error ? error.message : "Unable to force complete work", 409); }
-        await plan.patchRequirementQualityOutcome(requirementId, "passed", actor.name, notes, reviewedAt);
-        return { requirementId, result: "passed", notes };
+        const updatedRequirement = await plan.patchRequirementQualityOutcome(requirementId, "passed", actor.name, notes, reviewedAt);
+        return {
+          requirementId,
+          result: "passed",
+          notes,
+          notificationContext: {
+            ...notificationPartContext(state, requirementId),
+            previousRequirementStatus: String(requirement(state, requirementId).status ?? "Needs Triage"),
+            requirementStatus: sourceSelectValue(updatedRequirement.Status, "Needs Triage"),
+          },
+        };
       }, { requirement_id: requirementId, result: "passed", notes, reviewed_at: reviewedAt, location: null });
     },
     async retractedReviewIds() {
@@ -189,8 +220,8 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       if (result === "failed" && location !== null) throw new ManufacturingWriteError("A failed QC review cannot assign a storage location", 400);
       if (location === ROBOT_LOCATION) throw new ManufacturingWriteError("On Robot becomes available after QC passes and finishing is complete", 409);
       const reviewedAt = new Date().toISOString();
-      return transact(actor, "qc_review", async plan => {
-        await plan.patchRequirementQualityOutcome(requirementId, result, actor.name, notes, reviewedAt);
+      return transact(actor, "qc_review", async (plan, state) => {
+        const updatedRequirement = await plan.patchRequirementQualityOutcome(requirementId, result, actor.name, notes, reviewedAt);
         return {
           requirementId,
           result,
@@ -198,6 +229,11 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
           storageLocation: result === "passed" ? location : null,
           locationUpdatedBy: result === "passed" && location ? actor.name : null,
           locationUpdatedAt: result === "passed" && location ? reviewedAt : null,
+          notificationContext: {
+            ...notificationPartContext(state, requirementId),
+            previousRequirementStatus: String(requirement(state, requirementId).status ?? "Needs Triage"),
+            requirementStatus: sourceSelectValue(updatedRequirement.Status, "Needs Triage"),
+          },
         };
       }, { requirement_id: requirementId, result, notes, reviewed_at: reviewedAt, location: result === "passed" ? location : null });
     },
@@ -220,6 +256,10 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
           storageLocation: location,
           locationUpdatedBy: actor.name,
           locationUpdatedAt: updatedAt,
+          notificationContext: {
+            ...notificationPartContext(state, requirementId),
+            previousLocation: isStorageLocation(requirementRow.part_location) ? requirementRow.part_location : null,
+          },
         };
       }, { requirement_id: requirementId, location, location_updated_at: updatedAt });
     },
@@ -231,7 +271,11 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
         const review = latestReview(state, requirementId);
         if (!review || review.result !== "passed" || state.retractions.some(r => r.review_id === review.id)) throw new ManufacturingWriteError("Only the latest passed QC review can be undone", 409);
         await plan.clearPassedRequirementQualityOutcome(requirementId);
-        return { undone: true, requirementId };
+        return {
+          undone: true,
+          requirementId,
+          notificationContext: notificationPartContext(state, requirementId),
+        };
       }, { requirement_id: requirementId });
     },
   };

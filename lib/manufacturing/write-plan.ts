@@ -18,10 +18,14 @@ export interface DisplacedClaimant {
 }
 export interface StolenOperationContext {
   operationId: number;
+  requirementId: number;
   partNumber: string;
   partName: string;
+  assemblyNumber: string;
   operationNumber: ManufacturingOperation["operationNumber"];
   workType: OperationWorkType;
+  machine: string;
+  quantity: number;
 }
 function selectValue(value: unknown, fallback = ""): string {
   return typeof value === "object" && value !== null && "value" in value
@@ -56,9 +60,10 @@ function textValue(value: unknown): string {
 }
 function parseRequirement(display: string) {
   const match = display.match(/^(.+?)\s+—\s+(.+?)\s+\[([^\]]+)]$/);
+  const fallback = display.trim() || "Unknown part";
   return {
-    partNumber: match?.[1] ?? display.split(" ")[0] ?? "Unknown",
-    partName: match?.[2] ?? display,
+    partNumber: match?.[1] ?? fallback.split(" ")[0] ?? "Unknown",
+    partName: match?.[2] ?? fallback,
     assemblyNumber: match?.[3] ?? "Unassigned",
   };
 }
@@ -208,6 +213,14 @@ async function applyFabricationAction(id: number, action: FabricationAction, act
     status: action === "complete" ? "Complete" : fabricationStatus(nextRequirementStatus, nextMachinist),
     requirementStatus: nextRequirementStatus,
     machinist: nextMachinist,
+    notificationContext: {
+      requirementId,
+      ...parseRequirement(linkedValue(finishing["Production Requirement"])),
+      color: selectValue(finishing["Powder Coat Color"], "Unspecified"),
+      quantity: Math.max(1, Math.floor(Number(finishing["Required Quantity"] ?? requirement["Required Quantity"] ?? 1))),
+      previousRequirementStatus: requirementStatus,
+      requirementStatus: nextRequirementStatus,
+    },
   };
 }
 async function reconcileRequirementWorkflow(requirementId: number, options: { finishingComplete?: boolean } = {}) {
@@ -276,7 +289,11 @@ async function patchOperation(id: number, patch: OperationPatch, machinist: stri
   await patchRow(OPERATIONS_TABLE_ID, id, body);
 
   const requirementId = linkedId(operation["Production Requirement"]);
+  let previousRequirementStatus = "Needs Triage";
+  let requirementStatus = "Needs Triage";
   if (requirementId) {
+    const requirement = await getRow(REQUIREMENTS_TABLE_ID, requirementId);
+    previousRequirementStatus = selectValue(requirement.Status, "Needs Triage");
     const requirementPatch: Record<string, unknown> = {};
     if (workType === "Manufacturing" && patch.machinist !== undefined) requirementPatch.Machinist = patch.machinist;
     if (workType === "Manufacturing" && (patch.status === "In Progress" || patch.status === "Complete") && patch.machinist === undefined) {
@@ -286,11 +303,27 @@ async function patchOperation(id: number, patch: OperationPatch, machinist: stri
       await patchRow(REQUIREMENTS_TABLE_ID, requirementId, requirementPatch);
     }
     const plan = await reconcileRequirementWorkflow(requirementId);
+    requirementStatus = plan.requirementStatus;
     if (plan.requirementStatus === "Ready for QC") {
       await patchRow(REQUIREMENTS_TABLE_ID, requirementId, { "QC Outcome": "Not Inspected" });
     }
   }
-  return body;
+  return {
+    ...body,
+    notificationContext: {
+      requirementId: requirementId ?? 0,
+      ...parseRequirement(linkedValue(operation["Production Requirement"])),
+      operationNumber: selectValue(operation["Operation Number"], "OP1"),
+      workType,
+      machine: selectValue(operation.Machine, "Unassigned"),
+      previousOperationStatus: selectValue(operation.Status, "Planned"),
+      operationStatus: patch.status ?? selectValue(operation.Status, "Planned"),
+      previousMachinist: String(operation.Machinist ?? "").trim(),
+      machinist: patch.machinist ?? String(body.Machinist ?? operation.Machinist ?? "").trim(),
+      previousRequirementStatus,
+      requirementStatus,
+    },
+  };
 }
 async function updateCamHandoff(
   id: number,
@@ -308,6 +341,8 @@ async function updateCamHandoff(
   if (operationWorkType(operation) !== "CAM") throw new Error("Only CAM handoffs can be edited");
   const status = selectValue(operation.Status, "Planned") as OperationStatus;
   if (status !== "Complete") throw new Error("Only completed CAM handoffs can be edited");
+  const requirementId = linkedId(operation["Production Requirement"]);
+  if (!requirementId) throw new Error("Operation is not linked to a production requirement");
 
   const allocations = quantitiesForRow(operation, 1, status).allocations.map((allocation) => allocation.completed > 0
     ? { ...allocation, name: completedBy }
@@ -325,6 +360,15 @@ async function updateCamHandoff(
     allocations,
     camProgramPath: programPath || null,
     camNotes: notes,
+    notificationContext: {
+      requirementId,
+      ...parseRequirement(linkedValue(operation["Production Requirement"])),
+      operationNumber: selectValue(operation["Operation Number"], "OP1"),
+      machine: selectValue(operation.Machine, "Unassigned"),
+      previousCompletedBy: String(operation.Machinist ?? "").trim(),
+      previousProgramPath: textValue(operation["CAM Program Path"]),
+      previousNotes: textValue(operation["CAM Notes"]),
+    },
   };
 }
 async function applyQuantityAction(
@@ -440,7 +484,7 @@ async function applyQuantityAction(
     if (action === "undo_complete" && !postQcOperation) requirementPatch["QC Outcome"] = "Not Inspected";
     await patchRow(REQUIREMENTS_TABLE_ID, requirementId, requirementPatch);
   }
-  await reconcileRequirementWorkflow(requirementId);
+  const workflow = await reconcileRequirementWorkflow(requirementId);
 
   return {
     id,
@@ -462,6 +506,15 @@ async function applyQuantityAction(
     camNotes: workType === "CAM" && action === "complete"
       ? camHandoff?.notes?.trim() ?? ""
       : textValue(operation["CAM Notes"]),
+    notificationContext: {
+      requirementId,
+      ...parseRequirement(linkedValue(operation["Production Requirement"])),
+      operationNumber: selectValue(operation["Operation Number"], "OP1"),
+      workType,
+      machine: selectValue(operation.Machine, "Unassigned"),
+      previousRequirementStatus: selectValue(requirement.Status, "Needs Triage"),
+      requirementStatus: workflow.requirementStatus,
+    },
   };
 }
 async function stealOperationClaim(
@@ -550,7 +603,15 @@ async function stealOperationClaim(
       completedAt: null,
     },
     displaced,
-    context: { operationId: id, ...parsed, operationNumber, workType } satisfies StolenOperationContext,
+    context: {
+      operationId: id,
+      requirementId,
+      ...parsed,
+      operationNumber,
+      workType,
+      machine: selectValue(operation.Machine, "Unassigned"),
+      quantity: stolenQuantity,
+    } satisfies StolenOperationContext,
   };
 }
 async function renameMachinistAllocations(userId: string, oldName: string, newName: string) {

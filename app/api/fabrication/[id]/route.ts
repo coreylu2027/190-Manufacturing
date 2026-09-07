@@ -4,6 +4,7 @@ import { z } from "zod";
 import { getAppUser } from "@/lib/auth";
 import { applyFabricationAction } from "@/lib/manufacturing";
 import { isShopName } from "@/lib/profile-name";
+import { scheduleSlackManufacturingEvent } from "@/lib/slack-notifications";
 import { ManufacturingWriteError } from "@/lib/manufacturing/write-adapter";
 
 const requestSchema = z.object({
@@ -28,7 +29,28 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   }
 
   try {
-    const updated = await applyFabricationAction(jobId, parsed.data.action, { id: user.id, name: machinist });
+    const result = await applyFabricationAction(jobId, parsed.data.action, { id: user.id, name: machinist });
+    const { notificationContext, ...updated } = result;
+    const eventType = {
+      claim: "finishing_claimed",
+      complete: "finishing_completed",
+      release: "finishing_released",
+      undo_complete: "finishing_reopened",
+    } as const;
+    scheduleSlackManufacturingEvent({
+      type: eventType[parsed.data.action],
+      actorName: machinist,
+      requirementId: notificationContext.requirementId,
+      partNumber: notificationContext.partNumber,
+      partName: notificationContext.partName,
+      assemblyNumber: notificationContext.assemblyNumber,
+      color: notificationContext.color,
+      quantity: notificationContext.quantity,
+      postQcWorkReady: notificationContext.previousRequirementStatus !== "Ready for Manufacturing"
+        && notificationContext.requirementStatus === "Ready for Manufacturing",
+      becameComplete: notificationContext.previousRequirementStatus !== "Complete"
+        && notificationContext.requirementStatus === "Complete",
+    });
     return NextResponse.json({ updated });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to update finishing job" }, { status: error instanceof ManufacturingWriteError ? error.status : 502 });

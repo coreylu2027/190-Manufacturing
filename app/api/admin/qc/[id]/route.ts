@@ -4,6 +4,7 @@ import { z } from "zod";
 import { getAdminActor } from "@/lib/auth";
 import { recordQualityReview, undoQualityReview } from "@/lib/manufacturing";
 import { ManufacturingWriteError } from "@/lib/manufacturing/write-adapter";
+import { scheduleSlackManufacturingEvent } from "@/lib/slack-notifications";
 import { storageLocationSchema } from "@/lib/storage-locations";
 
 const reviewSchema = z.object({
@@ -28,7 +29,22 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   if (!Number.isInteger(requirementId)) return NextResponse.json({ error: "Invalid production requirement ID" }, { status: 400 });
 
   try {
-    const review = await recordQualityReview(requirementId, parsed.data.result, parsed.data.notes, currentUser, parsed.data.location ?? null);
+    const result = await recordQualityReview(requirementId, parsed.data.result, parsed.data.notes, currentUser, parsed.data.location ?? null);
+    const { notificationContext, ...review } = result;
+    scheduleSlackManufacturingEvent({
+      type: "qc_reviewed",
+      actorName: currentUser.name,
+      result: parsed.data.result,
+      notes: parsed.data.notes,
+      storageLocation: parsed.data.result === "passed" ? parsed.data.location ?? null : null,
+      becameReadyForFinishing: notificationContext.previousRequirementStatus !== "Ready for Finishing"
+        && notificationContext.requirementStatus === "Ready for Finishing",
+      postQcWorkReady: notificationContext.previousRequirementStatus !== "Ready for Manufacturing"
+        && notificationContext.requirementStatus === "Ready for Manufacturing",
+      becameComplete: notificationContext.previousRequirementStatus !== "Complete"
+        && notificationContext.requirementStatus === "Complete",
+      ...notificationContext,
+    });
     return NextResponse.json({ review });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to record quality review" }, { status: error instanceof ManufacturingWriteError ? error.status : 502 });
@@ -45,7 +61,14 @@ export async function DELETE(_request: Request, { params }: { params: Promise<{ 
   if (!Number.isInteger(requirementId)) return NextResponse.json({ error: "Invalid production requirement ID" }, { status: 400 });
 
   try {
-    return NextResponse.json(await undoQualityReview(requirementId, currentUser));
+    const result = await undoQualityReview(requirementId, currentUser);
+    const { notificationContext, ...review } = result;
+    scheduleSlackManufacturingEvent({
+      type: "qc_reopened",
+      actorName: currentUser.name,
+      ...notificationContext,
+    });
+    return NextResponse.json(review);
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to undo quality review" }, { status: error instanceof ManufacturingWriteError ? error.status : 502 });
   }
