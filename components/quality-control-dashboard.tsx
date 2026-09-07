@@ -2,11 +2,12 @@
 
 import { ForceQcPicker } from "@/components/force-qc";
 
-import { themeQuartz, type ColDef, type SuppressKeyboardEventParams } from "ag-grid-community";
+import { themeQuartz, type ColDef } from "ag-grid-community";
 import { AgGridReact } from "ag-grid-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Check,
+  ChevronRight,
   ClipboardCheck,
   Clock3,
   ExternalLink,
@@ -18,7 +19,7 @@ import {
   SlidersHorizontal,
   X,
 } from "lucide-react";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { StorageLocationEditor } from "@/components/storage-location-editor";
@@ -26,6 +27,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { canUseOnRobotLocation } from "@/lib/storage-locations";
 import type { AdminResponse, QualityControlItem, QualityResult } from "@/lib/types";
@@ -44,7 +46,7 @@ const gridTheme = themeQuartz.withParams({
   fontSize: 13,
   headerFontSize: 11,
   headerFontWeight: 650,
-  rowHeight: 132,
+  rowHeight: 82,
   headerHeight: 42,
   wrapperBorderRadius: 0,
   spacing: 6,
@@ -139,104 +141,18 @@ function ResultCell({ data }: { data?: QualityControlItem }) {
   );
 }
 
-function suppressInteractiveKeyboardEvent({ event }: SuppressKeyboardEventParams<QualityControlItem>) {
-  return event.target instanceof Element && Boolean(event.target.closest("a, button, input, select, textarea"));
+function NotesCell({ value }: { value: string }) {
+  const notes = value || "No inspection notes";
+  return <div className="flex h-full min-w-0 items-center"><span className={cn("truncate", !value && "text-muted-foreground")} title={notes}>{notes}</span></div>;
 }
 
-function NotesEditor({
-  data,
-  id,
-  className,
-  onChange,
-}: {
-  data: QualityControlItem;
-  id?: string;
-  className?: string;
-  onChange: (requirementId: number, value: string) => void;
-}) {
-  const [value, setValue] = useState(data.notes);
-
-  return <textarea
-    id={id}
-    aria-label={`Inspection notes for ${data.operations[0].partNumber}`}
-    value={value}
-    onChange={(event) => {
-      setValue(event.currentTarget.value);
-      onChange(data.requirementId, event.currentTarget.value);
-    }}
-    onKeyDownCapture={(event) => event.stopPropagation()}
-    placeholder="Measurements, defects, or acceptance notes…"
-    className={cn("w-full rounded-lg border border-input bg-background px-3 py-2 text-foreground caret-foreground outline-none focus:border-ring focus:ring-3 focus:ring-ring/50", className)}
-  />;
-}
-
-function NotesCell({ data, onChange }: { data?: QualityControlItem; onChange: (requirementId: number, value: string) => void }) {
+function ActionCell({ data, onOpen }: { data?: QualityControlItem; onOpen: (item: QualityControlItem) => void }) {
   if (!data) return null;
   return (
-    <div className="flex h-full items-center py-2">
-      <NotesEditor
-        key={`${data.requirementId}:${data.notes}`}
-        data={data}
-        onChange={onChange}
-        className="h-[104px] resize-none text-xs leading-5"
-      />
-    </div>
-  );
-}
-
-function LocationCell({ data }: { data?: QualityControlItem }) {
-  if (!data) return null;
-  return (
-    <StorageLocationEditor
-      requirementId={data.requirementId}
-      value={data.storageLocation}
-      updatedBy={data.locationUpdatedBy}
-      updatedAt={data.locationUpdatedAt}
-      canEdit
-      compact
-      allowOnRobot={canUseOnRobotLocation(data.effectiveQcResult === "passed", data.operations[0].finishingComplete)}
-    />
-  );
-}
-
-function SourceCell({ data }: { data?: QualityControlItem }) {
-  if (!data) return null;
-  const operation = data.operations[0];
-  return (
-    <div className="flex h-full flex-col justify-center gap-2">
-      <Button size="sm" variant="outline" className="w-full justify-start" nativeButton={!operation.hasDrawingPdf} render={operation.hasDrawingPdf ? <a href={`/api/operations/${operation.id}/files/drawing-pdf`} target="_blank" rel="noreferrer" /> : undefined} disabled={!operation.hasDrawingPdf}><FileText /> Drawing PDF</Button>
-      <Button size="sm" variant="outline" className="w-full justify-start" nativeButton={!operation.onshapeUrl} render={operation.onshapeUrl ? <a href={operation.onshapeUrl} target="_blank" rel="noreferrer" /> : undefined} disabled={!operation.onshapeUrl}><ExternalLink /> Onshape source</Button>
-    </div>
-  );
-}
-
-function ActionCell({
-  data,
-  reviewPending,
-  undoPending,
-  onReview,
-  onUndo,
-}: {
-  data?: QualityControlItem;
-  reviewPending: boolean;
-  undoPending: boolean;
-  onReview: (item: QualityControlItem, result: "passed" | "failed") => void;
-  onUndo: (item: QualityControlItem) => void;
-}) {
-  if (!data) return null;
-  const ready = data.operations.every((operation) => operation.status === "Complete");
-  return (
-    <div className="flex h-full flex-col justify-center gap-2">
-      {data.result === "pending" ? (
-        <>
-          <Button size="sm" variant="destructive" onClick={() => onReview(data, "failed")} disabled={reviewPending || !ready}><X /> Fail QC</Button>
-          <Button size="sm" className="bg-emerald-600 hover:bg-emerald-700" onClick={() => onReview(data, "passed")} disabled={reviewPending || !ready}>{reviewPending ? <LoaderCircle className="animate-spin" /> : <Check />} Pass QC</Button>
-        </>
-      ) : data.result === "passed" ? (
-        <Button size="sm" variant="outline" onClick={() => onUndo(data)} disabled={undoPending}>{undoPending ? <LoaderCircle className="animate-spin" /> : <Clock3 />} Undo QC pass</Button>
-      ) : (
-        <p className="text-center text-xs leading-5 text-muted-foreground">Complete the rework to request QC again.</p>
-      )}
+    <div className="flex h-full items-center justify-end">
+      <Button size="sm" variant={data.result === "pending" ? "default" : "outline"} onClick={() => onOpen(data)}>
+        {data.result === "pending" ? "Review" : "Open"}<ChevronRight />
+      </Button>
     </div>
   );
 }
@@ -244,12 +160,12 @@ function ActionCell({
 export function QualityControlDashboard() {
   const queryClient = useQueryClient();
   const query = useQuery({ queryKey: ["qc"], queryFn: fetchQualityControl });
-  const notes = useRef<Record<number, string>>({});
   const [draftNotes, setDraftNotes] = useState<Record<number, string>>({});
   const [search, setSearch] = useState("");
   const [result, setResult] = useState<"all" | QualityResult>("all");
   const [machine, setMachine] = useState("all");
   const [location, setLocation] = useState("all");
+  const [selectedId, setSelectedId] = useState<number | null>(null);
 
   const invalidateManufacturing = () => {
     queryClient.invalidateQueries({ queryKey: ["qc"] }, { cancelRefetch: false });
@@ -258,9 +174,10 @@ export function QualityControlDashboard() {
   };
 
   const reviewMutation = useMutation({
-    mutationFn: ({ item, result: nextResult }: { item: QualityControlItem; result: "passed" | "failed" }) => submitReview(item, nextResult, notes.current[item.requirementId] ?? item.notes),
+    mutationFn: ({ item, result: nextResult, notes }: { item: QualityControlItem; result: "passed" | "failed"; notes: string }) => submitReview(item, nextResult, notes),
     onSuccess: (_data, variables) => {
       toast.success(variables.result === "passed" ? "Quality check passed" : "Operation returned for rework", variables.result === "passed" ? { action: { label: "Undo", onClick: () => undoReviewMutation.mutate(variables.item) } } : undefined);
+      setSelectedId(null);
       invalidateManufacturing();
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to record quality review"),
@@ -270,6 +187,7 @@ export function QualityControlDashboard() {
     mutationFn: undoPassedReview,
     onSuccess: () => {
       toast.success("QC pass undone");
+      setSelectedId(null);
       invalidateManufacturing();
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to undo QC pass"),
@@ -282,6 +200,7 @@ export function QualityControlDashboard() {
   const items = useMemo(() => query.data?.qualityControl ?? [], [query.data?.qualityControl]);
   const machines = useMemo(() => [...new Set(items.flatMap((item) => item.operations.map((operation) => operation.machine)))].sort(), [items]);
   const locations = useMemo(() => [...new Set(items.flatMap((item) => item.storageLocation ? [item.storageLocation] : []))].sort(), [items]);
+  const selected = selectedId === null ? null : items.find((item) => item.requirementId === selectedId) ?? null;
   const filtered = useMemo(() => {
     const term = search.trim().toLocaleLowerCase();
     return items.filter((item) => {
@@ -312,9 +231,9 @@ export function QualityControlDashboard() {
   }), [items]);
 
   const updateNotes = useCallback((requirementId: number, value: string) => {
-    notes.current[requirementId] = value;
     setDraftNotes((current) => ({ ...current, [requirementId]: value }));
   }, []);
+  const openItem = (item: QualityControlItem) => setSelectedId(item.requirementId);
   const columnDefs = useMemo<ColDef<QualityControlItem>[]>(() => [
     {
       colId: "part",
@@ -339,48 +258,24 @@ export function QualityControlDashboard() {
       minWidth: 260,
       flex: 1,
       cellRenderer: NotesCell,
-      cellRendererParams: {
-        onChange: updateNotes,
-        suppressMouseEventHandling: () => true,
-      },
-      suppressKeyboardEvent: suppressInteractiveKeyboardEvent,
     },
     {
       field: "storageLocation",
       headerName: "LOCATION",
-      minWidth: 260,
-      cellRenderer: LocationCell,
-      cellRendererParams: { suppressMouseEventHandling: () => true },
-      suppressKeyboardEvent: suppressInteractiveKeyboardEvent,
+      minWidth: 175,
       valueFormatter: ({ value }) => value || "Not recorded",
     },
     {
-      headerName: "FILES",
-      width: 158,
-      sortable: false,
-      filter: false,
-      cellRenderer: SourceCell,
-      cellRendererParams: { suppressMouseEventHandling: () => true },
-      suppressKeyboardEvent: suppressInteractiveKeyboardEvent,
-    },
-    {
-      headerName: "ACTIONS",
-      width: 166,
+      headerName: "",
+      width: 106,
       pinned: "right",
       sortable: false,
       filter: false,
       resizable: false,
       cellRenderer: ActionCell,
-      cellRendererParams: {
-        reviewPending: reviewIsPending,
-        undoPending: undoReviewIsPending,
-        onReview: (item: QualityControlItem, nextResult: "passed" | "failed") => mutateReview({ item, result: nextResult }),
-        onUndo: (item: QualityControlItem) => mutateUndoReview(item),
-        suppressMouseEventHandling: () => true,
-      },
-      suppressKeyboardEvent: suppressInteractiveKeyboardEvent,
+      cellRendererParams: { onOpen: openItem },
     },
-  ], [mutateReview, mutateUndoReview, reviewIsPending, undoReviewIsPending, updateNotes]);
+  ], []);
 
   const clearFilters = () => {
     setSearch("");
@@ -458,6 +353,7 @@ export function QualityControlDashboard() {
                 columnDefs={columnDefs}
                 defaultColDef={{ sortable: true, filter: true, resizable: true }}
                 getRowId={({ data }) => String(data.requirementId)}
+                onRowDoubleClicked={({ data }) => data && openItem(data)}
                 pagination
                 paginationPageSize={10}
                 paginationPageSizeSelector={[10, 25, 50]}
@@ -488,7 +384,7 @@ export function QualityControlDashboard() {
                       <Button variant="outline" nativeButton={!operation.hasDrawingPdf} render={operation.hasDrawingPdf ? <a href={`/api/operations/${operation.id}/files/drawing-pdf`} target="_blank" rel="noreferrer" /> : undefined} disabled={!operation.hasDrawingPdf}><FileText /> Drawing PDF</Button>
                       <Button variant="outline" nativeButton={!operation.onshapeUrl} render={operation.onshapeUrl ? <a href={operation.onshapeUrl} target="_blank" rel="noreferrer" /> : undefined} disabled={!operation.onshapeUrl}><ExternalLink /> Onshape source</Button>
                       <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
-                        {item.result === "pending" ? <><Button variant="destructive" onClick={() => mutateReview({ item, result: "failed" })} disabled={reviewIsPending || !item.operations.every((row) => row.status === "Complete")}><X /> Fail QC</Button><Button className="bg-emerald-600 hover:bg-emerald-700" onClick={() => mutateReview({ item, result: "passed" })} disabled={reviewIsPending || !item.operations.every((row) => row.status === "Complete")}>{reviewIsPending ? <LoaderCircle className="animate-spin" /> : <Check />} Pass QC</Button></> : item.result === "passed" ? <Button variant="outline" onClick={() => mutateUndoReview(item)} disabled={undoReviewIsPending}><Clock3 /> Undo QC pass</Button> : <p className="text-xs text-muted-foreground">Complete the rework to request QC again.</p>}
+                        {item.result === "pending" ? <><Button variant="destructive" onClick={() => mutateReview({ item, result: "failed", notes: draftNotes[item.requirementId] ?? item.notes })} disabled={reviewIsPending || !item.operations.every((row) => row.status === "Complete")}><X /> Fail QC</Button><Button className="bg-emerald-600 hover:bg-emerald-700" onClick={() => mutateReview({ item, result: "passed", notes: draftNotes[item.requirementId] ?? item.notes })} disabled={reviewIsPending || !item.operations.every((row) => row.status === "Complete")}>{reviewIsPending ? <LoaderCircle className="animate-spin" /> : <Check />} Pass QC</Button></> : item.result === "passed" ? <Button variant="outline" onClick={() => mutateUndoReview(item)} disabled={undoReviewIsPending}><Clock3 /> Undo QC pass</Button> : <p className="text-xs text-muted-foreground">Complete the rework to request QC again.</p>}
                       </div>
                     </div>
                   </article>
@@ -498,6 +394,78 @@ export function QualityControlDashboard() {
           </>
         )}
       </div>
+
+      <Sheet open={Boolean(selected)} onOpenChange={(open) => !open && setSelectedId(null)}>
+        <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
+          {selected && (() => {
+            const operation = selected.operations[0];
+            const ready = selected.operations.every((item) => item.status === "Complete");
+            return <>
+              <SheetHeader className="border-b p-6 pr-14">
+                <div className="mb-2 flex flex-wrap items-center gap-2">
+                  <ResultBadge result={selected.result} />
+                  <Badge variant="outline">Qty {operation.quantity}</Badge>
+                </div>
+                <SheetTitle className="text-2xl font-bold tracking-tight">{operation.partName}</SheetTitle>
+                <SheetDescription className="font-mono text-xs font-semibold text-primary">{operation.partNumber}</SheetDescription>
+              </SheetHeader>
+
+              <div className="space-y-6 p-6">
+                <section>
+                  <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Operations</h3>
+                  <div className="grid gap-2">
+                    {selected.operations.map((item) => <div key={item.id} className="flex items-center gap-3 rounded-xl border p-3"><Badge variant="outline">{item.operationNumber}</Badge><div className="min-w-0"><p className="truncate text-sm font-semibold">{item.machine}</p><p className="text-xs text-muted-foreground">{item.workType} · {item.status}</p></div></div>)}
+                  </div>
+                </section>
+
+                <section>
+                  <label className="mb-3 block text-xs font-bold uppercase tracking-[.14em] text-muted-foreground" htmlFor={`qc-review-notes-${selected.requirementId}`}>Inspection notes</label>
+                  <textarea
+                    id={`qc-review-notes-${selected.requirementId}`}
+                    value={draftNotes[selected.requirementId] ?? selected.notes}
+                    onChange={(event) => updateNotes(selected.requirementId, event.currentTarget.value)}
+                    disabled={selected.result !== "pending" || reviewIsPending}
+                    placeholder="Measurements, defects, or acceptance notes…"
+                    className="min-h-36 w-full resize-y rounded-xl border border-input bg-background px-4 py-3 text-sm leading-6 text-foreground caret-foreground outline-none disabled:opacity-70 focus:border-ring focus:ring-3 focus:ring-ring/50"
+                  />
+                  {selected.reviewedAt && <p className="mt-2 text-xs text-muted-foreground">Reviewed {formatDate(selected.reviewedAt)}{selected.reviewedBy ? ` by ${selected.reviewedBy}` : ""}</p>}
+                </section>
+
+                <section>
+                  <StorageLocationEditor
+                    requirementId={selected.requirementId}
+                    value={selected.storageLocation}
+                    updatedBy={selected.locationUpdatedBy}
+                    updatedAt={selected.locationUpdatedAt}
+                    canEdit
+                    allowOnRobot={canUseOnRobotLocation(selected.effectiveQcResult === "passed", operation.finishingComplete)}
+                  />
+                </section>
+
+                <section>
+                  <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Files & source</h3>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <Button variant="outline" className="h-11 justify-start" nativeButton={!operation.hasDrawingPdf} render={operation.hasDrawingPdf ? <a href={`/api/operations/${operation.id}/files/drawing-pdf`} target="_blank" rel="noreferrer" /> : undefined} disabled={!operation.hasDrawingPdf}><FileText /> Drawing PDF</Button>
+                    <Button variant="outline" className="h-11 justify-start" nativeButton={!operation.onshapeUrl} render={operation.onshapeUrl ? <a href={operation.onshapeUrl} target="_blank" rel="noreferrer" /> : undefined} disabled={!operation.onshapeUrl}><ExternalLink /> Onshape source</Button>
+                  </div>
+                </section>
+              </div>
+
+              <SheetFooter className="sticky bottom-0 border-t bg-card/95 p-4 backdrop-blur">
+                {selected.result === "pending" ? <>
+                  <Button size="lg" variant="destructive" className="h-11" onClick={() => mutateReview({ item: selected, result: "failed", notes: draftNotes[selected.requirementId] ?? selected.notes })} disabled={reviewIsPending || !ready}><X /> Fail QC</Button>
+                  <Button size="lg" className="h-11 bg-emerald-600 hover:bg-emerald-700" onClick={() => mutateReview({ item: selected, result: "passed", notes: draftNotes[selected.requirementId] ?? selected.notes })} disabled={reviewIsPending || !ready}>{reviewIsPending ? <LoaderCircle className="animate-spin" /> : <Check />} Pass QC</Button>
+                </> : selected.result === "passed" ? (
+                  <Button size="lg" variant="outline" className="h-11" onClick={() => mutateUndoReview(selected)} disabled={undoReviewIsPending}>{undoReviewIsPending ? <LoaderCircle className="animate-spin" /> : <Clock3 />} Undo QC pass</Button>
+                ) : (
+                  <div className="rounded-xl bg-rose-50 p-3 text-center text-sm font-medium text-rose-800">Complete the rework to request QC again.</div>
+                )}
+                <Button variant="outline" onClick={() => setSelectedId(null)}>Close</Button>
+              </SheetFooter>
+            </>;
+          })()}
+        </SheetContent>
+      </Sheet>
     </section>
   );
 }
