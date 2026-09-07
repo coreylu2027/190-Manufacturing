@@ -2,7 +2,7 @@
 
 import { ForceQcPicker } from "@/components/force-qc";
 
-import { themeQuartz, type ColDef } from "ag-grid-community";
+import { themeQuartz, type ColDef, type SuppressKeyboardEventParams } from "ag-grid-community";
 import { AgGridReact } from "ag-grid-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -18,7 +18,7 @@ import {
   SlidersHorizontal,
   X,
 } from "lucide-react";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { StorageLocationEditor } from "@/components/storage-location-editor";
@@ -61,10 +61,6 @@ const resultLabels: Record<QualityResult, string> = {
   passed: "QC passed",
   failed: "QC failed",
 };
-
-interface QualityControlGridRow extends QualityControlItem {
-  draftNotes: string;
-}
 
 async function fetchQualityControl(): Promise<AdminResponse> {
   const response = await fetch("/api/admin", { cache: "no-store" });
@@ -143,17 +139,46 @@ function ResultCell({ data }: { data?: QualityControlItem }) {
   );
 }
 
-function NotesCell({ data, onChange }: { data?: QualityControlGridRow; onChange: (requirementId: number, value: string) => void }) {
+function suppressInteractiveKeyboardEvent({ event }: SuppressKeyboardEventParams<QualityControlItem>) {
+  return event.target instanceof Element && Boolean(event.target.closest("a, button, input, select, textarea"));
+}
+
+function NotesEditor({
+  data,
+  id,
+  className,
+  onChange,
+}: {
+  data: QualityControlItem;
+  id?: string;
+  className?: string;
+  onChange: (requirementId: number, value: string) => void;
+}) {
+  const [value, setValue] = useState(data.notes);
+
+  return <textarea
+    id={id}
+    aria-label={`Inspection notes for ${data.operations[0].partNumber}`}
+    value={value}
+    onChange={(event) => {
+      setValue(event.currentTarget.value);
+      onChange(data.requirementId, event.currentTarget.value);
+    }}
+    onKeyDownCapture={(event) => event.stopPropagation()}
+    placeholder="Measurements, defects, or acceptance notes…"
+    className={cn("w-full rounded-lg border border-input bg-background px-3 py-2 text-foreground caret-foreground outline-none focus:border-ring focus:ring-3 focus:ring-ring/50", className)}
+  />;
+}
+
+function NotesCell({ data, onChange }: { data?: QualityControlItem; onChange: (requirementId: number, value: string) => void }) {
   if (!data) return null;
   return (
     <div className="flex h-full items-center py-2">
-      <textarea
-        aria-label={`Inspection notes for ${data.operations[0].partNumber}`}
-        value={data.draftNotes}
-        onChange={(event) => onChange(data.requirementId, event.target.value)}
-        onKeyDown={(event) => event.stopPropagation()}
-        placeholder="Measurements, defects, or acceptance notes…"
-        className="h-[104px] w-full resize-none rounded-lg border border-input bg-background px-3 py-2 text-xs leading-5 outline-none focus:border-ring focus:ring-3 focus:ring-ring/50"
+      <NotesEditor
+        key={`${data.requirementId}:${data.notes}`}
+        data={data}
+        onChange={onChange}
+        className="h-[104px] resize-none text-xs leading-5"
       />
     </div>
   );
@@ -219,7 +244,8 @@ function ActionCell({
 export function QualityControlDashboard() {
   const queryClient = useQueryClient();
   const query = useQuery({ queryKey: ["qc"], queryFn: fetchQualityControl });
-  const [notes, setNotes] = useState<Record<number, string>>({});
+  const notes = useRef<Record<number, string>>({});
+  const [draftNotes, setDraftNotes] = useState<Record<number, string>>({});
   const [search, setSearch] = useState("");
   const [result, setResult] = useState<"all" | QualityResult>("all");
   const [machine, setMachine] = useState("all");
@@ -232,7 +258,7 @@ export function QualityControlDashboard() {
   };
 
   const reviewMutation = useMutation({
-    mutationFn: ({ item, result: nextResult }: { item: QualityControlItem; result: "passed" | "failed" }) => submitReview(item, nextResult, notes[item.requirementId] ?? item.notes),
+    mutationFn: ({ item, result: nextResult }: { item: QualityControlItem; result: "passed" | "failed" }) => submitReview(item, nextResult, notes.current[item.requirementId] ?? item.notes),
     onSuccess: (_data, variables) => {
       toast.success(variables.result === "passed" ? "Quality check passed" : "Operation returned for rework", variables.result === "passed" ? { action: { label: "Undo", onClick: () => undoReviewMutation.mutate(variables.item) } } : undefined);
       invalidateManufacturing();
@@ -253,10 +279,7 @@ export function QualityControlDashboard() {
   const mutateUndoReview = undoReviewMutation.mutate;
   const undoReviewIsPending = undoReviewMutation.isPending;
 
-  const items = useMemo<QualityControlGridRow[]>(() => (query.data?.qualityControl ?? []).map((item) => ({
-    ...item,
-    draftNotes: notes[item.requirementId] ?? item.notes,
-  })), [notes, query.data?.qualityControl]);
+  const items = useMemo(() => query.data?.qualityControl ?? [], [query.data?.qualityControl]);
   const machines = useMemo(() => [...new Set(items.flatMap((item) => item.operations.map((operation) => operation.machine)))].sort(), [items]);
   const locations = useMemo(() => [...new Set(items.flatMap((item) => item.storageLocation ? [item.storageLocation] : []))].sort(), [items]);
   const filtered = useMemo(() => {
@@ -272,7 +295,6 @@ export function QualityControlDashboard() {
         item.operations[0].documentName,
         item.storageLocation,
         item.notes,
-        item.draftNotes,
         item.reviewedBy,
         item.result,
         resultLabels[item.result],
@@ -290,9 +312,10 @@ export function QualityControlDashboard() {
   }), [items]);
 
   const updateNotes = useCallback((requirementId: number, value: string) => {
-    setNotes((current) => ({ ...current, [requirementId]: value }));
+    notes.current[requirementId] = value;
+    setDraftNotes((current) => ({ ...current, [requirementId]: value }));
   }, []);
-  const columnDefs = useMemo<ColDef<QualityControlGridRow>[]>(() => [
+  const columnDefs = useMemo<ColDef<QualityControlItem>[]>(() => [
     {
       colId: "part",
       headerName: "PART",
@@ -316,10 +339,30 @@ export function QualityControlDashboard() {
       minWidth: 260,
       flex: 1,
       cellRenderer: NotesCell,
-      cellRendererParams: { onChange: updateNotes },
+      cellRendererParams: {
+        onChange: updateNotes,
+        suppressMouseEventHandling: () => true,
+      },
+      suppressKeyboardEvent: suppressInteractiveKeyboardEvent,
     },
-    { field: "storageLocation", headerName: "LOCATION", minWidth: 260, cellRenderer: LocationCell, valueFormatter: ({ value }) => value || "Not recorded" },
-    { headerName: "FILES", width: 158, sortable: false, filter: false, cellRenderer: SourceCell },
+    {
+      field: "storageLocation",
+      headerName: "LOCATION",
+      minWidth: 260,
+      cellRenderer: LocationCell,
+      cellRendererParams: { suppressMouseEventHandling: () => true },
+      suppressKeyboardEvent: suppressInteractiveKeyboardEvent,
+      valueFormatter: ({ value }) => value || "Not recorded",
+    },
+    {
+      headerName: "FILES",
+      width: 158,
+      sortable: false,
+      filter: false,
+      cellRenderer: SourceCell,
+      cellRendererParams: { suppressMouseEventHandling: () => true },
+      suppressKeyboardEvent: suppressInteractiveKeyboardEvent,
+    },
     {
       headerName: "ACTIONS",
       width: 166,
@@ -333,7 +376,9 @@ export function QualityControlDashboard() {
         undoPending: undoReviewIsPending,
         onReview: (item: QualityControlItem, nextResult: "passed" | "failed") => mutateReview({ item, result: nextResult }),
         onUndo: (item: QualityControlItem) => mutateUndoReview(item),
+        suppressMouseEventHandling: () => true,
       },
+      suppressKeyboardEvent: suppressInteractiveKeyboardEvent,
     },
   ], [mutateReview, mutateUndoReview, reviewIsPending, undoReviewIsPending, updateNotes]);
 
@@ -407,7 +452,7 @@ export function QualityControlDashboard() {
         ) : (
           <>
             <div className="hidden h-[min(66vh,760px)] min-h-[500px] md:block">
-              <AgGridReact<QualityControlGridRow>
+              <AgGridReact<QualityControlItem>
                 theme={gridTheme}
                 rowData={filtered}
                 columnDefs={columnDefs}
@@ -430,7 +475,14 @@ export function QualityControlDashboard() {
                     </div>
                     <div className="mt-3 flex flex-wrap gap-1.5">{item.operations.map((row) => <Badge key={row.id} variant="outline">{row.operationNumber} · {row.machine}</Badge>)}</div>
                     <label className="mt-4 block text-xs font-semibold text-muted-foreground" htmlFor={`qc-notes-${item.requirementId}`}>Inspection notes</label>
-                    <textarea id={`qc-notes-${item.requirementId}`} value={item.draftNotes} onChange={(event) => updateNotes(item.requirementId, event.target.value)} placeholder="Measurements, defects, or acceptance notes…" className="mt-1.5 min-h-20 w-full resize-y rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring focus:ring-3 focus:ring-ring/50" />
+                    <textarea
+                      id={`qc-notes-${item.requirementId}`}
+                      aria-label={`Inspection notes for ${item.operations[0].partNumber}`}
+                      value={draftNotes[item.requirementId] ?? item.notes}
+                      onChange={(event) => updateNotes(item.requirementId, event.currentTarget.value)}
+                      placeholder="Measurements, defects, or acceptance notes…"
+                      className="mt-1.5 min-h-20 w-full resize-y rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground caret-foreground outline-none focus:border-ring focus:ring-3 focus:ring-ring/50"
+                    />
                     <div className="mt-3"><StorageLocationEditor requirementId={item.requirementId} value={item.storageLocation} updatedBy={item.locationUpdatedBy} updatedAt={item.locationUpdatedAt} canEdit allowOnRobot={canUseOnRobotLocation(item.effectiveQcResult === "passed", operation.finishingComplete)} /></div>
                     <div className="mt-3 flex flex-wrap items-center gap-2">
                       <Button variant="outline" nativeButton={!operation.hasDrawingPdf} render={operation.hasDrawingPdf ? <a href={`/api/operations/${operation.id}/files/drawing-pdf`} target="_blank" rel="noreferrer" /> : undefined} disabled={!operation.hasDrawingPdf}><FileText /> Drawing PDF</Button>
