@@ -66,7 +66,7 @@ function formatDate(value: string | null) {
 function AccountCell({ data }: { data?: AdminUserGridRow }) {
   if (!data) return null;
   return (
-    <div className="flex h-full min-w-0 items-center gap-3">
+    <div className="flex h-full min-w-0 items-center gap-3 leading-normal">
       <div className={cn("grid size-9 shrink-0 place-items-center rounded-full", data.approved ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-800")}>
         <UserCheck className="size-4" />
       </div>
@@ -174,7 +174,6 @@ export function AdminDashboard() {
       cellRenderer: AccountCell,
     },
     { field: "approved", headerName: "ACCESS", width: 130, cellRenderer: ApprovalCell },
-    { field: "role", headerName: "CURRENT ROLE", width: 145, valueFormatter: ({ value }) => value === "admin" ? "Administrator" : "Machinist" },
     { field: "draftRole", headerName: "ASSIGN ROLE", width: 190, cellRenderer: RoleCell, cellRendererParams: { onChange: updateRoleDraft } },
     { field: "createdAt", headerName: "JOINED", minWidth: 165, cellRenderer: DateCell },
     { field: "lastSeenAt", headerName: "LAST OPENED", minWidth: 165, cellRenderer: DateCell, valueFormatter: ({ value }) => value || "Never" },
@@ -232,11 +231,11 @@ export function AdminDashboard() {
               <Input value={search} onChange={(event) => setSearch(event.target.value)} className="h-9 bg-card pl-9" placeholder="Search name, email, role, access…" />
             </div>
             <Select value={approval} onValueChange={(value) => setApproval((value ?? "all") as ApprovalFilter)}>
-              <SelectTrigger className="h-9 w-full bg-card xl:w-44"><SlidersHorizontal className="text-muted-foreground" /><SelectValue placeholder="All access" /></SelectTrigger>
+              <SelectTrigger className="h-9 w-full bg-card xl:w-44"><SlidersHorizontal className="text-muted-foreground" /><SelectValue>{approval === "all" ? "All access" : approval === "approved" ? "Approved" : "Pending"}</SelectValue></SelectTrigger>
               <SelectContent><SelectItem value="all">All access</SelectItem><SelectItem value="pending">Pending</SelectItem><SelectItem value="approved">Approved</SelectItem></SelectContent>
             </Select>
             <Select value={roleFilter} onValueChange={(value) => setRoleFilter((value ?? "all") as "all" | UserRole)}>
-              <SelectTrigger className="h-9 w-full bg-card xl:w-44"><ShieldCheck className="text-muted-foreground" /><SelectValue placeholder="All roles" /></SelectTrigger>
+              <SelectTrigger className="h-9 w-full bg-card xl:w-44"><ShieldCheck className="text-muted-foreground" /><SelectValue>{roleFilter === "all" ? "All roles" : roleFilter === "admin" ? "Administrator" : "Machinist"}</SelectValue></SelectTrigger>
               <SelectContent><SelectItem value="all">All roles</SelectItem><SelectItem value="machinist">Machinist</SelectItem><SelectItem value="admin">Administrator</SelectItem></SelectContent>
             </Select>
             <div className="whitespace-nowrap text-xs text-muted-foreground">{filteredUsers.length} of {users.length} shown</div>
@@ -259,7 +258,6 @@ export function AdminDashboard() {
                 rowData={filteredUsers}
                 columnDefs={columnDefs}
                 defaultColDef={{ sortable: true, filter: true, resizable: true }}
-                initialState={{ sort: { sortModel: [{ colId: "approved", sort: "asc" }, { colId: "account", sort: "asc" }] } }}
                 getRowId={({ data }) => data.id}
                 pagination
                 paginationPageSize={25}
