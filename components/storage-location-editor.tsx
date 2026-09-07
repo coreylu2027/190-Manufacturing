@@ -17,6 +17,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ROBOT_LOCATION, STORAGE_LOCATION_GROUPS, type StorageLocation } from "@/lib/storage-locations";
+import { cn } from "@/lib/utils";
 
 const NO_LOCATION = "__not_recorded__";
 
@@ -76,6 +77,7 @@ export function StorageLocationEditor({
   updatedAt,
   canEdit,
   allowOnRobot = false,
+  compact = false,
 }: {
   requirementId: number;
   value: StorageLocation | null;
@@ -83,6 +85,7 @@ export function StorageLocationEditor({
   updatedAt: string | null;
   canEdit: boolean;
   allowOnRobot?: boolean;
+  compact?: boolean;
 }) {
   const queryClient = useQueryClient();
   const [draftOverride, setDraftOverride] = useState<StorageLocation | null | undefined>(undefined);
@@ -109,8 +112,8 @@ export function StorageLocationEditor({
   });
 
   return (
-    <div className="space-y-2 rounded-xl border bg-muted/20 p-4">
-      <div>
+    <div className={cn(compact ? "flex h-full items-center gap-2" : "space-y-2 rounded-xl border bg-muted/20 p-4")}>
+      {!compact && <div>
         <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Part location</p>
         <p className="mt-1 text-sm font-semibold">{value ?? "Not recorded"}</p>
         {updatedAt && (
@@ -118,10 +121,10 @@ export function StorageLocationEditor({
             Updated {formatLocationDate(updatedAt)}{updatedBy ? ` by ${updatedBy}` : ""}
           </p>
         )}
-      </div>
+      </div>}
       {canEdit && (
-        <div className="flex items-center gap-2">
-          <StorageLocationSelect value={draft} onChange={setDraftOverride} disabled={mutation.isPending} allowOnRobot={allowOnRobot} />
+        <div className={cn("flex items-center gap-2", compact && "min-w-0 flex-1")}>
+          <StorageLocationSelect value={draft} onChange={setDraftOverride} disabled={mutation.isPending} allowOnRobot={allowOnRobot} className={compact ? "h-9 min-w-0 flex-1 bg-background" : undefined} />
           <Button
             size="sm"
             variant="outline"
@@ -129,7 +132,7 @@ export function StorageLocationEditor({
             onClick={() => mutation.mutate()}
           >
             {mutation.isPending ? <LoaderCircle className="animate-spin" /> : null}
-            Save
+            {compact ? <span className="sr-only sm:not-sr-only">Save</span> : "Save"}
           </Button>
         </div>
       )}
