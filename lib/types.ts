@@ -95,6 +95,7 @@ export interface ManufacturingOperation extends QualityLocationFields {
 
 export interface OperationsResponse {
   operations: ManufacturingOperation[];
+  dataVersion?: string;
   syncedAt: string;
   user: { id: string; name: string; email: string | null; role: UserRole; approved: boolean } | null;
 }
@@ -125,6 +126,7 @@ export interface FabricationJob extends QualityLocationFields {
 
 export interface FabricationResponse {
   jobs: FabricationJob[];
+  dataVersion?: string;
   syncedAt: string;
   user: OperationsResponse["user"];
 }

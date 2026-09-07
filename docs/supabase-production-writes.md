@@ -70,19 +70,32 @@ For a new Supabase environment:
    a private `manufacturing:changes` Broadcast topic for approved users. The
    payload is only an invalidation signal; browsers continue reading the
    projected data through authenticated application routes.
-8. Confirm the RPC, table privilege, Realtime policy, and trigger checks.
-9. Enable the database gate:
+8. Apply `supabase/production/20260906_manufacturing_shared_cache.sql`. This
+   adds a server-only data-version RPC, changes invalidation to one Broadcast
+   per changed table statement, and supplies the common key used by the Next.js
+   Data Cache. Connected browsers still receive fresh responses, but the full
+   manufacturing projection is loaded from Supabase only once per database
+   transaction version and shared across Vercel requests.
+9. Confirm the RPC, table privilege, Realtime policy, and trigger checks.
+10. Enable the database gate:
 
    ```sql
    update manufacturing.write_control set enabled = true;
    ```
 
-10. Deploy the application with the Supabase URL, publishable key, secret key,
+11. Deploy the application with the Supabase URL, publishable key, secret key,
    and bootstrap administrator list. There are no backend source-selection flags.
 
 For an existing normalized installation, apply the new numbered part-location
 migration and the part-location production wrapper, in that order, before
-applying the Realtime production script and deploying this code.
+applying the Realtime and shared-cache production scripts and deploying this
+code. If Realtime is already installed, apply only the shared-cache script.
+
+The browser does not poll when Realtime is unavailable. It shows `Manual
+refresh` and retains the explicit refresh button, avoiding a full request every
+10 seconds on disconnected tabs. The shared cache is versioned by a private
+database transaction identifier; authentication and user-specific response
+fields remain outside the cache.
 
 After Supabase accepts its first production mutation, rollback must preserve the
 Supabase database as the authority. Disabling the write gate safely stops new

@@ -49,3 +49,4 @@ create table frc190_baserow_stage.snapshots (id uuid primary key);
 \ir ../../supabase/production/20260905_part_locations.sql
 \ir ../../supabase/production/20260905_manufacturing_attachments.sql
 \ir ../../supabase/production/20260906_manufacturing_realtime.sql
+\ir ../../supabase/production/20260906_manufacturing_shared_cache.sql

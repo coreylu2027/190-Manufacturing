@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { getAdminActor, isBootstrapAdminEmail } from "@/lib/auth";
-import { getOperations, getRetractedQualityReviewIds } from "@/lib/manufacturing";
+import { getCurrentManufacturingSnapshot } from "@/lib/manufacturing/cache";
 import { projectQualityControl, type QualityReviewRow } from "@/lib/quality-control";
 import { isShopName } from "@/lib/profile-name";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -32,17 +32,14 @@ export async function GET() {
   }
 
   try {
-    const [{ data: authData, error: authError }, { data: profileData, error: profileError }, { data: reviewData, error: reviewError }, operationData, retractedIds] = await Promise.all([
+    const [{ data: authData, error: authError }, { data: profileData, error: profileError }, manufacturingData] = await Promise.all([
       admin.auth.admin.listUsers({ page: 1, perPage: 200 }),
       admin.from("profiles").select("id, display_name, role, approved, last_seen_at"),
-      admin.from("quality_control").select("id, production_requirement_id, operation_id, result, notes, reviewed_by, reviewed_at, storage_location, location_updated_by, location_updated_at"),
-      getOperations(),
-      getRetractedQualityReviewIds(),
+      getCurrentManufacturingSnapshot(),
     ]);
 
     if (authError) throw authError;
     if (profileError) throw profileError;
-    if (reviewError) throw reviewError;
 
     const profiles = new Map((profileData as ProfileRow[]).map((profile) => [profile.id, profile]));
     const users: AdminUserSummary[] = authData.users.map((user) => {
@@ -62,9 +59,9 @@ export async function GET() {
     }).sort((a, b) => Number(a.approved) - Number(b.approved) || a.name.localeCompare(b.name));
 
     const qualityControl = projectQualityControl(
-      operationData.operations,
-      reviewData as QualityReviewRow[],
-      retractedIds,
+      manufacturingData.snapshot.operations,
+      manufacturingData.snapshot.qualityReviews as QualityReviewRow[],
+      manufacturingData.snapshot.retractedQualityReviewIds,
       users.map((user) => ({ id: user.id, display_name: user.name })),
     );
 

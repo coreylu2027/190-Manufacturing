@@ -225,21 +225,32 @@ begin
     'public.manufacturing_commit(uuid,uuid,text,text,jsonb,jsonb,jsonb)','EXECUTE')
     or not has_function_privilege('service_role',
       'public.manufacturing_commit_with_locations(uuid,uuid,text,text,jsonb,jsonb,jsonb)','EXECUTE')
+    or not has_function_privilege('service_role',
+      'public.manufacturing_data_version()','EXECUTE')
     or has_table_privilege('service_role','manufacturing.operations','UPDATE') then
     raise exception 'Service-role write boundary is incorrect';
+  end if;
+  if has_function_privilege('anon', 'public.manufacturing_data_version()','EXECUTE')
+    or has_function_privilege('authenticated', 'public.manufacturing_data_version()','EXECUTE')
+    or has_table_privilege('service_role','manufacturing.data_version','SELECT') then
+    raise exception 'Manufacturing cache version boundary is incorrect';
+  end if;
+  if public.manufacturing_data_version() !~ '^\d+$' then
+    raise exception 'Manufacturing data version is invalid';
   end if;
   if not exists (
     select 1 from realtime.messages
     where topic = 'manufacturing:changes'
       and event = 'changed'
-      and payload = '{}'::jsonb
+      and payload->>'version' = public.manufacturing_data_version()
       and private
   ) then
-    raise exception 'Manufacturing changes did not emit a private generic broadcast';
+    raise exception 'Manufacturing changes did not emit a private version broadcast';
   end if;
   if (select count(*) from pg_trigger
       where tgname in ('broadcast_manufacturing_change', 'broadcast_manufacturing_profile_change')
-        and not tgisinternal) <> 10 then
+        and not tgisinternal
+        and (tgtype & 1) = 0) <> 10 then
     raise exception 'Manufacturing Realtime trigger coverage is incomplete';
   end if;
 end;

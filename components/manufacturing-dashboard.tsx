@@ -112,7 +112,6 @@ type ManufacturingRealtimeStatus = "connecting" | "subscribed" | "disconnected";
 
 const MANUFACTURING_QUERY_KEYS = ["operations", "fabrication", "qc", "admin"] as const;
 const REALTIME_REFRESH_DEBOUNCE_MS = 300;
-const REALTIME_FALLBACK_POLL_MS = 10_000;
 
 interface ProductionRequirement {
   key: string;
@@ -769,12 +768,6 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
   }, [query.data?.user?.id, refreshManufacturingData]);
 
   useEffect(() => {
-    if (realtimeStatus === "subscribed") return;
-    const interval = setInterval(refreshManufacturingData, REALTIME_FALLBACK_POLL_MS);
-    return () => clearInterval(interval);
-  }, [realtimeStatus, refreshManufacturingData]);
-
-  useEffect(() => {
     if (query.error instanceof Error && query.error.message === "AUTH_REQUIRED") router.replace("/login");
     if (query.error instanceof Error && query.error.message === "APPROVAL_REQUIRED") router.replace("/pending");
   }, [query.error, router]);
@@ -1193,10 +1186,10 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                   ? "border-emerald-200 bg-emerald-50 text-emerald-800"
                   : "border-amber-200 bg-amber-50 text-amber-800",
               )}
-              title={realtimeStatus === "subscribed" ? "Changes refresh automatically" : "Realtime unavailable; refreshing every 10 seconds"}
+              title={realtimeStatus === "subscribed" ? "Changes refresh automatically" : "Realtime unavailable; use the refresh button"}
             >
               <Cloud className="size-3.5" />
-              {realtimeStatus === "subscribed" ? "Live updates" : realtimeStatus === "connecting" ? "Connecting" : "10s refresh"}
+              {realtimeStatus === "subscribed" ? "Live updates" : realtimeStatus === "connecting" ? "Connecting" : "Manual refresh"}
             </div>
             <Button
               variant="ghost"

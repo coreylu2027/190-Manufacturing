@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { getAppUser } from "@/lib/auth";
-import { getOperations } from "@/lib/manufacturing";
+import { getCurrentManufacturingSnapshot } from "@/lib/manufacturing/cache";
 import { ManufacturingFileError, storedManufacturingFileResponse } from "@/lib/manufacturing/files";
 
 export const dynamic = "force-dynamic";
@@ -17,7 +17,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
   if (kind !== "drawing-pdf" && kind !== "step") return NextResponse.json({ error: "Invalid file type" }, { status: 400 });
 
   try {
-    const { operations } = await getOperations();
+    const { snapshot: { operations } } = await getCurrentManufacturingSnapshot();
     const operation = operations.find((item) => item.id === operationId);
     if (!operation) return NextResponse.json({ error: "Operation not found" }, { status: 404 });
 

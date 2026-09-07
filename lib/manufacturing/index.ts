@@ -23,6 +23,14 @@ export async function getFabricationJobs() {
   return reader().getFabricationJobs();
 }
 
+export async function getManufacturingDataVersion() {
+  return reader().readDataVersion();
+}
+
+export async function getManufacturingSnapshot() {
+  return reader().readSnapshot();
+}
+
 export async function applyQuantityAction(id: number, action: OperationQuantityAction, quantity: number, actor: Actor, handoff?: { programPath?: string; notes?: string }) {
   return writer().applyQuantityAction(id, action, quantity, actor, handoff);
 }

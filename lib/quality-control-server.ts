@@ -5,7 +5,7 @@ import { qualityMetadataByRequirement, type QualityProfileRow, type QualityRevie
 import { createAdminClient } from "./supabase/admin";
 import type { ManufacturingOperation } from "./types";
 
-export async function loadQualityMetadata(operations: ManufacturingOperation[]) {
+export async function loadQualitySourceData(operations: ManufacturingOperation[]) {
   const admin = createAdminClient();
   if (!admin) throw new Error("Supabase administration is not configured");
 
@@ -19,10 +19,20 @@ export async function loadQualityMetadata(operations: ManufacturingOperation[]) 
   if (reviewError) throw reviewError;
   if (profileError) throw profileError;
 
-  return qualityMetadataByRequirement(
+  const metadata = qualityMetadataByRequirement(
     operations,
     reviews as QualityReviewRow[],
     retractedIds,
     profiles as QualityProfileRow[],
   ).metadata;
+  return {
+    metadata,
+    reviews: reviews as QualityReviewRow[],
+    profiles: profiles as QualityProfileRow[],
+    retractedIds,
+  };
+}
+
+export async function loadQualityMetadata(operations: ManufacturingOperation[]) {
+  return (await loadQualitySourceData(operations)).metadata;
 }

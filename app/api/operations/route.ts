@@ -1,9 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { getAppUser } from "@/lib/auth";
-import { getOperations } from "@/lib/manufacturing";
-import { enrichOperationsWithQuality } from "@/lib/quality-control";
-import { loadQualityMetadata } from "@/lib/quality-control-server";
+import { getCurrentManufacturingSnapshot } from "@/lib/manufacturing/cache";
 
 export const dynamic = "force-dynamic";
 
@@ -17,11 +15,10 @@ export async function GET() {
   }
 
   try {
-    const data = await getOperations();
-    const quality = await loadQualityMetadata(data.operations);
+    const { version, snapshot } = await getCurrentManufacturingSnapshot();
     return NextResponse.json({
-      ...data,
-      operations: enrichOperationsWithQuality(data.operations, quality),
+      operations: snapshot.operations,
+      dataVersion: version,
       syncedAt: new Date().toISOString(),
       user,
     });

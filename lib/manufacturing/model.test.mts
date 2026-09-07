@@ -38,6 +38,17 @@ test("Supabase reader validates the private attachment catalog",async()=>{
  const invalid=createSupabaseManufacturingAdapter({url:"https://example.test",serviceKey:"test",fetch:async()=>Response.json([{part_id:3,kind:"drawing-pdf",position:-1,original_name:"bad.pdf"}])});
  await assert.rejects(invalid.readAttachments(),/Invalid manufacturing attachment manifest row/);
 });
+test("Supabase reader accepts only an opaque numeric manufacturing version",async()=>{
+ const adapter=createSupabaseManufacturingAdapter({url:"https://example.test",serviceKey:"sb_secret_test",fetch:async(input,init)=>{
+  assert.match(String(input),/manufacturing_data_version$/);
+  assert.equal(init?.method,"POST");
+  assert.equal(init?.cache,"no-store");
+  return Response.json("123456");
+ }});
+ assert.equal(await adapter.readDataVersion(),"123456");
+ const invalid=createSupabaseManufacturingAdapter({url:"https://example.test",serviceKey:"test",fetch:async()=>Response.json(123456)});
+ await assert.rejects(invalid.readDataVersion(),/Invalid manufacturing data version/);
+});
 test("parity reports meaningful differences without including private values",()=>{
  const report=compareRows([{id:1,notes:"secret-a"}],[{id:1,notes:"secret-b"}],"id");
  assert.equal(report.clean,false);assert.deepEqual(report.fields,{"1":["notes"]});

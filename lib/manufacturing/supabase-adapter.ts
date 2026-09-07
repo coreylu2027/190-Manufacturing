@@ -61,6 +61,22 @@ export function createSupabaseManufacturingAdapter(config: AdapterConfig) {
       return { partId, position, kind, originalName };
     });
   }
+  async function readDataVersion(): Promise<string> {
+    const response = await request(`${baseUrl}/rest/v1/rpc/manufacturing_data_version`, {
+      method: "POST",
+      headers: { ...headers, "Content-Type": "application/json" },
+      body: "{}",
+      cache: "no-store",
+      redirect: "error",
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) throw new Error(`Supabase manufacturing version read failed (${response.status})`);
+    const data = await response.json() as unknown;
+    if (typeof data !== "string" || !/^\d+$/.test(data)) {
+      throw new Error("Invalid manufacturing data version");
+    }
+    return data;
+  }
   async function readRows(): Promise<ManufacturingRows> {
     const entries = await Promise.all(ENTITIES.map(async entity => [entity.name,
       (await readEntity(entity.name)).map(row => {
@@ -75,15 +91,22 @@ export function createSupabaseManufacturingAdapter(config: AdapterConfig) {
         .sort((a,b)=>Number(a.order??a.id)-Number(b.order??b.id) || a.id-b.id)] as const));
     return Object.fromEntries(entries);
   }
+  async function readSnapshot() {
+    const [rows, attachments] = await Promise.all([readRows(), readAttachments()]);
+    return {
+      operations: projectOperations(rows.operations, rows.requirements, rows.parts, attachments),
+      jobs: projectFinishing(rows.finishing, rows.requirements, attachments, rows.operations),
+    };
+  }
   return {
-    readEntity, readAttachments, readRows,
+    readEntity, readAttachments, readDataVersion, readRows, readSnapshot,
     async getOperations() {
-      const [rows, attachments] = await Promise.all([readRows(), readAttachments()]);
-      return { operations: projectOperations(rows.operations, rows.requirements, rows.parts, attachments) };
+      const { operations } = await readSnapshot();
+      return { operations };
     },
     async getFabricationJobs() {
-      const [rows, attachments] = await Promise.all([readRows(), readAttachments()]);
-      return { jobs: projectFinishing(rows.finishing, rows.requirements, attachments, rows.operations) };
+      const { jobs } = await readSnapshot();
+      return { jobs };
     }
   };
 }
