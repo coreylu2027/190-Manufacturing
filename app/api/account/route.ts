@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { getAppUser } from "@/lib/auth";
-import { renameMachinistAllocations } from "@/lib/baserow";
+import { renameMachinistAllocations } from "@/lib/manufacturing";
 import { formatShopName, shopNameSchema } from "@/lib/profile-name";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";

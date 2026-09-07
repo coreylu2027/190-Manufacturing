@@ -1,0 +1,147 @@
+name: Sync Onshape poot_horse BOM to Baserow
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Resolve the released BOM without calling Baserow
+        required: false
+        default: false
+        type: boolean
+      onshape_doc_url:
+        description: Optional master Main URL when use_subassembly_list is false
+        required: false
+        type: string
+      use_subassembly_list:
+        description: Sync the configured manufacturing-root URL list instead of discovering from Main
+        required: false
+        default: true
+        type: boolean
+      subassembly_urls:
+        description: Optional comma- or newline-separated manufacturing-root URLs for a manual list-mode run
+        required: false
+        type: string
+      sync_cad_files:
+        description: Export and upload drawing PDFs and part STEP files
+        required: false
+        default: true
+        type: boolean
+  repository_dispatch:
+    types: [bom_sync_poot_horse_baserow]
+
+concurrency:
+  group: >-
+    onshape-baserow-poot_horse-${{ github.event_name == 'workflow_dispatch' &&
+      inputs.dry_run && 'dry-run' || 'production' }}
+  cancel-in-progress: true
+
+env:
+  DEFAULT_ONSHAPE_SUBASSEMBLY_URLS: |-
+    https://frc190.onshape.com/documents/0b93a945f55626752d97aece/w/2702276d5f65f473e96092c1/e/29cefa513e5d1d9883644c29
+    https://frc190.onshape.com/documents/e6a03477fcf74dae02a191b5/w/af849f9a5aae8b198e57dc0d/e/e8cdd43e3043c566dad73817
+    https://frc190.onshape.com/documents/a954232c9b6c463860aa96c4/w/3b807be2adbfbd1312b0fbad/e/8e13cbfb549cc3b786646dd1
+    https://frc190.onshape.com/documents/0a0e6617e29d1bda5890611e/w/04004edc4b82879957dffa36/e/2ce7e421f9400768aa94f692
+    https://frc190.onshape.com/documents/f49c226c2be777de53eff8eb/w/d16ff967a07bf58bc0cd31d4/e/501913e228bb9741e25cd7a0
+    https://frc190.onshape.com/documents/61a258c0f66147f28e3c7f0a/w/01c1a403cf0a5f43a05ba283/e/3e3880ecde30502433dd9a7c
+    https://frc190.onshape.com/documents/e0e5730aacdbb8063c5716e8/w/bbf4b4765261ae88cc30b198/e/81e8a72bfca21fa77a8e2aea
+
+jobs:
+  sync:
+    if: >-
+      ${{ github.event_name != 'workflow_dispatch' ||
+          (!inputs.dry_run && github.ref_name == github.event.repository.default_branch) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pre-2027-onshape_ci/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r pre-2027-onshape_ci/requirements.txt
+
+      - name: Test Onshape to Baserow sync
+        run: python -m unittest pre-2027-onshape_ci/test_onshape_to_baserow.py
+
+      - name: Sync BOM to Baserow
+        env:
+          ONSHAPE_ACCESS_KEY: ${{ secrets.ONSHAPE_ACCESS_KEY }}
+          ONSHAPE_SECRET_KEY: ${{ secrets.ONSHAPE_SECRET_KEY }}
+          ONSHAPE_DOC_URL: >-
+            ${{ github.event_name == 'workflow_dispatch' &&
+                inputs.onshape_doc_url || secrets.ONSHAPE_DOC_URL_EPSILON }}
+          PARTNUMBER_PREFIXES: "P-190B-26"
+          USE_SUBASSEMBLY_LIST: >-
+            ${{ github.event_name != 'workflow_dispatch' || inputs.use_subassembly_list }}
+          ONSHAPE_SUBASSEMBLY_URLS: >-
+            ${{ github.event_name == 'workflow_dispatch' && inputs.subassembly_urls ||
+                env.DEFAULT_ONSHAPE_SUBASSEMBLY_URLS }}
+          SYNC_CAD_FILES: >-
+            ${{ github.event_name != 'workflow_dispatch' || inputs.sync_cad_files }}
+
+          BASEROW_API_URL: ${{ vars.BASEROW_API_URL || 'https://api.baserow.io/api' }}
+          BASEROW_TOKEN: ${{ secrets.BASEROW_TOKEN }}
+          BASEROW_SYNC_RUNS_TABLE_ID: "1119639"
+          BASEROW_PARTS_TABLE_ID: "1119641"
+          BASEROW_REQUIREMENTS_TABLE_ID: "1119642"
+          BASEROW_OPERATIONS_TABLE_ID: "1169282"
+          BASEROW_FINISHING_TABLE_ID: "1170619"
+          BASEROW_STORAGE_LOCATIONS_TABLE_ID: "1119643"
+          BASEROW_ASSEMBLIES_TABLE_ID: "1119645"
+          ONSHAPE_EXPORT_TIMEOUT_SECONDS: "600"
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python pre-2027-onshape_ci/OnshapeToBaserow.py
+
+  dry-run:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout selected branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pre-2027-onshape_ci/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r pre-2027-onshape_ci/requirements.txt
+
+      - name: Test Onshape to Baserow sync
+        run: python -m unittest pre-2027-onshape_ci/test_onshape_to_baserow.py
+
+      - name: Resolve released BOM without Baserow
+        env:
+          ONSHAPE_ACCESS_KEY: ${{ secrets.ONSHAPE_ACCESS_KEY }}
+          ONSHAPE_SECRET_KEY: ${{ secrets.ONSHAPE_SECRET_KEY }}
+          ONSHAPE_DOC_URL: ${{ inputs.onshape_doc_url || secrets.ONSHAPE_DOC_URL_EPSILON }}
+          PARTNUMBER_PREFIXES: "P-190B-26"
+          USE_SUBASSEMBLY_LIST: ${{ inputs.use_subassembly_list }}
+          ONSHAPE_SUBASSEMBLY_URLS: >-
+            ${{ inputs.subassembly_urls || env.DEFAULT_ONSHAPE_SUBASSEMBLY_URLS }}
+          SYNC_CAD_FILES: ${{ inputs.sync_cad_files }}
+        run: >-
+          python pre-2027-onshape_ci/OnshapeToBaserow.py
+          --dry-run
+          --output-json onshape-baserow-dry-run.json
+
+      - name: Upload dry-run records
+        uses: actions/upload-artifact@v4
+        with:
+          name: onshape-baserow-poot-horse-dry-run
+          path: onshape-baserow-dry-run.json

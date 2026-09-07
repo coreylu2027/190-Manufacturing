@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
 
 import { getAdminActor, isBootstrapAdminEmail } from "@/lib/auth";
-import { getOperations } from "@/lib/baserow";
+import { getCurrentManufacturingSnapshot } from "@/lib/manufacturing/cache";
+import { projectQualityControl, type QualityReviewRow } from "@/lib/quality-control";
 import { isShopName } from "@/lib/profile-name";
 import { createAdminClient } from "@/lib/supabase/admin";
-import type { AdminResponse, AdminUserSummary, QualityControlItem, QualityResult } from "@/lib/types";
+import type { AdminResponse, AdminUserSummary } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -16,14 +17,6 @@ interface ProfileRow {
   last_seen_at: string | null;
 }
 
-interface ReviewRow {
-  operation_id: number;
-  result: "passed" | "failed";
-  notes: string;
-  reviewed_by: string;
-  reviewed_at: string;
-}
-
 export async function GET() {
   const currentUser = await getAdminActor();
   if (!currentUser) return NextResponse.json({ error: "Authentication required" }, { status: 401 });
@@ -33,22 +26,20 @@ export async function GET() {
   const admin = createAdminClient();
   if (!admin) {
     return NextResponse.json(
-      { error: "Supabase administration is not configured (SUPABASE_SERVICE_ROLE_KEY is missing)" },
+      { error: "Supabase administration is not configured (SUPABASE_SECRET_KEY is missing)" },
       { status: 503 },
     );
   }
 
   try {
-    const [{ data: authData, error: authError }, { data: profileData, error: profileError }, { data: reviewData, error: reviewError }, operationData] = await Promise.all([
+    const [{ data: authData, error: authError }, { data: profileData, error: profileError }, manufacturingData] = await Promise.all([
       admin.auth.admin.listUsers({ page: 1, perPage: 200 }),
       admin.from("profiles").select("id, display_name, role, approved, last_seen_at"),
-      admin.from("quality_control").select("operation_id, result, notes, reviewed_by, reviewed_at"),
-      getOperations(),
+      getCurrentManufacturingSnapshot(),
     ]);
 
     if (authError) throw authError;
     if (profileError) throw profileError;
-    if (reviewError) throw reviewError;
 
     const profiles = new Map((profileData as ProfileRow[]).map((profile) => [profile.id, profile]));
     const users: AdminUserSummary[] = authData.users.map((user) => {
@@ -67,29 +58,14 @@ export async function GET() {
       };
     }).sort((a, b) => Number(a.approved) - Number(b.approved) || a.name.localeCompare(b.name));
 
-    const reviews = new Map((reviewData as ReviewRow[]).map((review) => [review.operation_id, review]));
-    const qualityControl: QualityControlItem[] = operationData.operations
-      .filter((operation) => operation.workType === "Manufacturing" && (operation.status === "Complete" || reviews.has(operation.id)))
-      .map((operation) => {
-        const review = reviews.get(operation.id);
-        const completedAfterReview = Boolean(
-          operation.status === "Complete"
-          && operation.completedAt
-          && review
-          && new Date(operation.completedAt).getTime() > new Date(review.reviewed_at).getTime(),
-        );
-        const result: QualityResult = !review || completedAfterReview ? "pending" : review.result;
-        return {
-          operation,
-          result,
-          notes: result === "pending" ? "" : review?.notes ?? "",
-          reviewedAt: result === "pending" ? null : review?.reviewed_at ?? null,
-          reviewedBy: result === "pending" ? null : users.find((user) => user.id === review?.reviewed_by)?.name ?? null,
-        };
-      })
-      .sort((a, b) => Number(a.result !== "pending") - Number(b.result !== "pending") || a.operation.partNumber.localeCompare(b.operation.partNumber));
+    const qualityControl = projectQualityControl(
+      manufacturingData.snapshot.operations,
+      manufacturingData.snapshot.qualityReviews as QualityReviewRow[],
+      manufacturingData.snapshot.retractedQualityReviewIds,
+      users.map((user) => ({ id: user.id, display_name: user.name })),
+    );
 
-    return NextResponse.json({ users, qualityControl, source: operationData.source } satisfies AdminResponse);
+    return NextResponse.json({ users, qualityControl } satisfies AdminResponse);
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to load administration data" }, { status: 502 });
   }
