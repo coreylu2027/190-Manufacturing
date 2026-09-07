@@ -226,9 +226,9 @@ export function QualityControlDashboard() {
   const [location, setLocation] = useState("all");
 
   const invalidateManufacturing = () => {
-    queryClient.invalidateQueries({ queryKey: ["qc"] });
-    queryClient.invalidateQueries({ queryKey: ["operations"] });
-    queryClient.invalidateQueries({ queryKey: ["fabrication"] });
+    queryClient.invalidateQueries({ queryKey: ["qc"] }, { cancelRefetch: false });
+    queryClient.invalidateQueries({ queryKey: ["operations"], refetchType: "none" });
+    queryClient.invalidateQueries({ queryKey: ["fabrication"], refetchType: "none" });
   };
 
   const reviewMutation = useMutation({
@@ -396,9 +396,9 @@ export function QualityControlDashboard() {
           </div>
         </div>
 
-        {query.isLoading ? (
+        {query.isPending ? (
           <div className="space-y-3 p-5">{Array.from({ length: 5 }).map((_, index) => <Skeleton key={index} className="h-28 w-full" />)}</div>
-        ) : query.isError ? (
+        ) : query.isError && !query.data ? (
           <div className="grid min-h-80 place-items-center p-6 text-center"><div><ShieldCheck className="mx-auto mb-3 size-10 text-destructive" /><h2 className="font-semibold">Couldn’t load quality control</h2><p className="mt-1 text-sm text-muted-foreground">{query.error.message}</p><Button className="mt-4" onClick={() => query.refetch()}>Try again</Button></div></div>
         ) : items.length === 0 ? (
           <div className="grid min-h-60 place-items-center p-6 text-center"><div><ClipboardCheck className="mx-auto mb-3 size-10 text-emerald-600" /><h3 className="font-semibold">QC queue is clear</h3><p className="mt-1 text-sm text-muted-foreground">Requirements will appear after all pre-QC manufacturing operations are complete.</p></div></div>

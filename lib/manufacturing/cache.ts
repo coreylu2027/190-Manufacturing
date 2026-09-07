@@ -32,20 +32,37 @@ const loadSnapshotByVersion = unstable_cache(
   { revalidate: false },
 );
 
+type ManufacturingSnapshot = Awaited<ReturnType<typeof loadSnapshotByVersion>>;
+const inFlightSnapshots = new Map<string, Promise<ManufacturingSnapshot>>();
+
+/** Coalesce concurrent cache misses handled by the same application instance. */
+async function loadSnapshotOnce(version: string) {
+  const existing = inFlightSnapshots.get(version);
+  if (existing) return existing;
+
+  const request = loadSnapshotByVersion(version);
+  inFlightSnapshots.set(version, request);
+  try {
+    return await request;
+  } finally {
+    if (inFlightSnapshots.get(version) === request) inFlightSnapshots.delete(version);
+  }
+}
+
 /**
  * Resolve the database's cheap transaction version first, then share the
  * expensive joined projection through Next's server Data Cache.
  */
 export async function getCurrentManufacturingSnapshot() {
   let version = await getManufacturingDataVersion();
-  let snapshot = await loadSnapshotByVersion(version);
+  let snapshot = await loadSnapshotOnce(version);
 
   // If a transaction committed while a cold cache entry was being built, use
   // the newer key before responding. A later commit is covered by Realtime.
   const verifiedVersion = await getManufacturingDataVersion();
   if (verifiedVersion !== version) {
     version = verifiedVersion;
-    snapshot = await loadSnapshotByVersion(version);
+    snapshot = await loadSnapshotOnce(version);
   }
 
   return { version, snapshot };

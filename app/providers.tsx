@@ -9,7 +9,10 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 export function Providers({ children }: { children: React.ReactNode }) {
   const [queryClient] = useState(() => new QueryClient({
     defaultOptions: {
-      queries: { staleTime: 30_000, refetchOnWindowFocus: false },
+      // A failed snapshot read is already expensive. Automatic retries used to
+      // multiply a single Realtime refresh into several simultaneous database
+      // reads, which could overwhelm the small Supabase instance.
+      queries: { staleTime: 30_000, refetchOnWindowFocus: false, retry: 0 },
       mutations: { retry: 0 },
     },
   }));
