@@ -62,6 +62,39 @@ export function PartModelPreview({ src, partName }: { src: string; partName: str
     };
   }, [src]);
 
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewer || !modelUrl) return;
+
+    const handleLoad = () => setState("ready");
+    const handleError = () => {
+      setState("error");
+      setMessage("The stored model could not be rendered. The original STEP download is still available below.");
+    };
+    const timeout = window.setTimeout(() => {
+      if (viewer.loaded) {
+        setState("ready");
+        return;
+      }
+      setState("error");
+      setMessage("The 3D renderer did not become ready. Try reloading the page or use the original STEP download below.");
+    }, 20_000);
+
+    viewer.addEventListener("load", handleLoad);
+    viewer.addEventListener("error", handleError);
+    // React can reconnect a lazily loaded custom element without replaying
+    // property assignments. Set the source after the native listeners exist.
+    viewer.setAttribute("src", modelUrl);
+    if (viewer.loaded) handleLoad();
+
+    return () => {
+      window.clearTimeout(timeout);
+      viewer.removeEventListener("load", handleLoad);
+      viewer.removeEventListener("error", handleError);
+      viewer.removeAttribute("src");
+    };
+  }, [modelUrl]);
+
   const resetCamera = () => {
     const viewer = viewerRef.current;
     if (!viewer) return;
@@ -83,7 +116,6 @@ export function PartModelPreview({ src, partName }: { src: string; partName: str
       {modelUrl && (
         <model-viewer
           ref={viewerRef}
-          src={modelUrl}
           alt={`3D preview of ${partName}`}
           className="h-full w-full bg-transparent"
           camera-controls
@@ -93,11 +125,6 @@ export function PartModelPreview({ src, partName }: { src: string; partName: str
           exposure="1.05"
           loading="eager"
           reveal="auto"
-          onLoad={() => setState("ready")}
-          onError={() => {
-            setState("error");
-            setMessage("The stored model could not be rendered. The original STEP download is still available below.");
-          }}
         />
       )}
 
