@@ -7,6 +7,13 @@ transaction RPC with stale-write protection and audit history. PDFs and STEP
 files are served from private Supabase Storage, and their exact original names
 come from the private attachment catalog.
 
+The production details panels also support interactive 3D part previews. STEP
+attachments are converted ahead of time into content-addressed GLB derivatives,
+verified after upload, and registered against the exact source STEP SHA-256. The
+browser lazy-loads the viewer only when details are opened, and receives the GLB
+through an approved-user application route; neither the attachment catalog nor
+the private Storage bucket is exposed to clients.
+
 Each production requirement can carry one optional shop-wide part location at
 any workflow stage. The current location is shown in Admin, Operations,
 Production, and Finishing and can be changed or cleared by any approved
@@ -49,6 +56,13 @@ application.
 8. To deliver notification emails, create a Resend API key, verify the sender domain, and set `RESEND_API_KEY` plus `NOTIFICATION_EMAIL_FROM`.
 9. To post manufacturing activity to Slack, create an incoming webhook for the desired channel and set the server-only `SLACK_WEBHOOK_URL` variable.
 10. Run `npm run dev`.
+
+After applying the part-preview production SQL, generate or refresh the private
+GLB derivatives with:
+
+```powershell
+npm run manufacturing:generate-previews -- --apply
+```
 
 Authentication is mandatory. Missing Supabase server credentials fail closed
 instead of loading demo data or falling back to another backend.

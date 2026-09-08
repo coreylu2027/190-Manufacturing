@@ -9,6 +9,7 @@ import {
 } from "ag-grid-community";
 import { AgGridReact } from "ag-grid-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import {
   ArrowUpRight,
@@ -113,6 +114,14 @@ type ManufacturingRealtimeStatus = "connecting" | "subscribed" | "disconnected";
 const MANUFACTURING_QUERY_KEYS = ["operations", "fabrication", "qc", "admin"] as const;
 const REALTIME_REFRESH_DEBOUNCE_MS = 300;
 const REALTIME_REFRESH_JITTER_MS = 1_200;
+
+const PartModelPreview = dynamic(
+  () => import("@/components/part-model-preview").then((module) => module.PartModelPreview),
+  {
+    ssr: false,
+    loading: () => <Skeleton className="h-[22rem] rounded-xl sm:h-[26rem]" />,
+  },
+);
 
 function activeManufacturingQueryKey(workspaceView: WorkspaceView) {
   if (workspaceView === "production") return "operations";
@@ -549,6 +558,16 @@ function ProductionOverview({
               </SheetHeader>
 
               <div className="space-y-6 p-6">
+                {selectedRequirement.operations[0]?.hasStepFile && (
+                  <section>
+                    <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">3D part preview</h3>
+                    <PartModelPreview
+                      src={`/api/operations/${selectedRequirement.operations[0].id}/preview`}
+                      partName={`${selectedRequirement.partNumber} ${selectedRequirement.partName}`}
+                    />
+                  </section>
+                )}
+
                 <section>
                   <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Requirement details</h3>
                   <div className="grid grid-cols-2 overflow-hidden rounded-xl border">
@@ -1396,6 +1415,16 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
               </SheetHeader>
 
               <div className="space-y-6 p-6">
+                {selected.hasStepFile && (
+                  <section>
+                    <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">3D part preview</h3>
+                    <PartModelPreview
+                      src={`/api/operations/${selected.id}/preview`}
+                      partName={`${selected.partNumber} ${selected.partName}`}
+                    />
+                  </section>
+                )}
+
                 <section>
                   <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Operation details</h3>
                   <div className="grid grid-cols-2 overflow-hidden rounded-xl border">

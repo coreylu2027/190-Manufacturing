@@ -3,6 +3,7 @@
 import { themeQuartz, type ColDef } from "ag-grid-community";
 import { AgGridReact } from "ag-grid-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import dynamic from "next/dynamic";
 import {
   ArrowUpRight,
   Check,
@@ -38,6 +39,14 @@ import type { FabricationAction, FabricationActionPatch, FabricationJob, Fabrica
 import { cn } from "@/lib/utils";
 
 type QueueView = "available" | "mine" | "all";
+
+const PartModelPreview = dynamic(
+  () => import("@/components/part-model-preview").then((module) => module.PartModelPreview),
+  {
+    ssr: false,
+    loading: () => <Skeleton className="h-[22rem] rounded-xl sm:h-[26rem]" />,
+  },
+);
 
 const gridTheme = themeQuartz.withParams({
   accentColor: "#3159c6",
@@ -311,6 +320,16 @@ export function FabricationDashboard({
               </SheetHeader>
 
               <div className="space-y-6 p-6">
+                {selected.hasStepFile && (
+                  <section>
+                    <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">3D part preview</h3>
+                    <PartModelPreview
+                      src={`/api/fabrication/${selected.id}/preview`}
+                      partName={`${selected.partNumber} ${selected.partName}`}
+                    />
+                  </section>
+                )}
+
                 <section>
                   <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Finishing details</h3>
                   <div className="grid grid-cols-2 overflow-hidden rounded-xl border">

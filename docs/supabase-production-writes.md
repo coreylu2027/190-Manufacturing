@@ -76,14 +76,35 @@ For a new Supabase environment:
    Data Cache. Connected browsers still receive fresh responses, but the full
    manufacturing projection is loaded from Supabase only once per database
    transaction version and shared across Vercel requests.
-9. Confirm the RPC, table privilege, Realtime policy, and trigger checks.
-10. Enable the database gate:
+9. Apply `supabase/production/20260907_manufacturing_part_previews.sql`. This
+   adds the private, source-hash-bound GLB derivative catalog and server-only
+   resolver/registration functions. It does not alter the source STEP objects.
+10. Generate and verify the current STEP previews:
+
+   ```powershell
+   npm run manufacturing:generate-previews -- --apply
+   ```
+
+   The command keeps the `manufacturing-files` bucket private, adds
+   `model/gltf-binary` to its upload allowlist, validates each stored STEP,
+   converts it with OpenCascade, verifies the uploaded GLB by size and SHA-256,
+   and only then registers it. Re-running the command skips verified derivatives
+   made by the current generator. Use `--force` only to deliberately regenerate
+   them, or `--limit=<count>` for a bounded rollout.
+
+   Tessellation is explicit and versioned: millimeter output, linear deflection
+   of `0.001` times the average bounding-box dimension, and angular deflection
+   of `0.5` radians. Changing any of these settings requires a generator-version
+   bump and regeneration so mixed-quality derivatives cannot be mistaken for a
+   uniform preview set.
+11. Confirm the RPC, table privilege, Realtime policy, and trigger checks.
+12. Enable the database gate:
 
    ```sql
    update manufacturing.write_control set enabled = true;
    ```
 
-11. Deploy the application with the Supabase URL, publishable key, secret key,
+13. Deploy the application with the Supabase URL, publishable key, secret key,
    and bootstrap administrator list. There are no backend source-selection flags.
 
 For an existing normalized installation, apply the new numbered part-location
@@ -96,6 +117,22 @@ refresh` and retains the explicit refresh button, avoiding a full request every
 10 seconds on disconnected tabs. The shared cache is versioned by a private
 database transaction identifier; authentication and user-specific response
 fields remain outside the cache.
+
+## Interactive part previews
+
+The production, operation, and finishing detail panels lazy-load an interactive
+GLB viewer when the selected part has a STEP attachment. Preview requests use
+the same authenticated, approved-account checks as the original file routes.
+The server resolves a derivative only when its registered `source_sha256` still
+matches the selected source STEP, so a revised source cannot silently display an
+old model. Responses use a private SHA-256 ETag and never reveal Storage paths or
+server credentials.
+
+Conversion is intentionally an offline deployment/synchronization step rather
+than request-time work. This keeps OpenCascade and the source STEP bytes out of
+the browser bundle, avoids CPU-heavy conversion on shop tablets, and lets the
+application serve a compact model immediately. The original STEP remains the
+authoritative downloadable file.
 
 After Supabase accepts its first production mutation, rollback must preserve the
 Supabase database as the authority. Disabling the write gate safely stops new
