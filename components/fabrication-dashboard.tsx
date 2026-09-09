@@ -32,6 +32,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ProductionRequirementNotes } from "@/components/production-requirement-notes";
 import { StorageLocationEditor } from "@/components/storage-location-editor";
 import { isShopName } from "@/lib/profile-name";
 import { canUseOnRobotLocation } from "@/lib/storage-locations";
@@ -202,7 +203,7 @@ export function FabricationDashboard({
       if (color !== "all" && job.color !== color) return false;
       if (view === "available" && job.status !== "Ready") return false;
       if (view === "mine" && !(ownedBy(job, userName) && job.status === "In Progress")) return false;
-      if (term && ![job.partNumber, job.partName, job.documentName, job.color, job.qcNotes, job.machinist, job.storageLocation].join(" ").toLocaleLowerCase().includes(term)) return false;
+      if (term && ![job.partNumber, job.partName, job.documentName, job.color, job.productionNotes, job.qcNotes, job.machinist, job.storageLocation].join(" ").toLocaleLowerCase().includes(term)) return false;
       return true;
     });
   }, [color, jobs, search, userName, view]);
@@ -340,6 +341,12 @@ export function FabricationDashboard({
                     ].map(([label, value], index) => <div key={label} className={cn("p-3", index % 2 === 0 && "border-r", index < 4 && "border-b")}><p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{label}</p><p className="mt-1 text-sm font-semibold">{value}</p></div>)}
                   </div>
                 </section>
+
+                <ProductionRequirementNotes
+                  key={selected.requirementId}
+                  requirementId={selected.requirementId}
+                  notes={selected.productionNotes}
+                />
 
                 <section>
                   <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">QC inspection notes</h3>

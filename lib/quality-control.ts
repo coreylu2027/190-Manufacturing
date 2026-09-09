@@ -173,6 +173,7 @@ export function projectQualityControl(
         requirementId,
         operations: [...operations].sort((a, b) => a.operationNumber.localeCompare(b.operationNumber) || a.id - b.id),
         result: quality.effectiveQcResult,
+        productionNotes: operations[0].productionNotes,
         notes: quality.notes,
         reviewedAt: quality.reviewedAt,
         reviewedBy: quality.reviewedBy,

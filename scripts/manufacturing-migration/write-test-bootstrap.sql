@@ -39,6 +39,7 @@ create schema frc190_baserow_stage;
 create table frc190_baserow_stage.snapshots (id uuid primary key);
 
 \ir ../../supabase/migrations/202609010001_admin_approval_and_qc.sql
+\ir ../../supabase/migrations/202609010005_profile_last_seen.sql
 \ir ../../supabase/migrations/202609040001_requirement_level_qc.sql
 \ir ../../supabase/migrations/202609040002_qc_legacy_compatibility.sql
 \ir ../../supabase/migrations/202609050001_qc_storage_locations.sql
@@ -50,3 +51,4 @@ create table frc190_baserow_stage.snapshots (id uuid primary key);
 \ir ../../supabase/production/20260905_manufacturing_attachments.sql
 \ir ../../supabase/production/20260906_manufacturing_realtime.sql
 \ir ../../supabase/production/20260906_manufacturing_shared_cache.sql
+\ir ../../supabase/production/20260909_requirement_notes.sql

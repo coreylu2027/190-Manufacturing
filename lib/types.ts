@@ -65,6 +65,7 @@ export interface ManufacturingOperation extends QualityLocationFields {
   activeInBom: boolean;
   engineeringChanged: boolean;
   disposition: string | null;
+  productionNotes: string;
   qualityNotes: string;
   qualityReviewedBy: string | null;
   qualityReviewedAt: string | null;
@@ -110,6 +111,7 @@ export interface FabricationJob extends QualityLocationFields {
   documentName: string | null;
   quantity: number;
   color: string;
+  productionNotes: string;
   qcNotes: string;
   status: OperationStatus;
   requirementStatus: string;
@@ -184,6 +186,7 @@ export interface QualityControlItem extends QualityLocationFields {
   requirementId: number;
   operations: ManufacturingOperation[];
   result: QualityResult;
+  productionNotes: string;
   notes: string;
   reviewedAt: string | null;
   reviewedBy: string | null;

@@ -50,6 +50,7 @@ import { AdminDashboard } from "@/components/admin-dashboard";
 import { ExpandableText } from "@/components/expandable-text";
 import { FabricationDashboard } from "@/components/fabrication-dashboard";
 import { NotificationInbox } from "@/components/notification-inbox";
+import { ProductionRequirementNotes } from "@/components/production-requirement-notes";
 import { QualityControlDashboard } from "@/components/quality-control-dashboard";
 import { StorageLocationEditor } from "@/components/storage-location-editor";
 import { Badge } from "@/components/ui/badge";
@@ -150,6 +151,7 @@ interface ProductionRequirement {
   activeInBom: boolean;
   engineeringChanged: boolean;
   disposition: string | null;
+  productionNotes: string;
   effectiveQcResult: ManufacturingOperation["effectiveQcResult"];
   qualityNotes: string;
   qualityReviewedBy: string | null;
@@ -379,6 +381,7 @@ function ProductionOverview({
           activeInBom: first.activeInBom,
           engineeringChanged: first.engineeringChanged,
           disposition: first.disposition,
+          productionNotes: first.productionNotes,
           effectiveQcResult: first.effectiveQcResult,
           qualityNotes: first.qualityNotes,
           qualityReviewedBy: first.qualityReviewedBy,
@@ -417,6 +420,7 @@ function ProductionOverview({
         requirement.assemblyNumber,
         requirement.documentName,
         requirement.storageLocation,
+        requirement.productionNotes,
       ].join(" ").toLocaleLowerCase().includes(term)) return false;
       return true;
     });
@@ -600,6 +604,14 @@ function ProductionOverview({
                     ))}
                   </div>
                 </section>
+
+                {selectedRequirement.requirementId !== null && (
+                  <ProductionRequirementNotes
+                    key={selectedRequirement.requirementId}
+                    requirementId={selectedRequirement.requirementId}
+                    notes={selectedRequirement.productionNotes}
+                  />
+                )}
 
                 {selectedRequirement.requirementId !== null && (
                   <section>
@@ -1451,6 +1463,15 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                       allowOnRobot={canUseOnRobotLocation(selected.effectiveQcResult === "passed", selected.finishingComplete)}
                     />
                   </section>
+                )}
+
+                {selected.requirementId && (
+                  <ProductionRequirementNotes
+                    key={selected.requirementId}
+                    requirementId={selected.requirementId}
+                    notes={selected.productionNotes}
+                    compact
+                  />
                 )}
 
                 {(selected.workType === "CAM" || selected.camDependency) && (

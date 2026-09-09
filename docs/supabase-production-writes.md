@@ -79,7 +79,10 @@ For a new Supabase environment:
 9. Apply `supabase/production/20260907_manufacturing_part_previews.sql`. This
    adds the private, source-hash-bound GLB derivative catalog and server-only
    resolver/registration functions. It does not alter the source STEP objects.
-10. Generate and verify the current STEP previews:
+10. Apply `supabase/production/20260909_requirement_notes.sql`. This adds the
+    production-requirement note, an append-only revision history for production
+    and inspection notes, and the approved-user write RPC used by the shop UI.
+11. Generate and verify the current STEP previews:
 
    ```powershell
    npm run manufacturing:generate-previews -- --apply
@@ -97,20 +100,19 @@ For a new Supabase environment:
    of `0.5` radians. Changing any of these settings requires a generator-version
    bump and regeneration so mixed-quality derivatives cannot be mistaken for a
    uniform preview set.
-11. Confirm the RPC, table privilege, Realtime policy, and trigger checks.
-12. Enable the database gate:
+12. Confirm the RPC, table privilege, Realtime policy, and trigger checks.
+13. Enable the database gate:
 
    ```sql
    update manufacturing.write_control set enabled = true;
    ```
 
-13. Deploy the application with the Supabase URL, publishable key, secret key,
+14. Deploy the application with the Supabase URL, publishable key, secret key,
    and bootstrap administrator list. There are no backend source-selection flags.
 
-For an existing normalized installation, apply the new numbered part-location
-migration and the part-location production wrapper, in that order, before
-applying the Realtime and shared-cache production scripts and deploying this
-code. If Realtime is already installed, apply only the shared-cache script.
+For an existing normalized installation, apply any unapplied scripts in the
+order above. The requirement-notes script is additive and should be applied
+immediately before deploying application code that exposes the note editor.
 
 The browser does not poll when Realtime is unavailable. It shows `Manual
 refresh` and retains the explicit refresh button, avoiding a full request every

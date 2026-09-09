@@ -113,9 +113,23 @@ declare
   rejected_location_request constant uuid := '00000000-0000-4000-8000-000000000197';
   robot_location_request constant uuid := '00000000-0000-4000-8000-000000000200';
   rejected_robot_request constant uuid := '00000000-0000-4000-8000-000000000201';
+  note_request constant uuid := '00000000-0000-4000-8000-000000000202';
+  note_delete_request constant uuid := '00000000-0000-4000-8000-000000000203';
   state jsonb;
   rejected boolean := false;
 begin
+  state := public.manufacturing_write_state();
+  perform public.manufacturing_update_requirement_notes(
+    note_request, mover, state->>'token', -190, 'Deburr the bore before inspection',
+    '{"requirementId":-190,"productionNotes":"Deburr the bore before inspection"}'
+  );
+  if (select production_notes from manufacturing.requirements where id=-190) <> 'Deburr the bore before inspection'
+    or (select count(*) from manufacturing.requirement_note_revisions
+      where requirement_id=-190 and note_kind='production' and changed_by=mover
+        and previous_text='' and new_text='Deburr the bore before inspection') <> 1 then
+    raise exception 'Production note or its revision was not recorded';
+  end if;
+
   update manufacturing.operations set status='Complete', claimed_quantity=0,
     completed_quantity=2, quantity_ledger='[{"userId":"00000000-0000-4000-8000-000000000190","name":"Test Admin","claimed":0,"completed":2}]'
     where id=-190;
@@ -132,8 +146,27 @@ begin
     '{"requirementId":-190,"result":"passed","notes":"Looks good"}'
   );
   if (select status from manufacturing.requirements where id=-190) <> 'Complete'
+    or (select production_notes from manufacturing.requirements where id=-190) <> 'Deburr the bore before inspection'
+    or (select qc_notes from manufacturing.requirements where id=-190) <> 'Looks good'
     or (select count(*) from public.quality_control where production_requirement_id=-190 and result='passed' and storage_location='Clarke 1') <> 1 then
     raise exception 'QC review was not committed atomically';
+  end if;
+  if (select count(*) from manufacturing.requirement_note_revisions
+      where requirement_id=-190 and note_kind='inspection' and changed_by=actor
+        and previous_text='' and new_text='Looks good') <> 1 then
+    raise exception 'Inspection note revision was not recorded';
+  end if;
+
+  state := public.manufacturing_write_state();
+  perform public.manufacturing_update_requirement_notes(
+    note_delete_request, actor, state->>'token', -190, '',
+    '{"requirementId":-190,"productionNotes":""}'
+  );
+  if (select production_notes from manufacturing.requirements where id=-190) <> ''
+    or (select qc_notes from manufacturing.requirements where id=-190) <> 'Looks good'
+    or (select count(*) from manufacturing.requirement_note_revisions
+      where requirement_id=-190 and note_kind='production') <> 2 then
+    raise exception 'QC reviewer could not delete only the production note';
   end if;
 
   state := public.manufacturing_write_state();
@@ -220,11 +253,17 @@ begin
       'public.manufacturing_commit_with_locations(uuid,uuid,text,text,jsonb,jsonb,jsonb)','EXECUTE') then
       raise exception 'Manufacturing location commit exposed to %', role_name;
     end if;
+    if has_function_privilege(role_name,
+      'public.manufacturing_update_requirement_notes(uuid,uuid,text,bigint,text,jsonb)','EXECUTE') then
+      raise exception 'Manufacturing note update exposed to %', role_name;
+    end if;
   end loop;
   if not has_function_privilege('service_role',
     'public.manufacturing_commit(uuid,uuid,text,text,jsonb,jsonb,jsonb)','EXECUTE')
     or not has_function_privilege('service_role',
       'public.manufacturing_commit_with_locations(uuid,uuid,text,text,jsonb,jsonb,jsonb)','EXECUTE')
+    or not has_function_privilege('service_role',
+      'public.manufacturing_update_requirement_notes(uuid,uuid,text,bigint,text,jsonb)','EXECUTE')
     or not has_function_privilege('service_role',
       'public.manufacturing_data_version()','EXECUTE')
     or has_table_privilege('service_role','manufacturing.operations','UPDATE') then

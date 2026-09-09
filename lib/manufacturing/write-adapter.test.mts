@@ -203,7 +203,8 @@ function harness(state: WriteState, commitResponse?: (body: Record<string, unkno
         assert.equal(init?.method, "GET");
         return Response.json(state);
       }
-      assert.ok(String(input).endsWith("/manufacturing_commit_with_locations"));
+      assert.ok(String(input).endsWith("/manufacturing_commit_with_locations")
+        || String(input).endsWith("/manufacturing_update_requirement_notes"));
       assert.equal(init?.method, "POST");
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       commits.push(body);
@@ -244,6 +245,20 @@ test("quantity claims are planned and sent as one compare-and-swap transaction",
   assert.equal(operation?.claimed_quantity, 1);
   assert.equal(operation?.completed_quantity, 0);
   assert.match(String(operation?.quantity_ledger), /"claimed":1/);
+});
+
+test("approved users can update a requirement production note independently of QC", async () => {
+  const { adapter, commits } = harness(fixture());
+  const result = await adapter.updateRequirementNotes(20, "Leave soft jaws with the part", ACTOR);
+
+  assert.deepEqual(result, { requirementId: 20, productionNotes: "Leave soft jaws with the part" });
+  assert.equal(commits.length, 1);
+  assert.equal(commits[0].p_requirement_id, 20);
+  assert.equal(commits[0].p_notes, "Leave soft jaws with the part");
+  assert.equal(commits[0].p_expected, "fixture-token");
+  assert.equal(commits[0].p_actor, ACTOR.id);
+  assert.equal(commits[0].p_changes, undefined);
+  assert.equal(commits[0].p_qc, undefined);
 });
 
 test("CAM completion, finishing, claim stealing, and QC use their atomic action envelopes", async () => {

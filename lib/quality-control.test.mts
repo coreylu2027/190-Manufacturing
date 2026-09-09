@@ -11,7 +11,8 @@ function operation(completedAt = "2026-09-05T12:00:00Z"): ManufacturingOperation
     sourceAssemblyRevision: null, requiredPartRevision: null, configuration: null,
     bomPositions: null, material: null, finishing: null, finishingRequired: false,
     finishingComplete: true, requirementStatus: "Ready for QC", requirementMachinist: "Alex A.",
-    activeInBom: true, engineeringChanged: false, disposition: null, qualityNotes: "",
+    activeInBom: true, engineeringChanged: false, disposition: null, productionNotes: "Check the bore",
+    qualityNotes: "",
     qualityReviewedBy: null, qualityReviewedAt: null,
     quantity: 1, taskQuantity: 1, claimedQuantity: 0, completedQuantity: 1,
     availableQuantity: 0, allocations: [], operationNumber: "OP1", workType: "Manufacturing",
@@ -87,4 +88,10 @@ test("threaded inserts are excluded from the pre-QC gate and do not stale its re
   };
   const quality = qualityMetadataByRequirement([primary, completedInsert], [review()], [], profiles).metadata.get(20);
   assert.equal(quality?.effectiveQcResult, "passed");
+});
+
+test("production and inspection notes remain separate in the QC projection", () => {
+  const [item] = projectQualityControl([operation()], [review({ notes: "Bore accepted" })], [], []);
+  assert.equal(item.productionNotes, "Check the bore");
+  assert.equal(item.notes, "Bore accepted");
 });

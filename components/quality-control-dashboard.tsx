@@ -18,6 +18,7 @@ import {
   Search,
   ShieldCheck,
   SlidersHorizontal,
+  Trash2,
   X,
 } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
@@ -101,6 +102,17 @@ async function updateInspectionNotes(item: QualityControlItem, notes: string): P
   return body;
 }
 
+async function deleteProductionNotes(item: QualityControlItem): Promise<{ productionNotes: string }> {
+  const response = await fetch(`/api/requirements/${item.requirementId}/notes`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ notes: "" }),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error ?? "Unable to delete production notes");
+  return body;
+}
+
 function formatDate(value: string | null) {
   if (!value) return "Not reviewed";
   return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(value));
@@ -169,6 +181,35 @@ function ActionCell({ data, onOpen }: { data?: QualityControlItem; onOpen: (item
   );
 }
 
+function ProductionNotesForQc({
+  item,
+  deleting,
+  onDelete,
+}: {
+  item: QualityControlItem;
+  deleting: boolean;
+  onDelete: (item: QualityControlItem) => void;
+}) {
+  return (
+    <div className="mt-4 border-t border-dashed pt-4">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Production note</p>
+          <p className="mt-1 text-xs text-muted-foreground">Carried with this production requirement.</p>
+        </div>
+        {item.productionNotes && (
+          <Button size="sm" variant="outline" onClick={() => onDelete(item)} disabled={deleting}>
+            {deleting ? <LoaderCircle className="animate-spin" /> : <Trash2 />} Delete
+          </Button>
+        )}
+      </div>
+      <p className={cn("mt-3 whitespace-pre-wrap rounded-xl border p-3 text-sm leading-6", item.productionNotes ? "bg-muted/20 text-foreground" : "border-dashed bg-muted/10 text-muted-foreground")}>
+        {item.productionNotes || "No production notes remain."}
+      </p>
+    </div>
+  );
+}
+
 export function QualityControlDashboard() {
   const queryClient = useQueryClient();
   const query = useQuery({ queryKey: ["qc"], queryFn: fetchQualityControl });
@@ -226,12 +267,27 @@ export function QualityControlDashboard() {
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to update inspection notes"),
   });
+  const deleteProductionNotesMutation = useMutation({
+    mutationFn: deleteProductionNotes,
+    onSuccess: (_result, variables) => {
+      queryClient.setQueryData<AdminResponse>(["qc"], (current) => current ? {
+        ...current,
+        qualityControl: current.qualityControl.map((item) => item.requirementId === variables.requirementId
+          ? { ...item, productionNotes: "" }
+          : item),
+      } : current);
+      toast.success("Production note deleted");
+      invalidateManufacturing();
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to delete production notes"),
+  });
   const mutateReview = reviewMutation.mutate;
   const reviewIsPending = reviewMutation.isPending;
   const mutateUndoReview = undoReviewMutation.mutate;
   const undoReviewIsPending = undoReviewMutation.isPending;
   const mutateNotes = updateNotesMutation.mutate;
   const notesArePending = updateNotesMutation.isPending;
+  const productionNotesAreDeleting = deleteProductionNotesMutation.isPending;
 
   const items = useMemo(() => query.data?.qualityControl ?? [], [query.data?.qualityControl]);
   const machines = useMemo(() => [...new Set(items.flatMap((item) => item.operations.map((operation) => operation.machine)))].sort(), [items]);
@@ -250,6 +306,7 @@ export function QualityControlDashboard() {
         item.operations[0].documentName,
         item.storageLocation,
         item.notes,
+        item.productionNotes,
         item.reviewedBy,
         item.result,
         resultLabels[item.result],
@@ -417,6 +474,11 @@ export function QualityControlDashboard() {
                       placeholder="Measurements, defects, or acceptance notes…"
                       className="mt-1.5 min-h-20 w-full resize-y rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground caret-foreground outline-none focus:border-ring focus:ring-3 focus:ring-ring/50"
                     />
+                    <ProductionNotesForQc
+                      item={item}
+                      deleting={productionNotesAreDeleting}
+                      onDelete={deleteProductionNotesMutation.mutate}
+                    />
                     <div className="mt-3"><StorageLocationEditor requirementId={item.requirementId} value={item.storageLocation} updatedBy={item.locationUpdatedBy} updatedAt={item.locationUpdatedAt} canEdit allowOnRobot={canUseOnRobotLocation(item.effectiveQcResult === "passed", operation.finishingComplete)} /></div>
                     <div className="mt-3 flex flex-wrap items-center gap-2">
                       <Button variant="outline" nativeButton={!operation.hasDrawingPdf} render={operation.hasDrawingPdf ? <a href={`/api/operations/${operation.id}/files/drawing-pdf`} target="_blank" rel="noreferrer" /> : undefined} disabled={!operation.hasDrawingPdf}><FileText /> Drawing PDF</Button>
@@ -466,6 +528,11 @@ export function QualityControlDashboard() {
                     disabled={selected.result === "failed" || reviewIsPending || notesArePending}
                     placeholder="Measurements, defects, or acceptance notes…"
                     className="min-h-36 w-full resize-y rounded-xl border border-input bg-background px-4 py-3 text-sm leading-6 text-foreground caret-foreground outline-none disabled:opacity-70 focus:border-ring focus:ring-3 focus:ring-ring/50"
+                  />
+                  <ProductionNotesForQc
+                    item={selected}
+                    deleting={productionNotesAreDeleting}
+                    onDelete={deleteProductionNotesMutation.mutate}
                   />
                   {selected.reviewedAt && <p className="mt-2 text-xs text-muted-foreground">Reviewed {formatDate(selected.reviewedAt)}{selected.reviewedBy ? ` by ${selected.reviewedBy}` : ""}</p>}
                 </section>

@@ -59,6 +59,10 @@ export async function recordQualityReview(requirementId: number, result: Exclude
   return writer().recordQualityReview(requirementId, result, notes, actor, location);
 }
 
+export async function updateRequirementNotes(requirementId: number, notes: string, actor: Actor) {
+  return writer().updateRequirementNotes(requirementId, notes, actor);
+}
+
 export async function updatePassedQualityNotes(requirementId: number, notes: string, actor: Actor) {
   return writer().updatePassedQualityNotes(requirementId, notes, actor);
 }

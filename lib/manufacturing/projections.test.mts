@@ -84,6 +84,7 @@ test("requirement projections include independent location and lifecycle details
     "QC Outcome": { value: "Passed" },
     Status: { value: "Ready for Manufacturing" },
     "Part Location": "Shelf 2",
+    "Production Notes": "Deburr before inspection",
     "Location Updated By": "Morgan M.",
     "Location Updated At": "2026-09-05T15:00:00Z",
   }], [part]);
@@ -95,6 +96,7 @@ test("requirement projections include independent location and lifecycle details
   assert.equal(projected.finishingComplete, true);
   assert.equal(projected.storageLocation, "Shelf 2");
   assert.equal(projected.locationUpdatedBy, "Morgan M.");
+  assert.equal(projected.productionNotes, "Deburr before inspection");
 
   const [projectedRework] = projectOperations([operation], [{
     ...requirement,
@@ -107,9 +109,11 @@ test("requirement projections include independent location and lifecycle details
   const [projectedFinishing] = projectFinishing([finishing], [{
     ...requirement,
     "Part Location": "Shelf 2",
+    "Production Notes": "Keep masking installed",
     "Location Updated By": "Morgan M.",
     "Location Updated At": "2026-09-05T15:00:00Z",
   }]);
   assert.equal(projectedFinishing.storageLocation, "Shelf 2");
   assert.equal(projectedFinishing.locationUpdatedBy, "Morgan M.");
+  assert.equal(projectedFinishing.productionNotes, "Keep masking installed");
 });

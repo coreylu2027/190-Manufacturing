@@ -240,6 +240,21 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
         };
       }, { requirement_id: requirementId, result, notes, reviewed_at: reviewedAt, location: result === "passed" ? location : null });
     },
+    async updateRequirementNotes(requirementId: number, notes: string, actor: Actor) {
+      if (!UUID_PATTERN.test(actor.id) || !actor.name.trim()) throw new ManufacturingWriteError("An authenticated manufacturing actor is required", 401);
+      const state = await rpc<WriteState>("manufacturing_write_state");
+      requirement(state, requirementId);
+      const body = {
+        p_request_id: crypto.randomUUID(),
+        p_actor: actor.id,
+        p_expected: state.token,
+        p_requirement_id: requirementId,
+        p_notes: notes,
+        p_result: { requirementId, productionNotes: notes },
+      };
+      try { return await rpc<{ requirementId: number; productionNotes: string }>("manufacturing_update_requirement_notes", body); }
+      catch (error) { if (error instanceof ManufacturingWriteError) throw error; return rpc<{ requirementId: number; productionNotes: string }>("manufacturing_update_requirement_notes", body); }
+    },
     updatePassedQualityNotes(requirementId: number, notes: string, actor: Actor) {
       const reviewedAt = new Date().toISOString();
       return transact(actor, "qc_review", async (plan, state) => {
