@@ -240,6 +240,20 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
         };
       }, { requirement_id: requirementId, result, notes, reviewed_at: reviewedAt, location: result === "passed" ? location : null });
     },
+    updatePassedQualityNotes(requirementId: number, notes: string, actor: Actor) {
+      const reviewedAt = new Date().toISOString();
+      return transact(actor, "qc_review", async (plan, state) => {
+        assertEffectivePassedReview(state, requirementId, "Only a current passed QC review can have its inspection notes updated");
+        await plan.patchRequirementQualityNote(requirementId, actor.name, notes, reviewedAt);
+        return {
+          requirementId,
+          result: "passed" as const,
+          notes,
+          reviewedAt,
+          reviewedBy: actor.name,
+        };
+      }, { requirement_id: requirementId, result: "passed", notes, reviewed_at: reviewedAt, location: null });
+    },
     updatePartLocation(requirementId: number, location: StorageLocation | null, actor: Actor) {
       if (location !== null && !isStorageLocation(location)) throw new ManufacturingWriteError("Invalid storage location", 400);
       const updatedAt = new Date().toISOString();

@@ -14,6 +14,7 @@ import {
   FileText,
   LoaderCircle,
   MapPin,
+  Save,
   Search,
   ShieldCheck,
   SlidersHorizontal,
@@ -86,6 +87,17 @@ async function undoPassedReview(item: QualityControlItem) {
   const response = await fetch(`/api/admin/qc/${item.requirementId}`, { method: "DELETE" });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error ?? "Unable to undo the QC pass");
+  return body;
+}
+
+async function updateInspectionNotes(item: QualityControlItem, notes: string): Promise<{ review: { notes: string; reviewedAt: string; reviewedBy: string } }> {
+  const response = await fetch(`/api/admin/qc/${item.requirementId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ notes }),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error ?? "Unable to update inspection notes");
   return body;
 }
 
@@ -192,10 +204,34 @@ export function QualityControlDashboard() {
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to undo QC pass"),
   });
+  const updateNotesMutation = useMutation({
+    mutationFn: ({ item, notes }: { item: QualityControlItem; notes: string }) => updateInspectionNotes(item, notes),
+    onSuccess: ({ review }, variables) => {
+      queryClient.setQueryData<AdminResponse>(["qc"], (current) => current ? {
+        ...current,
+        qualityControl: current.qualityControl.map((item) => item.requirementId === variables.item.requirementId ? {
+          ...item,
+          notes: review.notes,
+          reviewedAt: review.reviewedAt,
+          reviewedBy: review.reviewedBy,
+        } : item),
+      } : current);
+      setDraftNotes((current) => {
+        const next = { ...current };
+        delete next[variables.item.requirementId];
+        return next;
+      });
+      toast.success("Inspection notes updated");
+      invalidateManufacturing();
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to update inspection notes"),
+  });
   const mutateReview = reviewMutation.mutate;
   const reviewIsPending = reviewMutation.isPending;
   const mutateUndoReview = undoReviewMutation.mutate;
   const undoReviewIsPending = undoReviewMutation.isPending;
+  const mutateNotes = updateNotesMutation.mutate;
+  const notesArePending = updateNotesMutation.isPending;
 
   const items = useMemo(() => query.data?.qualityControl ?? [], [query.data?.qualityControl]);
   const machines = useMemo(() => [...new Set(items.flatMap((item) => item.operations.map((operation) => operation.machine)))].sort(), [items]);
@@ -376,6 +412,8 @@ export function QualityControlDashboard() {
                       aria-label={`Inspection notes for ${item.operations[0].partNumber}`}
                       value={draftNotes[item.requirementId] ?? item.notes}
                       onChange={(event) => updateNotes(item.requirementId, event.currentTarget.value)}
+                      maxLength={2000}
+                      disabled={item.result === "failed" || notesArePending}
                       placeholder="Measurements, defects, or acceptance notes…"
                       className="mt-1.5 min-h-20 w-full resize-y rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground caret-foreground outline-none focus:border-ring focus:ring-3 focus:ring-ring/50"
                     />
@@ -384,7 +422,7 @@ export function QualityControlDashboard() {
                       <Button variant="outline" nativeButton={!operation.hasDrawingPdf} render={operation.hasDrawingPdf ? <a href={`/api/operations/${operation.id}/files/drawing-pdf`} target="_blank" rel="noreferrer" /> : undefined} disabled={!operation.hasDrawingPdf}><FileText /> Drawing PDF</Button>
                       <Button variant="outline" nativeButton={!operation.onshapeUrl} render={operation.onshapeUrl ? <a href={operation.onshapeUrl} target="_blank" rel="noreferrer" /> : undefined} disabled={!operation.onshapeUrl}><ExternalLink /> Onshape source</Button>
                       <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
-                        {item.result === "pending" ? <><Button variant="destructive" onClick={() => mutateReview({ item, result: "failed", notes: draftNotes[item.requirementId] ?? item.notes })} disabled={reviewIsPending || !item.operations.every((row) => row.status === "Complete")}><X /> Fail QC</Button><Button className="bg-emerald-600 hover:bg-emerald-700" onClick={() => mutateReview({ item, result: "passed", notes: draftNotes[item.requirementId] ?? item.notes })} disabled={reviewIsPending || !item.operations.every((row) => row.status === "Complete")}>{reviewIsPending ? <LoaderCircle className="animate-spin" /> : <Check />} Pass QC</Button></> : item.result === "passed" ? <Button variant="outline" onClick={() => mutateUndoReview(item)} disabled={undoReviewIsPending}><Clock3 /> Undo QC pass</Button> : <p className="text-xs text-muted-foreground">Complete the rework to request QC again.</p>}
+                        {item.result === "pending" ? <><Button variant="destructive" onClick={() => mutateReview({ item, result: "failed", notes: draftNotes[item.requirementId] ?? item.notes })} disabled={reviewIsPending || !item.operations.every((row) => row.status === "Complete")}><X /> Fail QC</Button><Button className="bg-emerald-600 hover:bg-emerald-700" onClick={() => mutateReview({ item, result: "passed", notes: draftNotes[item.requirementId] ?? item.notes })} disabled={reviewIsPending || !item.operations.every((row) => row.status === "Complete")}>{reviewIsPending ? <LoaderCircle className="animate-spin" /> : <Check />} Pass QC</Button></> : item.result === "passed" ? <><Button onClick={() => mutateNotes({ item, notes: draftNotes[item.requirementId] ?? item.notes })} disabled={notesArePending || draftNotes[item.requirementId] === undefined || draftNotes[item.requirementId] === item.notes}>{notesArePending ? <LoaderCircle className="animate-spin" /> : <Save />} Save note</Button><Button variant="outline" onClick={() => mutateUndoReview(item)} disabled={undoReviewIsPending || notesArePending}><Clock3 /> Undo QC pass</Button></> : <p className="text-xs text-muted-foreground">Complete the rework to request QC again.</p>}
                       </div>
                     </div>
                   </article>
@@ -424,7 +462,8 @@ export function QualityControlDashboard() {
                     id={`qc-review-notes-${selected.requirementId}`}
                     value={draftNotes[selected.requirementId] ?? selected.notes}
                     onChange={(event) => updateNotes(selected.requirementId, event.currentTarget.value)}
-                    disabled={selected.result !== "pending" || reviewIsPending}
+                    maxLength={2000}
+                    disabled={selected.result === "failed" || reviewIsPending || notesArePending}
                     placeholder="Measurements, defects, or acceptance notes…"
                     className="min-h-36 w-full resize-y rounded-xl border border-input bg-background px-4 py-3 text-sm leading-6 text-foreground caret-foreground outline-none disabled:opacity-70 focus:border-ring focus:ring-3 focus:ring-ring/50"
                   />
@@ -456,7 +495,10 @@ export function QualityControlDashboard() {
                   <Button size="lg" variant="destructive" className="h-11" onClick={() => mutateReview({ item: selected, result: "failed", notes: draftNotes[selected.requirementId] ?? selected.notes })} disabled={reviewIsPending || !ready}><X /> Fail QC</Button>
                   <Button size="lg" className="h-11 bg-emerald-600 hover:bg-emerald-700" onClick={() => mutateReview({ item: selected, result: "passed", notes: draftNotes[selected.requirementId] ?? selected.notes })} disabled={reviewIsPending || !ready}>{reviewIsPending ? <LoaderCircle className="animate-spin" /> : <Check />} Pass QC</Button>
                 </> : selected.result === "passed" ? (
-                  <Button size="lg" variant="outline" className="h-11" onClick={() => mutateUndoReview(selected)} disabled={undoReviewIsPending}>{undoReviewIsPending ? <LoaderCircle className="animate-spin" /> : <Clock3 />} Undo QC pass</Button>
+                  <>
+                    <Button size="lg" className="h-11" onClick={() => mutateNotes({ item: selected, notes: draftNotes[selected.requirementId] ?? selected.notes })} disabled={notesArePending || draftNotes[selected.requirementId] === undefined || draftNotes[selected.requirementId] === selected.notes}>{notesArePending ? <LoaderCircle className="animate-spin" /> : <Save />} Save note</Button>
+                    <Button size="lg" variant="outline" className="h-11" onClick={() => mutateUndoReview(selected)} disabled={undoReviewIsPending || notesArePending}>{undoReviewIsPending ? <LoaderCircle className="animate-spin" /> : <Clock3 />} Undo QC pass</Button>
+                  </>
                 ) : (
                   <div className="rounded-xl bg-rose-50 p-3 text-center text-sm font-medium text-rose-800">Complete the rework to request QC again.</div>
                 )}

@@ -710,6 +710,20 @@ async function patchRequirementQualityOutcome(
   }
   return getRow(REQUIREMENTS_TABLE_ID, requirementId);
 }
+async function patchRequirementQualityNote(
+  requirementId: number,
+  actorName: string,
+  notes: string,
+  reviewedAt: string,
+) {
+  await getRow(REQUIREMENTS_TABLE_ID, requirementId);
+  await patchRow(REQUIREMENTS_TABLE_ID, requirementId, {
+    "QC Notes": notes,
+    "QC Reviewed By": actorName,
+    "QC Reviewed At": reviewedAt,
+  });
+  return getRow(REQUIREMENTS_TABLE_ID, requirementId);
+}
 async function clearPassedRequirementQualityOutcome(requirementId: number) {
   
 
@@ -783,7 +797,7 @@ async function forceCompletePrerequisites(requirementId: number, actor: { id: st
   }
   return preview;
 }
-return { previewForceQuality, forceCompletePrerequisites, applyFabricationAction,patchOperation,updateCamHandoff,applyQuantityAction,stealOperationClaim,renameMachinistAllocations,patchRequirementQualityOutcome,clearPassedRequirementQualityOutcome,
+return { previewForceQuality, forceCompletePrerequisites, applyFabricationAction,patchOperation,updateCamHandoff,applyQuantityAction,stealOperationClaim,renameMachinistAllocations,patchRequirementQualityOutcome,patchRequirementQualityNote,clearPassedRequirementQualityOutcome,
  changes() {
  return ENTITIES.flatMap(entity=>(input[entity.name]??[]).flatMap(before=>{
  const after=normalizeRow(entity,rows[String(entity.tableId)].find(r=>r.id===before.id)!);

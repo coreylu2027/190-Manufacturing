@@ -344,6 +344,42 @@ test("part locations are editable before QC while On Robot requires passed QC an
   assert.equal(finishingInRework.commits.length, 0);
 });
 
+test("passed QC inspection notes can be revised without changing workflow status or location", async () => {
+  const reviewedAt = "2026-09-05T13:00:00Z";
+  const state = fixture({
+    operation: {
+      Status: { value: "Complete" }, "Completed Quantity": 2, "Completed At": "2026-09-05T12:00:00Z",
+      "Quantity Ledger": JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 2 }]),
+    },
+    requirement: {
+      Status: { value: "Complete" }, "QC Outcome": { value: "Passed" }, "QC Notes": "Original note",
+      "QC Reviewed By": "Robin R.", "QC Reviewed At": reviewedAt,
+    },
+    reviews: [{ id: 50, production_requirement_id: 20, operation_id: null, result: "passed", reviewed_at: reviewedAt }],
+  });
+  state.rows.requirements[0].part_location = "Clarke 1";
+  const qc = harness(state);
+
+  const result = await qc.adapter.updatePassedQualityNotes(20, "Updated measurement", ACTOR);
+
+  assert.equal(result.notes, "Updated measurement");
+  assert.equal(qc.commits[0].p_action, "qc_review");
+  assert.deepEqual(qc.commits[0].p_qc, {
+    requirement_id: 20,
+    result: "passed",
+    notes: "Updated measurement",
+    reviewed_at: result.reviewedAt,
+    location: null,
+  });
+  const changes = qc.commits[0].p_changes as Array<{ entity: string; patch: Record<string, unknown> }>;
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0].entity, "requirements");
+  assert.equal(changes[0].patch.qc_notes, "Updated measurement");
+  assert.equal(changes[0].patch.qc_reviewed_by, ACTOR.name);
+  assert.equal(changes[0].patch.status, undefined);
+  assert.equal(changes[0].patch.part_location, undefined);
+});
+
 test("QC and finishing cannot be reopened while the part is on the robot", async () => {
   const reviewedAt = "2026-09-05T13:00:00Z";
   const qcState = fixture({
