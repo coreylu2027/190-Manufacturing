@@ -82,7 +82,11 @@ For a new Supabase environment:
 10. Apply `supabase/production/20260909_requirement_notes.sql`. This adds the
     production-requirement note, an append-only revision history for production
     and inspection notes, and the approved-user write RPC used by the shop UI.
-11. Generate and verify the current STEP previews:
+11. Apply `supabase/production/20260909_qc_rejected_quantities.sql`. This
+    backfills failed-review quantities, fully resets legacy `Needs Rework`
+    routes, removes remaining legacy rework states, and installs the atomic QC
+    write wrapper used by the application.
+12. Generate and verify the current STEP previews:
 
    ```powershell
    npm run manufacturing:generate-previews -- --apply
@@ -100,19 +104,19 @@ For a new Supabase environment:
    of `0.5` radians. Changing any of these settings requires a generator-version
    bump and regeneration so mixed-quality derivatives cannot be mistaken for a
    uniform preview set.
-12. Confirm the RPC, table privilege, Realtime policy, and trigger checks.
-13. Enable the database gate:
+13. Confirm the RPC, table privilege, Realtime policy, and trigger checks.
+14. Enable the database gate:
 
    ```sql
    update manufacturing.write_control set enabled = true;
    ```
 
-14. Deploy the application with the Supabase URL, publishable key, secret key,
+15. Deploy the application with the Supabase URL, publishable key, secret key,
    and bootstrap administrator list. There are no backend source-selection flags.
 
 For an existing normalized installation, apply any unapplied scripts in the
-order above. The requirement-notes script is additive and should be applied
-immediately before deploying application code that exposes the note editor.
+order above. Apply both September 9 scripts before deploying application code
+that exposes the note editor or rejected-quantity QC flow.
 
 The browser does not poll when Realtime is unavailable. It shows `Manual
 refresh` and retains the explicit refresh button, avoiding a full request every

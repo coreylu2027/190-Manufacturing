@@ -104,6 +104,7 @@ import {
   type OperationStatus,
   type OperationWorkType,
   type OperationsResponse,
+  type QualityFailureSummary,
 } from "@/lib/types";
 
 ModuleRegistry.registerModules([AllCommunityModule]);
@@ -156,6 +157,7 @@ interface ProductionRequirement {
   qualityNotes: string;
   qualityReviewedBy: string | null;
   qualityReviewedAt: string | null;
+  lastQualityFailure: QualityFailureSummary | null;
   quantity: number;
   completedOperations: number;
   totalOperations: number;
@@ -195,7 +197,6 @@ const statusStyles: Record<OperationStatus, string> = {
   Ready: "border-emerald-200 bg-emerald-100 text-emerald-800",
   "In Progress": "border-blue-200 bg-blue-100 text-blue-800",
   Blocked: "border-amber-200 bg-amber-100 text-amber-900",
-  "Needs Rework": "border-rose-200 bg-rose-100 text-rose-800",
   Complete: "border-violet-200 bg-violet-100 text-violet-800",
 };
 
@@ -209,7 +210,7 @@ function StatusCell({ value }: { value: OperationStatus }) {
 
 function ActionCell({ data, onOpen, user }: { data?: ManufacturingOperation; onOpen: (operation: ManufacturingOperation) => void; user: OperationsResponse["user"] }) {
   if (!data) return null;
-  const claimable = ["Ready", "In Progress", "Needs Rework"].includes(data.status) && data.availableQuantity > 0;
+  const claimable = ["Ready", "In Progress"].includes(data.status) && data.availableQuantity > 0;
   const stealable = isOperationStealable(data, user);
   return (
     <div className="flex h-full items-center justify-end">
@@ -262,6 +263,19 @@ function formatDate(value: string | null) {
   return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(value));
 }
 
+function QualityFailureCallout({ failure }: { failure: QualityFailureSummary | null }) {
+  if (!failure) return null;
+  return (
+    <section className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-rose-950">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-xs font-bold uppercase tracking-[.14em] text-rose-800">Previous QC failure</h3>
+        <p className="text-xs text-rose-700">{failure.rejectedQuantity ? `${failure.rejectedQuantity} rejected · ` : ""}{formatDate(failure.reviewedAt)}{failure.reviewedBy ? ` · ${failure.reviewedBy}` : ""}</p>
+      </div>
+      <p className="mt-2 whitespace-pre-wrap text-sm leading-6">{failure.notes || "No failure reason was recorded."}</p>
+    </section>
+  );
+}
+
 function operationLabel(operation: Pick<ManufacturingOperation, "operationNumber" | "workType">) {
   return operation.workType === "CAM" ? `CAM for ${operation.operationNumber}` : operation.operationNumber;
 }
@@ -283,13 +297,13 @@ function otherClaimants(operation: ManufacturingOperation, user: OperationsRespo
 }
 
 function isOperationStealable(operation: ManufacturingOperation, user: OperationsResponse["user"]) {
-  return ["Ready", "In Progress", "Needs Rework"].includes(operation.status)
+  return ["Ready", "In Progress"].includes(operation.status)
     && operation.availableQuantity === 0
     && otherClaimants(operation, user).length > 0;
 }
 
 function isOperationClaimable(operation: ManufacturingOperation) {
-  return ["Ready", "In Progress", "Needs Rework"].includes(operation.status) && operation.availableQuantity > 0;
+  return ["Ready", "In Progress"].includes(operation.status) && operation.availableQuantity > 0;
 }
 
 type BulkAction = Extract<OperationQuantityAction, "claim" | "complete">;
@@ -321,7 +335,6 @@ const inverseQuantityAction: Record<OperationQuantityAction, OperationQuantityAc
 function requirementStatus(operations: ManufacturingOperation[]): OperationStatus {
   if (operations.every((operation) => operation.status === "Complete")) return "Complete";
   if (operations.some((operation) => operation.status === "Blocked")) return "Blocked";
-  if (operations.some((operation) => operation.status === "Needs Rework")) return "Needs Rework";
   if (operations.some((operation) => operation.status === "In Progress")) return "In Progress";
   if (operations.some((operation) => operation.status === "Ready")) return "Ready";
   return "Planned";
@@ -386,6 +399,7 @@ function ProductionOverview({
           qualityNotes: first.qualityNotes,
           qualityReviewedBy: first.qualityReviewedBy,
           qualityReviewedAt: first.qualityReviewedAt,
+          lastQualityFailure: first.lastQualityFailure,
           quantity: first.quantity,
           completedOperations: routedOperations.filter((operation) => operation.status === "Complete").length,
           totalOperations: routedOperations.length,
@@ -421,6 +435,8 @@ function ProductionOverview({
         requirement.documentName,
         requirement.storageLocation,
         requirement.productionNotes,
+        requirement.qualityNotes,
+        requirement.lastQualityFailure?.notes,
       ].join(" ").toLocaleLowerCase().includes(term)) return false;
       return true;
     });
@@ -435,7 +451,7 @@ function ProductionOverview({
     total: requirements.length,
     complete: requirements.filter((requirement) => requirement.status === "Complete").length,
     active: requirements.filter((requirement) => requirement.status === "In Progress").length,
-    attention: requirements.filter((requirement) => requirement.status === "Blocked" || requirement.status === "Needs Rework").length,
+    attention: requirements.filter((requirement) => requirement.status === "Blocked").length,
   }), [requirements]);
   const selectedRequirement = requirements.find((requirement) => requirement.key === selectedRequirementKey) ?? null;
   const openRequirement = (requirement: ProductionRequirement) => setSelectedRequirementKey(requirement.key);
@@ -487,7 +503,7 @@ function ProductionOverview({
             </div>
             <Select value={status} onValueChange={(value) => setStatus((value ?? "all") as "all" | OperationStatus)}>
               <SelectTrigger className="h-9 w-full bg-card xl:w-48"><SlidersHorizontal className="text-muted-foreground" /><SelectValue placeholder="All statuses" /></SelectTrigger>
-              <SelectContent><SelectItem value="all">All statuses</SelectItem>{(["Planned", "Ready", "In Progress", "Blocked", "Needs Rework", "Complete"] as OperationStatus[]).map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
+              <SelectContent><SelectItem value="all">All statuses</SelectItem>{(["Planned", "Ready", "In Progress", "Blocked", "Complete"] as OperationStatus[]).map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
             </Select>
             <Select value={sourceDocument} onValueChange={(value) => setSourceDocument(value ?? "all")}>
               <SelectTrigger className="h-9 w-full bg-card xl:w-56"><FileText className="text-muted-foreground" /><SelectValue placeholder="All source documents" /></SelectTrigger>
@@ -604,6 +620,8 @@ function ProductionOverview({
                     ))}
                   </div>
                 </section>
+
+                <QualityFailureCallout failure={selectedRequirement.lastQualityFailure} />
 
                 {selectedRequirement.requirementId !== null && (
                   <ProductionRequirementNotes
@@ -996,7 +1014,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
       const claimable = isOperationClaimable(operation);
       if (view === "available" && !claimable && !isOperationStealable(operation, query.data?.user ?? null)) return false;
       if (view === "mine" && allocation.claimed === 0) return false;
-      if (term && ![operation.partNumber, operation.revision, operation.partName, operation.documentName, operation.material, operation.machine, operation.operationNumber, operation.workType, operation.camProgramPath, operation.storageLocation].join(" ").toLowerCase().includes(term)) return false;
+      if (term && ![operation.partNumber, operation.revision, operation.partName, operation.documentName, operation.material, operation.machine, operation.operationNumber, operation.workType, operation.camProgramPath, operation.storageLocation, operation.qualityNotes, operation.lastQualityFailure?.notes].join(" ").toLowerCase().includes(term)) return false;
       return true;
     });
   }, [machine, operations, query.data?.user, search, sourceDocument, view, workType]);
@@ -1037,10 +1055,10 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
   }, [bulkSelectedIds, filtered]);
 
   const stats = useMemo(() => ({
-    ready: operations.filter((operation) => ["Ready", "In Progress", "Needs Rework"].includes(operation.status) && operation.availableQuantity > 0).length,
+    ready: operations.filter((operation) => ["Ready", "In Progress"].includes(operation.status) && operation.availableQuantity > 0).length,
     planned: operations.filter((operation) => operation.status === "Planned").length,
     active: operations.filter((operation) => operation.status === "In Progress").length,
-    attention: operations.filter((operation) => operation.status === "Blocked" || operation.status === "Needs Rework").length,
+    attention: operations.filter((operation) => operation.status === "Blocked").length,
     complete: operations.filter((operation) => operation.status === "Complete").length,
   }), [operations]);
 
@@ -1474,6 +1492,8 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                   />
                 )}
 
+                <QualityFailureCallout failure={selected.lastQualityFailure} />
+
                 {(selected.workType === "CAM" || selected.camDependency) && (
                   <section>
                     <div className="mb-3 flex items-center justify-between gap-3">
@@ -1534,7 +1554,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
               </div>
 
               <SheetFooter className="sticky bottom-0 border-t bg-card/95 p-4 backdrop-blur">
-                {["Ready", "In Progress", "Needs Rework"].includes(selected.status) && selected.availableQuantity > 0 && <Button size="lg" className="h-11" onClick={() => requestQuantityAction("claim", selected.availableQuantity)} disabled={mutation.isPending}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <CircleDot />} {selected.workType === "CAM" ? "Claim CAM task" : `Claim ${selected.availableQuantity === 1 ? "part" : "parts"}`}</Button>}
+                {["Ready", "In Progress"].includes(selected.status) && selected.availableQuantity > 0 && <Button size="lg" className="h-11" onClick={() => requestQuantityAction("claim", selected.availableQuantity)} disabled={mutation.isPending}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <CircleDot />} {selected.workType === "CAM" ? "Claim CAM task" : `Claim ${selected.availableQuantity === 1 ? "part" : "parts"}`}</Button>}
                 {isOperationStealable(selected, query.data?.user ?? null) && <Button size="lg" variant="destructive" className="h-11" onClick={requestSteal} disabled={mutation.isPending}><TriangleAlert /> Steal {selected.workType === "CAM" ? "CAM task" : "production requirement"}</Button>}
                 {selectedAllocation.claimed > 0 && <Button size="lg" className="h-11 bg-emerald-600 hover:bg-emerald-700" onClick={() => requestQuantityAction("complete", selectedAllocation.claimed)} disabled={mutation.isPending}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <Check />} Mark complete</Button>}
                 {selectedAllocation.claimed > 0 && <Button variant="outline" onClick={() => requestQuantityAction("release", selectedAllocation.claimed)} disabled={mutation.isPending}><RotateCcw /> Release claim</Button>}

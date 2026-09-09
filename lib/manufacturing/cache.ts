@@ -18,6 +18,7 @@ const loadSnapshotByVersion = unstable_cache(
         ...job,
         qcNotes: metadata?.notes ?? "",
         effectiveQcResult: metadata?.effectiveQcResult ?? "pending" as const,
+        lastQualityFailure: metadata?.lastQualityFailure ?? null,
       };
     });
 
@@ -28,7 +29,7 @@ const loadSnapshotByVersion = unstable_cache(
       retractedQualityReviewIds: quality.retractedIds,
     };
   },
-  ["manufacturing-projected-snapshot-v1"],
+  ["manufacturing-projected-snapshot-v2"],
   { revalidate: false },
 );
 

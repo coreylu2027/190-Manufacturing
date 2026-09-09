@@ -7,14 +7,18 @@ import { ManufacturingWriteError } from "@/lib/manufacturing/write-adapter";
 import { scheduleSlackManufacturingEvent } from "@/lib/slack-notifications";
 import { storageLocationSchema } from "@/lib/storage-locations";
 
-const reviewSchema = z.object({
-  result: z.enum(["passed", "failed"]),
-  notes: z.string().trim().max(2000).default(""),
-  location: storageLocationSchema.nullable().optional(),
-}).strict().refine((value) => value.result === "passed" || value.location == null, {
-  message: "A failed QC review cannot assign a storage location",
-  path: ["location"],
-});
+const reviewSchema = z.discriminatedUnion("result", [
+  z.object({
+    result: z.literal("passed"),
+    notes: z.string().trim().max(2000).default(""),
+    location: storageLocationSchema.nullable().optional(),
+  }).strict(),
+  z.object({
+    result: z.literal("failed"),
+    notes: z.string().trim().min(1, "Enter a reason for the QC failure").max(2000),
+    rejectedQuantity: z.number().int().positive().optional(),
+  }).strict(),
+]);
 
 const noteSchema = z.object({
   notes: z.string().trim().max(2000).default(""),
@@ -33,14 +37,23 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   if (!Number.isInteger(requirementId)) return NextResponse.json({ error: "Invalid production requirement ID" }, { status: 400 });
 
   try {
-    const result = await recordQualityReview(requirementId, parsed.data.result, parsed.data.notes, currentUser, parsed.data.location ?? null);
+    const location = parsed.data.result === "passed" ? parsed.data.location ?? null : null;
+    const result = await recordQualityReview(
+      requirementId,
+      parsed.data.result,
+      parsed.data.notes,
+      currentUser,
+      location,
+      parsed.data.result === "failed" ? parsed.data.rejectedQuantity : undefined,
+    );
     const { notificationContext, ...review } = result;
     scheduleSlackManufacturingEvent({
       type: "qc_reviewed",
       actorName: currentUser.name,
       result: parsed.data.result,
       notes: parsed.data.notes,
-      storageLocation: parsed.data.result === "passed" ? parsed.data.location ?? null : null,
+      storageLocation: location,
+      rejectedQuantity: result.rejectedQuantity,
       becameReadyForFinishing: notificationContext.previousRequirementStatus !== "Ready for Finishing"
         && notificationContext.requirementStatus === "Ready for Finishing",
       postQcWorkReady: notificationContext.previousRequirementStatus !== "Ready for Manufacturing"

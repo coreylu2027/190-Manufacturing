@@ -79,7 +79,7 @@ Operations also include whole-number `Claimed Quantity` and `Completed Quantity`
 
 When all remaining parts are already claimed by someone else, the claim action becomes **Steal production requirement**. A second warning confirmation transfers only claimed quantities; completed quantities keep their original attribution. Each displaced account receives a durable unread website alert and a matching email.
 
-Supported statuses match the live schema: Planned, Ready, In Progress, Blocked, Needs Rework, and Complete.
+Supported operation statuses are Planned, Ready, In Progress, Blocked, and Complete. QC failures reuse these normal route states instead of introducing a separate rework status.
 
 ### CAM prerequisites
 
@@ -105,10 +105,11 @@ The shop UI treats the Onshape document name and assembly part number as separat
 - Authentication and account approval are required in every environment.
 - An approved administrator assigns either the `machinist` or `admin` role.
 - Approval and role checks are repeated on protected server routes; hiding the Admin tab is not the security boundary.
-- Production requirements enter the administrator QC queue after every active pre-QC manufacturing operation is complete. `Threaded Insert` is the sole post-QC exception: it remains planned until QC passes and, when required, powder-coat finishing completes. Passing records the requirement-level review; failing records the review and returns the final pre-QC operation to `Needs Rework`.
+- Production requirements enter the administrator QC queue after every active pre-QC manufacturing operation is complete. `Threaded Insert` is the sole post-QC exception: it remains planned until QC passes and, when required, powder-coat finishing completes. Passing records the requirement-level review. Failing requires a reason and reopens the rejected quantity at OP1; later physical operations unlock in route order while CAM stays complete. Multi-quantity batches default to rejecting the full quantity, but an administrator may reject fewer units. Accepted units retain their completion credit while the batch remains held for reinspection.
 - Supabase is the authoritative QC history by production requirement. Historical operation IDs are retained only as migration provenance. QC and its workflow update commit together in Supabase.
 - Production notes belong to the production requirement and remain editable by approved users across Operations, Finishing, and Production. Inspection notes remain a separate administrator-only QC field. `supabase/production/20260909_requirement_notes.sql` adds both the production-note field and the private, append-only revision log for changes to either note type.
 - `supabase/migrations/20260905165307_part_locations.sql` extends the canonical location choices. Apply it before the normalized production schema, then apply `supabase/production/20260905_part_locations.sql` after the location-aware manufacturing write RPC.
+- Apply `supabase/production/20260909_qc_rejected_quantities.sql` before deploying this QC flow; it backfills failure quantities, resets legacy rework routes, and installs the atomic QC write wrapper.
 - Part location is independent from QC and can be changed at any workflow stage. The `On Robot` choice is enforced in both the application and the database and requires an effective passed review plus completed finishing (or no required finish).
 - Location edits replace the current value and record the editor and time. Clearing records who cleared it. Existing QC-era locations are copied into the requirement-level location during migration.
 

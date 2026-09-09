@@ -98,14 +98,6 @@ test("requirement projections include independent location and lifecycle details
   assert.equal(projected.locationUpdatedBy, "Morgan M.");
   assert.equal(projected.productionNotes, "Deburr before inspection");
 
-  const [projectedRework] = projectOperations([operation], [{
-    ...requirement,
-    Finishing: { value: "Black" },
-    "QC Outcome": { value: "Passed" },
-    Status: { value: "Needs Rework" },
-  }], [part]);
-  assert.equal(projectedRework.finishingComplete, false);
-
   const [projectedFinishing] = projectFinishing([finishing], [{
     ...requirement,
     "Part Location": "Shelf 2",

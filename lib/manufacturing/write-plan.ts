@@ -6,7 +6,7 @@ type SourceRow = RawRow;
 function canonicalRows(rows: RawRow[]) {
   return deduplicateOperations(rows.filter(row => row["Active in Routing"]).map(row => ({
     id: row.id, operationKey: String(row.Operation ?? ""), workType: operationWorkType(row),
-    status: selectValue(row.Status, "Planned") as OperationStatus,
+    status: operationStatus(row.Status),
     claimedQuantity: Number(row["Claimed Quantity"] ?? 0), completedQuantity: Number(row["Completed Quantity"] ?? 0),
     startedAt: row["Started At"] as string | null, completedAt: row["Completed At"] as string | null, row,
   }))).map(item => item.row);
@@ -67,6 +67,10 @@ function parseRequirement(display: string) {
     assemblyNumber: match?.[3] ?? "Unassigned",
   };
 }
+function operationStatus(value: unknown): OperationStatus {
+  const status = selectValue(value, "Planned");
+  return (status === "Needs Rework" ? "Ready" : status) as OperationStatus;
+}
 function parseQuantityLedger(value: unknown): OperationAllocation[] {
   if (typeof value !== "string" || !value.trim()) return [];
   try {
@@ -118,7 +122,7 @@ function quantitiesForRow(row: SourceRow, requiredQuantity: number, status: Oper
 
   const claimedQuantity = allocations.reduce((sum, allocation) => sum + allocation.claimed, 0);
   const completedQuantity = allocations.reduce((sum, allocation) => sum + allocation.completed, 0);
-  const canClaim = ["Ready", "In Progress", "Needs Rework"].includes(status);
+  const canClaim = ["Ready", "In Progress"].includes(status);
   return {
     allocations,
     claimedQuantity,
@@ -134,9 +138,23 @@ function machinistSummary(allocations: OperationAllocation[], requiredQuantity: 
       : allocation.name)
     .join(", ");
 }
+function operationIndex(value: unknown) {
+  const match = selectValue(value, "OP1").match(/^OP(\d+)$/i);
+  return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
+}
+function subtractCompletedQuantity(allocations: OperationAllocation[], quantity: number) {
+  const next = allocations.map((allocation) => ({ ...allocation }));
+  let remaining = quantity;
+  for (let index = next.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    const removed = Math.min(next[index].completed, remaining);
+    next[index].completed -= removed;
+    remaining -= removed;
+  }
+  if (remaining > 0) throw new Error("Rejected quantity exceeds completed work");
+  return next.filter((allocation) => allocation.claimed > 0 || allocation.completed > 0);
+}
 function fabricationStatus(requirementStatus: string, machinist: string): ManufacturingOperation["status"] {
   if (requirementStatus === "Complete") return "Complete";
-  if (requirementStatus === "Needs Rework") return "Needs Rework";
   if (requirementStatus === "Ready for Finishing") return machinist ? "In Progress" : "Ready";
   return "Planned";
 }
@@ -234,7 +252,7 @@ async function reconcileRequirementWorkflow(requirementId: number, options: { fi
   const requirementStatus = selectValue(requirement.Status, "Needs Triage");
   const qcPassed = selectValue(requirement["QC Outcome"]) === "Passed";
   const finishingComplete = options.finishingComplete ?? (!finishingRequired || (
-    qcPassed && !["Ready for QC", "Ready for Finishing", "Needs Rework"].includes(requirementStatus)
+    qcPassed && !["Ready for QC", "Ready for Finishing"].includes(requirementStatus)
   ));
   const plan = planRequirementWorkflow(relatedRows.map((row) => ({
     id: row.id,
@@ -242,7 +260,7 @@ async function reconcileRequirementWorkflow(requirementId: number, options: { fi
     operationNumber: selectValue(row["Operation Number"], "OP1"),
     machine: selectValue(row.Machine, "Unassigned"),
     workType: operationWorkType(row),
-    status: selectValue(row.Status, "Planned") as OperationStatus,
+    status: operationStatus(row.Status),
     active: Boolean(row["Active in Routing"]),
     claimedQuantity: Number(row["Claimed Quantity"] ?? 0),
     completedQuantity: Number(row["Completed Quantity"] ?? 0),
@@ -267,25 +285,6 @@ async function patchOperation(id: number, patch: OperationPatch, machinist: stri
   if ((patch.status === "In Progress" || patch.status === "Complete") && patch.machinist === undefined) body.Machinist = machinist;
   if (patch.status === "In Progress") body["Started At"] = new Date().toISOString();
   if (patch.status === "Complete") body["Completed At"] = new Date().toISOString();
-  if (patch.status === "Needs Rework" && workType === "Manufacturing") {
-    const requirementId = linkedId(operation["Production Requirement"]);
-    if (requirementId) {
-      const requirement = await getRow(REQUIREMENTS_TABLE_ID, requirementId);
-      const requiredQuantity = Math.max(1, Math.floor(Number(requirement["Required Quantity"] ?? 1)));
-      const currentStatus = selectValue(operation.Status, "Planned") as OperationStatus;
-      const current = quantitiesForRow(operation, requiredQuantity, currentStatus);
-      const allocations = current.allocations.map((allocation) => ({
-        ...allocation,
-        claimed: allocation.claimed + allocation.completed,
-        completed: 0,
-      }));
-      body["Claimed Quantity"] = allocations.reduce((sum, allocation) => sum + allocation.claimed, 0);
-      body["Completed Quantity"] = 0;
-      body["Quantity Ledger"] = JSON.stringify(allocations);
-      body["Completed At"] = null;
-    }
-  }
-
   await patchRow(OPERATIONS_TABLE_ID, id, body);
 
   const requirementId = linkedId(operation["Production Requirement"]);
@@ -339,7 +338,7 @@ async function updateCamHandoff(
 
   const operation = await getRow(OPERATIONS_TABLE_ID, id);
   if (operationWorkType(operation) !== "CAM") throw new Error("Only CAM handoffs can be edited");
-  const status = selectValue(operation.Status, "Planned") as OperationStatus;
+  const status = operationStatus(operation.Status);
   if (status !== "Complete") throw new Error("Only completed CAM handoffs can be edited");
   const requirementId = linkedId(operation["Production Requirement"]);
   if (!requirementId) throw new Error("Operation is not linked to a production requirement");
@@ -398,7 +397,7 @@ async function applyQuantityAction(
   }
   const taskQuantity = taskQuantityForRow(operation, requiredQuantity);
   if (workType === "CAM") validateCamAction({ action, quantity });
-  const currentStatus = selectValue(operation.Status, "Planned") as OperationStatus;
+  const currentStatus = operationStatus(operation.Status);
   const current = quantitiesForRow(operation, taskQuantity, currentStatus);
   const allocations = current.allocations.map((allocation) => ({ ...allocation }));
 
@@ -411,7 +410,7 @@ async function applyQuantityAction(
       && selectValue(candidate["Operation Number"], "OP1") === selectValue(operation["Operation Number"], "OP1"),
     );
     if (target && targetMachineHasStarted({
-      status: selectValue(target.Status, "Planned") as OperationStatus,
+      status: operationStatus(target.Status),
       claimedQuantity: Number(target["Claimed Quantity"] ?? 0),
       completedQuantity: Number(target["Completed Quantity"] ?? 0),
     })) {
@@ -433,7 +432,7 @@ async function applyQuantityAction(
   actorAllocation.name = actor.name;
 
   if (action === "claim") {
-    if (!["Ready", "In Progress", "Needs Rework"].includes(currentStatus)) {
+    if (!["Ready", "In Progress"].includes(currentStatus)) {
       throw new Error("This operation is not available to claim");
     }
     if (quantity > current.availableQuantity) throw new Error(`Only ${current.availableQuantity} part(s) remain available`);
@@ -539,8 +538,8 @@ async function stealOperationClaim(
   const requiredQuantity = Math.max(1, Math.floor(Number(requirement["Required Quantity"] ?? 1)));
   const workType = operationWorkType(operation);
   const taskQuantity = taskQuantityForRow(operation, requiredQuantity);
-  const currentStatus = selectValue(operation.Status, "Planned") as OperationStatus;
-  if (!["Ready", "In Progress", "Needs Rework"].includes(currentStatus)) {
+  const currentStatus = operationStatus(operation.Status);
+  if (!["Ready", "In Progress"].includes(currentStatus)) {
     throw new Error("This production requirement cannot be stolen right now");
   }
 
@@ -628,7 +627,7 @@ async function renameMachinistAllocations(userId: string, oldName: string, newNa
     const requirement = requirementId ? requirements.get(requirementId) : undefined;
     const requiredQuantity = Math.max(1, Math.floor(Number(requirement?.["Required Quantity"] ?? 1)));
     const taskQuantity = taskQuantityForRow(operation, requiredQuantity);
-    const status = selectValue(operation.Status, "Planned") as OperationStatus;
+    const status = operationStatus(operation.Status);
     const current = quantitiesForRow(operation, taskQuantity, status);
     let changed = false;
     const allocations = current.allocations.map((allocation) => {
@@ -663,6 +662,7 @@ async function patchRequirementQualityOutcome(
   actorName: string,
   notes: string,
   reviewedAt: string,
+  rejectedQuantity?: number,
 ) {
   
 
@@ -682,16 +682,34 @@ async function patchRequirementQualityOutcome(
   }
 
   if (result === "failed") {
-    const reworkOperation = [...inspectedRows].sort((a, b) =>
-      selectValue(b["Operation Number"], "OP1").localeCompare(selectValue(a["Operation Number"], "OP1")) || b.id - a.id,
-    )[0];
-    await patchOperation(reworkOperation.id, { status: "Needs Rework" }, actorName);
+    const requiredQuantity = Math.max(1, Math.floor(Number(requirement["Required Quantity"] ?? 1)));
+    const quantity = rejectedQuantity ?? requiredQuantity;
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > requiredQuantity) {
+      throw new Error(`Rejected quantity must be a whole number from 1 to ${requiredQuantity}`);
+    }
+    const firstStage = Math.min(...inspectedRows.map((row) => operationIndex(row["Operation Number"])));
+    for (const row of inspectedRows) {
+      const current = quantitiesForRow(row, requiredQuantity, operationStatus(row.Status));
+      if (current.claimedQuantity !== 0 || current.completedQuantity !== requiredQuantity) {
+        throw new Error("The full batch must have completed every pre-QC operation before QC can fail");
+      }
+      const allocations = subtractCompletedQuantity(current.allocations, quantity);
+      const completedQuantity = allocations.reduce((sum, allocation) => sum + allocation.completed, 0);
+      await patchRow(OPERATIONS_TABLE_ID, row.id, {
+        Status: operationIndex(row["Operation Number"]) === firstStage ? "Ready" : "Planned",
+        Machinist: machinistSummary(allocations, requiredQuantity),
+        "Claimed Quantity": 0,
+        "Completed Quantity": completedQuantity,
+        "Quantity Ledger": JSON.stringify(allocations),
+        "Completed At": null,
+      });
+    }
   }
 
   const finishing = selectValue(requirement.Finishing);
   const hasPostQcWork = manufacturingRows.some(isPostQcOperationRow);
   const status = result === "failed"
-    ? "Needs Rework"
+    ? "Ready for Manufacturing"
     : finishing && finishing !== "None"
       ? "Ready for Finishing"
       : hasPostQcWork
@@ -768,7 +786,7 @@ async function previewForceQuality(requirementId: number) {
     .filter(row => selectValue(row.Status) !== "Complete");
   if (!affected.length) throw new Error("All prerequisite work is already complete; use normal QC");
   const operations = affected.map(row => {
-    const status = selectValue(row.Status, "Planned") as OperationStatus;
+    const status = operationStatus(row.Status);
     const total = taskQuantityForRow(row, quantity);
     const current = quantitiesForRow(row, total, status);
     if (current.completedQuantity > total) throw new Error("Completed quantity exceeds the requirement quantity");

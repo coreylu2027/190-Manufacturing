@@ -5,7 +5,6 @@ export const OPERATION_STATUSES = [
   "Ready",
   "In Progress",
   "Blocked",
-  "Needs Rework",
   "Complete",
 ] as const;
 
@@ -34,11 +33,19 @@ export interface CamDependency {
 
 export type QualityResult = "pending" | "passed" | "failed";
 
+export interface QualityFailureSummary {
+  notes: string;
+  rejectedQuantity: number | null;
+  reviewedAt: string;
+  reviewedBy: string | null;
+}
+
 export interface QualityLocationFields {
   storageLocation: StorageLocation | null;
   locationUpdatedBy: string | null;
   locationUpdatedAt: string | null;
   effectiveQcResult: QualityResult;
+  lastQualityFailure: QualityFailureSummary | null;
 }
 
 export interface ManufacturingOperation extends QualityLocationFields {

@@ -8,7 +8,6 @@ export type WorkflowOperationStatus =
   | "Ready"
   | "In Progress"
   | "Blocked"
-  | "Needs Rework"
   | "Complete";
 
 export interface WorkflowOperation {
@@ -38,7 +37,6 @@ export interface WorkflowPlan {
     | "Ready for Manufacturing"
     | "On Machine"
     | "Ready for QC"
-    | "Needs Rework"
     | "Ready for Finishing"
     | "Complete";
 }
@@ -53,7 +51,6 @@ const DOWNSTREAM_REQUIREMENT_STATUSES = new Set(["Ready for Finishing", "Complet
 const PRESERVED_OPERATION_STATUSES = new Set<WorkflowOperationStatus>([
   "In Progress",
   "Blocked",
-  "Needs Rework",
   "Complete",
 ]);
 
@@ -68,7 +65,6 @@ const STATUS_PRIORITY: Record<WorkflowOperationStatus, number> = {
   Blocked: 2,
   "In Progress": 3,
   Complete: 4,
-  "Needs Rework": 5,
 };
 
 type CanonicalOperation = Pick<WorkflowOperation, "id" | "operationKey" | "workType" | "status">
@@ -205,9 +201,6 @@ export function planRequirementWorkflow(
     if (preQcManufacturing.length === 0 || !preQcManufacturing.some((operation) => operationIndex(operation.operationNumber) === 1)) {
       return { operationPatches, requirementStatus: "Needs Triage" };
     }
-    if (preQcManufacturing.some((operation) => projectedStatuses.get(operation.id) === "Needs Rework")) {
-      return { operationPatches, requirementStatus: "Needs Rework" };
-    }
     if (!preQcManufacturing.every((operation) => projectedStatuses.get(operation.id) === "Complete")) {
       if (preQcManufacturing.some((operation) => projectedStatuses.get(operation.id) === "In Progress")) {
         return { operationPatches, requirementStatus: "On Machine" };
@@ -225,9 +218,6 @@ export function planRequirementWorkflow(
     if (context.finishingRequired && !context.finishingComplete) {
       return { operationPatches, requirementStatus: "Ready for Finishing" };
     }
-    if (postQcManufacturing.some((operation) => projectedStatuses.get(operation.id) === "Needs Rework")) {
-      return { operationPatches, requirementStatus: "Needs Rework" };
-    }
     if (postQcManufacturing.some((operation) => projectedStatuses.get(operation.id) === "In Progress")) {
       return { operationPatches, requirementStatus: "On Machine" };
     }
@@ -243,9 +233,6 @@ export function planRequirementWorkflow(
   }
   if (manufacturing.length === 0 || !manufacturing.some((operation) => operationIndex(operation.operationNumber) === 1)) {
     return { operationPatches, requirementStatus: "Needs Triage" };
-  }
-  if (manufacturing.some((operation) => projectedStatuses.get(operation.id) === "Needs Rework")) {
-    return { operationPatches, requirementStatus: "Needs Rework" };
   }
   if (manufacturing.every((operation) => projectedStatuses.get(operation.id) === "Complete")) {
     return { operationPatches, requirementStatus: "Ready for QC" };

@@ -116,7 +116,7 @@ function quantitiesForRow(row: SourceRow, requiredQuantity: number, status: Oper
 
   const claimedQuantity = allocations.reduce((sum, allocation) => sum + allocation.claimed, 0);
   const completedQuantity = allocations.reduce((sum, allocation) => sum + allocation.completed, 0);
-  const canClaim = ["Ready", "In Progress", "Needs Rework"].includes(status);
+  const canClaim = ["Ready", "In Progress"].includes(status);
   return {
     allocations,
     claimedQuantity,
@@ -127,7 +127,6 @@ function quantitiesForRow(row: SourceRow, requiredQuantity: number, status: Oper
 
 function fabricationStatus(requirementStatus: string, machinist: string): ManufacturingOperation["status"] {
   if (requirementStatus === "Complete") return "Complete";
-  if (requirementStatus === "Needs Rework") return "Needs Rework";
   if (requirementStatus === "Ready for Finishing") return machinist ? "In Progress" : "Ready";
   return "Planned";
 }
@@ -145,13 +144,14 @@ export function projectOperations(operationRows: SourceRow[], requirementRows: S
     const parsed = parseRequirement(linkedValue(row["Production Requirement"]));
     const operationNumber = selectValue(row["Operation Number"], "OP1") as ManufacturingOperation["operationNumber"];
     const machine = selectValue(row.Machine, "Unassigned");
-    const storedStatus = selectValue(row.Status, "Planned") as OperationStatus;
+    const rawStoredStatus = selectValue(row.Status, "Planned");
+    const storedStatus = (rawStoredStatus === "Needs Rework" ? "Ready" : rawStoredStatus) as OperationStatus;
     const finishing = selectValue(requirement?.Finishing);
     const finishingRequired = Boolean(finishing && finishing !== "None");
     const requirementStatus = selectValue(requirement?.Status, "Needs Triage");
     const finishingComplete = !finishingRequired
       || selectValue(requirement?.["QC Outcome"]) === "Passed"
-        && !["Ready for QC", "Ready for Finishing", "Needs Rework"].includes(requirementStatus);
+        && !["Ready for QC", "Ready for Finishing"].includes(requirementStatus);
     const waitingForQcOrFinishing = requiresPassedQc(machine)
       && (selectValue(requirement?.["QC Outcome"]) !== "Passed"
         || Boolean(finishing && finishing !== "None" && selectValue(requirement?.Status) === "Ready for Finishing"));
@@ -214,6 +214,7 @@ export function projectOperations(operationRows: SourceRow[], requirementRows: S
       locationUpdatedBy: textValue(requirement?.["Location Updated By"]) || null,
       locationUpdatedAt: textValue(requirement?.["Location Updated At"]) || null,
       effectiveQcResult: "pending" as const,
+      lastQualityFailure: null,
     };
   });
 
@@ -294,13 +295,14 @@ export function projectFinishing(
       locationUpdatedBy: textValue(requirement["Location Updated By"]) || null,
       locationUpdatedAt: textValue(requirement["Location Updated At"]) || null,
       effectiveQcResult: "pending" as const,
+      lastQualityFailure: null,
     }];
   });
 
   return jobs.filter(job => job.active);
 }
-export type ReviewRow = Omit<QualityReviewRow, "storage_location" | "location_updated_by" | "location_updated_at"> &
-  Partial<Pick<QualityReviewRow, "storage_location" | "location_updated_by" | "location_updated_at">>;
+export type ReviewRow = Omit<QualityReviewRow, "storage_location" | "location_updated_by" | "location_updated_at" | "rejected_quantity"> &
+  Partial<Pick<QualityReviewRow, "storage_location" | "location_updated_by" | "location_updated_at" | "rejected_quantity">>;
 
 function normalizedReviews(reviews: ReviewRow[]): QualityReviewRow[] {
   return reviews.map((review) => ({
@@ -308,6 +310,7 @@ function normalizedReviews(reviews: ReviewRow[]): QualityReviewRow[] {
     storage_location: review.storage_location ?? null,
     location_updated_by: review.location_updated_by ?? null,
     location_updated_at: review.location_updated_at ?? null,
+    rejected_quantity: review.rejected_quantity ?? null,
   }));
 }
 
@@ -323,7 +326,6 @@ export function projectQc(operations: ManufacturingOperation[], reviews: ReviewR
 function requirementStatus(operations: ManufacturingOperation[]): OperationStatus {
   if (operations.every((operation) => operation.status === "Complete")) return "Complete";
   if (operations.some((operation) => operation.status === "Blocked")) return "Blocked";
-  if (operations.some((operation) => operation.status === "Needs Rework")) return "Needs Rework";
   if (operations.some((operation) => operation.status === "In Progress")) return "In Progress";
   if (operations.some((operation) => operation.status === "Ready")) return "Ready";
   return "Planned";

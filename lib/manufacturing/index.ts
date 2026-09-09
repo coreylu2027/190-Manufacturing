@@ -55,8 +55,15 @@ export async function renameMachinistAllocations(userId: string, oldName: string
   return writer().renameMachinistAllocations(userId, oldName, newName);
 }
 
-export async function recordQualityReview(requirementId: number, result: Exclude<QualityResult, "pending">, notes: string, actor: Actor, location: StorageLocation | null = null) {
-  return writer().recordQualityReview(requirementId, result, notes, actor, location);
+export async function recordQualityReview(
+  requirementId: number,
+  result: Exclude<QualityResult, "pending">,
+  notes: string,
+  actor: Actor,
+  location: StorageLocation | null = null,
+  rejectedQuantity?: number,
+) {
+  return writer().recordQualityReview(requirementId, result, notes, actor, location, rejectedQuantity);
 }
 
 export async function updateRequirementNotes(requirementId: number, notes: string, actor: Actor) {

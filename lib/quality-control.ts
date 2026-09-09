@@ -9,6 +9,7 @@ export interface QualityReviewRow {
   operation_id: number | null;
   result: "passed" | "failed";
   notes: string;
+  rejected_quantity: number | null;
   reviewed_by: string;
   reviewed_at: string;
   storage_location: string | null;
@@ -33,6 +34,7 @@ const PENDING_LOCATION: Omit<QualityLocationFields, "effectiveQcResult"> = {
   storageLocation: null,
   locationUpdatedBy: null,
   locationUpdatedAt: null,
+  lastQualityFailure: null,
 };
 
 function timestamp(value: string | null | undefined) {
@@ -63,10 +65,12 @@ export function qualityMetadataByRequirement(
   }
 
   const reviewsByRequirement = new Map<number, QualityReviewRow>();
+  const reviewHistoryByRequirement = new Map<number, QualityReviewRow[]>();
   for (const review of reviews) {
     const requirementId = review.production_requirement_id
       ?? (review.operation_id ? requirementIdByOperation.get(review.operation_id) : undefined);
     if (!requirementId) continue;
+    reviewHistoryByRequirement.set(requirementId, [...(reviewHistoryByRequirement.get(requirementId) ?? []), review]);
     const current = reviewsByRequirement.get(requirementId);
     if (!current || timestamp(review.reviewed_at) > timestamp(current.reviewed_at)
       || timestamp(review.reviewed_at) === timestamp(current.reviewed_at) && review.id > current.id) {
@@ -99,6 +103,9 @@ export function qualityMetadataByRequirement(
       ? "pending"
       : review.result;
     const effectivePass = effectiveQcResult === "passed";
+    const lastFailure = (reviewHistoryByRequirement.get(requirementId) ?? [])
+      .filter((candidate) => candidate.result === "failed" && !retracted.has(candidate.id))
+      .sort((left, right) => timestamp(right.reviewed_at) - timestamp(left.reviewed_at) || right.id - left.id)[0];
     const storageLocation: StorageLocation | null = effectivePass && isStorageLocation(review?.storage_location)
       ? review.storage_location
       : null;
@@ -113,6 +120,12 @@ export function qualityMetadataByRequirement(
       storageLocation,
       locationUpdatedBy: effectivePass ? names.get(review?.location_updated_by ?? "") ?? null : null,
       locationUpdatedAt: effectivePass ? review?.location_updated_at ?? null : null,
+      lastQualityFailure: lastFailure ? {
+        notes: lastFailure.notes,
+        rejectedQuantity: lastFailure.rejected_quantity,
+        reviewedAt: lastFailure.reviewed_at,
+        reviewedBy: names.get(lastFailure.reviewed_by) ?? null,
+      } : null,
     });
   }
 
@@ -134,6 +147,7 @@ export function enrichOperationsWithQuality(
       qualityNotes: quality?.notes ?? "",
       qualityReviewedBy: quality?.reviewedBy ?? null,
       qualityReviewedAt: quality?.reviewedAt ?? null,
+      lastQualityFailure: quality?.lastQualityFailure ?? null,
     };
   });
 }
@@ -181,6 +195,7 @@ export function projectQualityControl(
         locationUpdatedBy: operations[0].locationUpdatedBy,
         locationUpdatedAt: operations[0].locationUpdatedAt,
         effectiveQcResult: quality.effectiveQcResult,
+        lastQualityFailure: quality.lastQualityFailure,
       };
     })
     .sort((a, b) => Number(a.result !== "pending") - Number(b.result !== "pending")

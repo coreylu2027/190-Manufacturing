@@ -27,12 +27,13 @@ import { toast } from "sonner";
 import { StorageLocationEditor } from "@/components/storage-location-editor";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { canUseOnRobotLocation } from "@/lib/storage-locations";
-import type { AdminResponse, QualityControlItem, QualityResult } from "@/lib/types";
+import type { AdminResponse, QualityControlItem, QualityFailureSummary, QualityResult } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const gridTheme = themeQuartz.withParams({
@@ -73,11 +74,11 @@ async function fetchQualityControl(): Promise<AdminResponse> {
   return body;
 }
 
-async function submitReview(item: QualityControlItem, result: "passed" | "failed", notes: string) {
+async function submitReview(item: QualityControlItem, result: "passed" | "failed", notes: string, rejectedQuantity?: number) {
   const response = await fetch(`/api/admin/qc/${item.requirementId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ result, notes }),
+    body: JSON.stringify(result === "failed" ? { result, notes, rejectedQuantity } : { result, notes }),
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error ?? "Unable to record the quality review");
@@ -181,6 +182,22 @@ function ActionCell({ data, onOpen }: { data?: QualityControlItem; onOpen: (item
   );
 }
 
+function QualityFailureCallout({ failure }: { failure: QualityFailureSummary | null }) {
+  if (!failure) return null;
+  return (
+    <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-rose-950">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs font-bold uppercase tracking-[.14em] text-rose-800">Previous QC failure</p>
+        <p className="text-xs text-rose-700">
+          {failure.rejectedQuantity ? `${failure.rejectedQuantity} rejected · ` : ""}{formatDate(failure.reviewedAt)}
+          {failure.reviewedBy ? ` · ${failure.reviewedBy}` : ""}
+        </p>
+      </div>
+      <p className="mt-2 whitespace-pre-wrap text-sm leading-6">{failure.notes || "No failure reason was recorded."}</p>
+    </div>
+  );
+}
+
 function ProductionNotesForQc({
   item,
   deleting,
@@ -219,6 +236,9 @@ export function QualityControlDashboard() {
   const [machine, setMachine] = useState("all");
   const [location, setLocation] = useState("all");
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [failureDialogItem, setFailureDialogItem] = useState<QualityControlItem | null>(null);
+  const [failureReason, setFailureReason] = useState("");
+  const [rejectedQuantityDraft, setRejectedQuantityDraft] = useState("1");
 
   const invalidateManufacturing = () => {
     queryClient.invalidateQueries({ queryKey: ["qc"] }, { cancelRefetch: false });
@@ -227,9 +247,15 @@ export function QualityControlDashboard() {
   };
 
   const reviewMutation = useMutation({
-    mutationFn: ({ item, result: nextResult, notes }: { item: QualityControlItem; result: "passed" | "failed"; notes: string }) => submitReview(item, nextResult, notes),
+    mutationFn: ({ item, result: nextResult, notes, rejectedQuantity }: { item: QualityControlItem; result: "passed" | "failed"; notes: string; rejectedQuantity?: number }) => submitReview(item, nextResult, notes, rejectedQuantity),
     onSuccess: (_data, variables) => {
-      toast.success(variables.result === "passed" ? "Quality check passed" : "Operation returned for rework", variables.result === "passed" ? { action: { label: "Undo", onClick: () => undoReviewMutation.mutate(variables.item) } } : undefined);
+      toast.success(variables.result === "passed" ? "Quality check passed" : `${variables.rejectedQuantity ?? variables.item.operations[0].quantity} part(s) returned to OP1`, variables.result === "passed" ? { action: { label: "Undo", onClick: () => undoReviewMutation.mutate(variables.item) } } : undefined);
+      setDraftNotes((current) => {
+        const next = { ...current };
+        delete next[variables.item.requirementId];
+        return next;
+      });
+      setFailureDialogItem(null);
       setSelectedId(null);
       invalidateManufacturing();
     },
@@ -308,6 +334,8 @@ export function QualityControlDashboard() {
         item.notes,
         item.productionNotes,
         item.reviewedBy,
+        item.lastQualityFailure?.notes,
+        item.lastQualityFailure?.rejectedQuantity,
         item.result,
         resultLabels[item.result],
         completedBy(item),
@@ -326,6 +354,21 @@ export function QualityControlDashboard() {
   const updateNotes = useCallback((requirementId: number, value: string) => {
     setDraftNotes((current) => ({ ...current, [requirementId]: value }));
   }, []);
+  const openFailureDialog = (item: QualityControlItem) => {
+    setFailureDialogItem(item);
+    setFailureReason(draftNotes[item.requirementId] ?? item.notes);
+    setRejectedQuantityDraft(String(item.operations[0].quantity));
+  };
+  const submitFailure = () => {
+    if (!failureDialogItem) return;
+    const maximum = failureDialogItem.operations[0].quantity;
+    const rejectedQuantity = Number(rejectedQuantityDraft);
+    if (!failureReason.trim()) return toast.error("Enter a reason for the QC failure");
+    if (!Number.isInteger(rejectedQuantity) || rejectedQuantity < 1 || rejectedQuantity > maximum) {
+      return toast.error(`Enter a whole number from 1 to ${maximum}`);
+    }
+    mutateReview({ item: failureDialogItem, result: "failed", notes: failureReason, rejectedQuantity });
+  };
   const openItem = (item: QualityControlItem) => setSelectedId(item.requirementId);
   const columnDefs = useMemo<ColDef<QualityControlItem>[]>(() => [
     {
@@ -346,10 +389,11 @@ export function QualityControlDashboard() {
     { colId: "quantity", headerName: "QTY", width: 82, filter: "agNumberColumnFilter", valueGetter: ({ data }) => data?.operations[0].quantity ?? 0 },
     { field: "result", headerName: "QC STATUS", minWidth: 145, cellRenderer: ResultCell },
     {
-      field: "notes",
-      headerName: "INSPECTION NOTES",
+      colId: "notes",
+      headerName: "INSPECTION / FAILURE NOTES",
       minWidth: 260,
       flex: 1,
+      valueGetter: ({ data }) => data?.notes || data?.lastQualityFailure?.notes || "",
       cellRenderer: NotesCell,
     },
     {
@@ -463,6 +507,7 @@ export function QualityControlDashboard() {
                       <ResultBadge result={item.result} />
                     </div>
                     <div className="mt-3 flex flex-wrap gap-1.5">{item.operations.map((row) => <Badge key={row.id} variant="outline">{row.operationNumber} · {row.machine}</Badge>)}</div>
+                    <div className="mt-3"><QualityFailureCallout failure={item.lastQualityFailure} /></div>
                     <label className="mt-4 block text-xs font-semibold text-muted-foreground" htmlFor={`qc-notes-${item.requirementId}`}>Inspection notes</label>
                     <textarea
                       id={`qc-notes-${item.requirementId}`}
@@ -484,7 +529,7 @@ export function QualityControlDashboard() {
                       <Button variant="outline" nativeButton={!operation.hasDrawingPdf} render={operation.hasDrawingPdf ? <a href={`/api/operations/${operation.id}/files/drawing-pdf`} target="_blank" rel="noreferrer" /> : undefined} disabled={!operation.hasDrawingPdf}><FileText /> Drawing PDF</Button>
                       <Button variant="outline" nativeButton={!operation.onshapeUrl} render={operation.onshapeUrl ? <a href={operation.onshapeUrl} target="_blank" rel="noreferrer" /> : undefined} disabled={!operation.onshapeUrl}><ExternalLink /> Onshape source</Button>
                       <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
-                        {item.result === "pending" ? <><Button variant="destructive" onClick={() => mutateReview({ item, result: "failed", notes: draftNotes[item.requirementId] ?? item.notes })} disabled={reviewIsPending || !item.operations.every((row) => row.status === "Complete")}><X /> Fail QC</Button><Button className="bg-emerald-600 hover:bg-emerald-700" onClick={() => mutateReview({ item, result: "passed", notes: draftNotes[item.requirementId] ?? item.notes })} disabled={reviewIsPending || !item.operations.every((row) => row.status === "Complete")}>{reviewIsPending ? <LoaderCircle className="animate-spin" /> : <Check />} Pass QC</Button></> : item.result === "passed" ? <><Button onClick={() => mutateNotes({ item, notes: draftNotes[item.requirementId] ?? item.notes })} disabled={notesArePending || draftNotes[item.requirementId] === undefined || draftNotes[item.requirementId] === item.notes}>{notesArePending ? <LoaderCircle className="animate-spin" /> : <Save />} Save note</Button><Button variant="outline" onClick={() => mutateUndoReview(item)} disabled={undoReviewIsPending || notesArePending}><Clock3 /> Undo QC pass</Button></> : <p className="text-xs text-muted-foreground">Complete the rework to request QC again.</p>}
+                        {item.result === "pending" ? <><Button variant="destructive" onClick={() => openFailureDialog(item)} disabled={reviewIsPending || !item.operations.every((row) => row.status === "Complete")}><X /> Fail QC</Button><Button className="bg-emerald-600 hover:bg-emerald-700" onClick={() => mutateReview({ item, result: "passed", notes: draftNotes[item.requirementId] ?? item.notes })} disabled={reviewIsPending || !item.operations.every((row) => row.status === "Complete")}>{reviewIsPending ? <LoaderCircle className="animate-spin" /> : <Check />} Pass QC</Button></> : item.result === "passed" ? <><Button onClick={() => mutateNotes({ item, notes: draftNotes[item.requirementId] ?? item.notes })} disabled={notesArePending || draftNotes[item.requirementId] === undefined || draftNotes[item.requirementId] === item.notes}>{notesArePending ? <LoaderCircle className="animate-spin" /> : <Save />} Save note</Button><Button variant="outline" onClick={() => mutateUndoReview(item)} disabled={undoReviewIsPending || notesArePending}><Clock3 /> Undo QC pass</Button></> : <p className="text-xs text-muted-foreground">Complete the reopened route to request QC again.</p>}
                       </div>
                     </div>
                   </article>
@@ -517,6 +562,8 @@ export function QualityControlDashboard() {
                     {selected.operations.map((item) => <div key={item.id} className="flex items-center gap-3 rounded-xl border p-3"><Badge variant="outline">{item.operationNumber}</Badge><div className="min-w-0"><p className="truncate text-sm font-semibold">{item.machine}</p><p className="text-xs text-muted-foreground">{item.workType} · {item.status}</p></div></div>)}
                   </div>
                 </section>
+
+                <QualityFailureCallout failure={selected.lastQualityFailure} />
 
                 <section>
                   <label className="mb-3 block text-xs font-bold uppercase tracking-[.14em] text-muted-foreground" htmlFor={`qc-review-notes-${selected.requirementId}`}>Inspection notes</label>
@@ -559,7 +606,7 @@ export function QualityControlDashboard() {
 
               <SheetFooter className="sticky bottom-0 border-t bg-card/95 p-4 backdrop-blur">
                 {selected.result === "pending" ? <>
-                  <Button size="lg" variant="destructive" className="h-11" onClick={() => mutateReview({ item: selected, result: "failed", notes: draftNotes[selected.requirementId] ?? selected.notes })} disabled={reviewIsPending || !ready}><X /> Fail QC</Button>
+                  <Button size="lg" variant="destructive" className="h-11" onClick={() => openFailureDialog(selected)} disabled={reviewIsPending || !ready}><X /> Fail QC</Button>
                   <Button size="lg" className="h-11 bg-emerald-600 hover:bg-emerald-700" onClick={() => mutateReview({ item: selected, result: "passed", notes: draftNotes[selected.requirementId] ?? selected.notes })} disabled={reviewIsPending || !ready}>{reviewIsPending ? <LoaderCircle className="animate-spin" /> : <Check />} Pass QC</Button>
                 </> : selected.result === "passed" ? (
                   <>
@@ -567,7 +614,7 @@ export function QualityControlDashboard() {
                     <Button size="lg" variant="outline" className="h-11" onClick={() => mutateUndoReview(selected)} disabled={undoReviewIsPending || notesArePending}>{undoReviewIsPending ? <LoaderCircle className="animate-spin" /> : <Clock3 />} Undo QC pass</Button>
                   </>
                 ) : (
-                  <div className="rounded-xl bg-rose-50 p-3 text-center text-sm font-medium text-rose-800">Complete the rework to request QC again.</div>
+                  <div className="rounded-xl bg-rose-50 p-3 text-center text-sm font-medium text-rose-800">Complete the reopened route to request QC again.</div>
                 )}
                 <Button variant="outline" onClick={() => setSelectedId(null)}>Close</Button>
               </SheetFooter>
@@ -575,6 +622,38 @@ export function QualityControlDashboard() {
           })()}
         </SheetContent>
       </Sheet>
+
+      <Dialog open={Boolean(failureDialogItem)} onOpenChange={(open) => !open && setFailureDialogItem(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Fail quality control</DialogTitle>
+            <DialogDescription>
+              Rejected parts will restart at the first physical operation. CAM stays complete, and downstream work remains held until QC passes again.
+            </DialogDescription>
+          </DialogHeader>
+          {failureDialogItem && (
+            <div className="space-y-4">
+              <div>
+                <label className="mb-1.5 block text-xs font-semibold" htmlFor="rejected-quantity">Rejected parts</label>
+                {failureDialogItem.operations[0].quantity > 1 ? (
+                  <Input id="rejected-quantity" type="number" inputMode="numeric" min={1} max={failureDialogItem.operations[0].quantity} step={1} value={rejectedQuantityDraft} onChange={(event) => setRejectedQuantityDraft(event.target.value)} autoFocus />
+                ) : (
+                  <p className="rounded-lg border bg-muted/30 px-3 py-2 text-sm font-semibold">1 part</p>
+                )}
+                <p className="mt-1.5 text-xs text-muted-foreground">Defaults to the full quantity of {failureDialogItem.operations[0].quantity}.</p>
+              </div>
+              <div>
+                <label className="mb-1.5 block text-xs font-semibold" htmlFor="failure-reason">Failure reason</label>
+                <textarea id="failure-reason" value={failureReason} onChange={(event) => setFailureReason(event.currentTarget.value)} maxLength={2000} required placeholder="Describe the defect or failed measurement…" className="min-h-32 w-full resize-y rounded-xl border border-input bg-background px-4 py-3 text-sm leading-6 text-foreground caret-foreground outline-none focus:border-ring focus:ring-3 focus:ring-ring/50" />
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setFailureDialogItem(null)} disabled={reviewIsPending}>Cancel</Button>
+            <Button variant="destructive" onClick={submitFailure} disabled={reviewIsPending}>{reviewIsPending && <LoaderCircle className="animate-spin" />} Reject and restart route</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }

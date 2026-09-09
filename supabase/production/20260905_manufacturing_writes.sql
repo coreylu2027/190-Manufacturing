@@ -140,8 +140,22 @@ begin
     if not exists(select 1 from manufacturing.requirements where id=target_requirement_id) then raise exception 'QC requirement missing'; end if;
     if p_action='qc_review' then
       if p_qc->>'result' not in ('passed','failed') then raise exception 'Invalid QC result'; end if;
-      insert into public.quality_control(production_requirement_id,operation_id,result,notes,reviewed_by,reviewed_at,updated_at)
-      values(target_requirement_id,null,(p_qc->>'result')::public.quality_result,coalesce(p_qc->>'notes',''),p_actor,
+      if p_qc->>'result' = 'failed' and (
+        btrim(coalesce(p_qc->>'notes','')) = ''
+        or jsonb_typeof(p_qc->'rejected_quantity') is distinct from 'number'
+        or (p_qc->>'rejected_quantity')::numeric < 1
+        or trunc((p_qc->>'rejected_quantity')::numeric) <> (p_qc->>'rejected_quantity')::numeric
+        or (p_qc->>'rejected_quantity')::numeric > (
+          select greatest(1, trunc(coalesce(r.required_quantity, 1)))
+          from manufacturing.requirements r where r.id = target_requirement_id
+        )
+      ) then raise exception 'Invalid QC failure details'; end if;
+      if p_qc->>'result' = 'passed' and p_qc->>'rejected_quantity' is not null then
+        raise exception 'Passed QC cannot reject a quantity';
+      end if;
+      insert into public.quality_control(production_requirement_id,operation_id,result,notes,rejected_quantity,reviewed_by,reviewed_at,updated_at)
+      values(target_requirement_id,null,(p_qc->>'result')::public.quality_result,coalesce(p_qc->>'notes',''),
+        case when p_qc->>'result' = 'failed' then (p_qc->>'rejected_quantity')::integer else null end,p_actor,
         (p_qc->>'reviewed_at')::timestamptz,clock_timestamp());
     else
       select q.id,q.result::text into target_review_id,review_result from public.quality_control q
