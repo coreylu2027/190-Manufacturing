@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Check, ChevronLeft, ChevronRight, ListTree, Wrench } from "lucide-react";
+import { Check, ListTree, Wrench } from "lucide-react";
 import { useLayoutEffect, useRef } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -121,10 +121,6 @@ export function OperationFlowDiagram({
   const currentOperation = operations.find((operation) => operation.id === currentTile?.node.operationId);
   const currentCategory = currentOperation?.workType
     ?? (currentTile?.node.kind === "qc" ? "Quality" : "Finishing");
-  const scrollSteps = (direction: -1 | 1) => {
-    scrollerRef.current?.scrollBy({ left: direction * 336, behavior: "smooth" });
-  };
-
   useLayoutEffect(() => {
     const scroller = scrollerRef.current;
     const tile = currentTileRef.current;
@@ -146,22 +142,14 @@ export function OperationFlowDiagram({
 
   return (
     <div>
-      <div className="flex items-center gap-1.5">
-        <button type="button" className="grid size-8 shrink-0 place-items-center rounded-lg text-muted-foreground transition hover:bg-muted hover:text-foreground" aria-label="Show earlier flow steps" onClick={() => scrollSteps(-1)}>
-          <ChevronLeft className="size-5" />
-        </button>
-        <div ref={scrollerRef} className="min-w-0 flex-1 snap-x snap-mandatory overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-          <div className="flex min-w-max gap-2 py-1">
-            {tiles.map(({ node, step }) => (
-              <div key={node.key} ref={node.operationId === currentOperationId ? currentTileRef : undefined} className="snap-start">
-                <FlowTile node={node} step={step} current={node.operationId === currentOperationId} onOpenOperation={onOpenOperation} />
-              </div>
-            ))}
-          </div>
+      <div ref={scrollerRef} className="operation-flow-scrollbar min-w-0 overflow-x-auto overscroll-x-contain">
+        <div className="flex min-w-max gap-2 pb-2 pt-1">
+          {tiles.map(({ node, step }) => (
+            <div key={node.key} ref={node.operationId === currentOperationId ? currentTileRef : undefined}>
+              <FlowTile node={node} step={step} current={node.operationId === currentOperationId} onOpenOperation={onOpenOperation} />
+            </div>
+          ))}
         </div>
-        <button type="button" className="grid size-8 shrink-0 place-items-center rounded-lg text-muted-foreground transition hover:bg-muted hover:text-foreground" aria-label="Show later flow steps" onClick={() => scrollSteps(1)}>
-          <ChevronRight className="size-5" />
-        </button>
       </div>
 
       <div className="mt-3 rounded-xl border border-blue-100 bg-blue-50/30 p-4 shadow-sm">
