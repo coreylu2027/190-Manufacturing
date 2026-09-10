@@ -5,10 +5,11 @@ import { Box, Expand, LoaderCircle, Rotate3D } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 
 type PreviewState = "loading" | "ready" | "missing" | "error";
 
-export function PartModelPreview({ src, partName }: { src: string; partName: string }) {
+export function PartModelPreview({ src, partName, compact = false }: { src: string; partName: string; compact?: boolean }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<ModelViewerElement>(null);
   const [modelUrl, setModelUrl] = useState<string | null>(null);
@@ -108,7 +109,7 @@ export function PartModelPreview({ src, partName }: { src: string; partName: str
   };
 
   return (
-    <div ref={containerRef} className="part-model-preview group relative isolate h-[22rem] overflow-hidden rounded-xl border bg-[radial-gradient(circle_at_50%_35%,var(--muted),var(--background)_72%)] shadow-sm sm:h-[26rem]">
+    <div ref={containerRef} className={cn("part-model-preview group relative isolate overflow-hidden rounded-xl border bg-[radial-gradient(circle_at_50%_35%,var(--muted),var(--background)_72%)] shadow-sm", compact ? "h-52 sm:h-56" : "h-[22rem] sm:h-[26rem]")}>
       <div className="absolute left-3 top-3 z-10 flex items-center gap-2 rounded-full border bg-background/90 px-3 py-1.5 text-[10px] font-bold uppercase tracking-[.12em] text-muted-foreground shadow-sm backdrop-blur">
         <Box className="size-3.5 text-primary" /> Interactive model
       </div>
@@ -142,8 +143,8 @@ export function PartModelPreview({ src, partName }: { src: string; partName: str
           <Button size="icon" variant="secondary" className="shadow-md" aria-label="Reset 3D view" onClick={resetCamera}>
             <Rotate3D />
           </Button>
-          <Button size="icon" variant="secondary" className="shadow-md" aria-label="Open 3D view fullscreen" onClick={enterFullscreen}>
-            <Expand />
+          <Button size={compact ? "sm" : "icon"} variant="secondary" className="shadow-md" aria-label="Open 3D view fullscreen" onClick={enterFullscreen}>
+            <Expand />{compact ? "Expand 3D" : null}
           </Button>
         </div>
       )}

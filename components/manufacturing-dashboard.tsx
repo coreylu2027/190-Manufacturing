@@ -39,6 +39,7 @@ import {
   SlidersHorizontal,
   TriangleAlert,
   Wrench,
+  X,
   XCircle,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -117,11 +118,21 @@ const MANUFACTURING_QUERY_KEYS = ["operations", "fabrication", "qc", "admin"] as
 const REALTIME_REFRESH_DEBOUNCE_MS = 300;
 const REALTIME_REFRESH_JITTER_MS = 1_200;
 
+const loadPartModelPreview = () => import("@/components/part-model-preview").then((module) => module.PartModelPreview);
+
 const PartModelPreview = dynamic(
-  () => import("@/components/part-model-preview").then((module) => module.PartModelPreview),
+  loadPartModelPreview,
   {
     ssr: false,
     loading: () => <Skeleton className="h-[22rem] rounded-xl sm:h-[26rem]" />,
+  },
+);
+
+const CompactPartModelPreview = dynamic(
+  loadPartModelPreview,
+  {
+    ssr: false,
+    loading: () => <Skeleton className="h-52 rounded-xl sm:h-56" />,
   },
 );
 
@@ -1438,16 +1449,34 @@ export function ManufacturingDashboard({
       )}
 
       <Sheet open={Boolean(selected)} onOpenChange={(open) => !open && setSelectedId(null)}>
-        <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
+        <SheetContent showCloseButton={false} className="w-full gap-0 overflow-y-auto sm:max-w-xl">
           {selected && (
             <>
-              <SheetHeader className="border-b p-6 pr-14">
-                <div className="mb-2 flex items-center gap-2"><StatusBadge status={selected.status} /><Badge variant="outline">{operationLabel(selected)}</Badge><Badge variant="outline">{selected.workType}</Badge></div>
-                <SheetTitle className="text-2xl font-bold tracking-tight">{selected.workType === "CAM" ? `CAM — ${selected.partName}` : selected.partName}</SheetTitle>
-                <SheetDescription className="font-mono text-xs font-semibold text-primary">{selected.partNumber}</SheetDescription>
+              <SheetHeader className="sticky top-0 z-20 border-b bg-popover/95 p-4 pr-12 shadow-sm backdrop-blur">
+                <Button variant="ghost" size="icon-sm" className="absolute right-3 top-3" aria-label="Close operation details" onClick={() => setSelectedId(null)}><X /></Button>
+                <div className="flex flex-wrap items-center gap-2"><StatusBadge status={selected.status} /><Badge variant="outline">{selected.workType}</Badge></div>
+                <SheetTitle className="mt-2 text-xl font-bold tracking-tight">{selected.partName}</SheetTitle>
+                <SheetDescription className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="font-mono text-xs font-semibold text-primary">{selected.partNumber}</span>
+                  <span aria-hidden="true">·</span>
+                  <span className="font-semibold text-foreground">{operationLabel(selected)} · {selected.machine}</span>
+                </SheetDescription>
+                <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                  <span className="font-semibold text-foreground">{selected.completedQuantity} / {selected.taskQuantity} complete</span>
+                  <span>{selected.availableQuantity} available</span>
+                  {selectedAllocation.claimed > 0 && <span>{selectedAllocation.claimed} claimed by you</span>}
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {["Ready", "In Progress", "Needs Rework"].includes(selected.status) && selected.availableQuantity > 0 && <Button className="min-h-9" onClick={() => requestQuantityAction("claim", selected.availableQuantity)} disabled={mutation.isPending}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <CircleDot />} {selected.workType === "CAM" ? "Claim CAM task" : `Claim ${selected.availableQuantity === 1 ? "part" : "parts"}`}</Button>}
+                  {isOperationStealable(selected, query.data?.user ?? null) && <Button variant="destructive" className="min-h-9" onClick={requestSteal} disabled={mutation.isPending}><TriangleAlert /> Steal {selected.workType === "CAM" ? "CAM task" : "requirement"}</Button>}
+                  {selectedAllocation.claimed > 0 && <Button className="min-h-9 bg-emerald-600 hover:bg-emerald-700" onClick={() => requestQuantityAction("complete", selectedAllocation.claimed)} disabled={mutation.isPending}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <Check />} Complete</Button>}
+                  {selectedAllocation.claimed > 0 && <Button variant="outline" className="min-h-9" onClick={() => requestQuantityAction("release", selectedAllocation.claimed)} disabled={mutation.isPending}><RotateCcw /> Release</Button>}
+                  {selectedAllocation.completed > 0 && <Button variant="outline" className="min-h-9" onClick={() => requestQuantityAction("undo_complete", selectedAllocation.completed)} disabled={mutation.isPending}><RotateCcw /> Undo completion</Button>}
+                  {selected.status === "Complete" && <div className="flex min-h-9 items-center gap-2 rounded-lg bg-emerald-50 px-3 text-xs font-semibold text-emerald-800"><Check className="size-4" /> {selected.workType === "CAM" ? "CAM completed" : `${selected.completedQuantity} of ${selected.taskQuantity} completed`} by {selected.machinist || "machinist"}</div>}
+                </div>
               </SheetHeader>
 
-              <div className="space-y-6 p-6">
+              <div className="space-y-5 p-5">
                 <section>
                   <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Part flow</h3>
                   <OperationFlowDiagram
@@ -1458,45 +1487,50 @@ export function ManufacturingDashboard({
                   />
                 </section>
 
-                {selected.hasStepFile && (
-                  <section>
-                    <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">3D part preview</h3>
-                    <PartModelPreview
-                      src={`/api/operations/${selected.id}/preview`}
-                      partName={`${selected.partNumber} ${selected.partName}`}
-                    />
-                  </section>
-                )}
-
                 <section>
-                  <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Operation details</h3>
-                  <div className="grid grid-cols-2 overflow-hidden rounded-xl border">
-                    {[
-                      [selected.workType === "CAM" ? "Target machine" : "Machine", selected.machine], ["Work", operationLabel(selected)],
-                      ["Revision", selected.revision || "—"], ["Assembly", selected.assemblyNumber],
-                      ["Part quantity", String(selected.quantity)], ["Task quantity", String(selected.taskQuantity)],
-                      ["Available", String(selected.availableQuantity)], ["Claimed", String(selected.claimedQuantity)],
-                      ["Completed", String(selected.completedQuantity)], ["Your claim", String(selectedAllocation.claimed)],
-                      ["Source document", selected.documentName || "Not synced"], ["Machinist", selected.machinist || "Unclaimed"],
-                      ["Started", formatDate(selected.startedAt)], ["Finished", formatDate(selected.completedAt)],
-                    ].map(([label, value], index, details) => <div key={label} className={cn("p-3", index % 2 === 0 && "border-r", index < details.length - 2 && "border-b")}><p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{label}</p><p className="mt-1 text-sm font-semibold">{value}</p></div>)}
+                  <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Current operation</h3>
+                  <div className="overflow-hidden rounded-xl border bg-muted/10">
+                    <div className="border-b p-4">
+                      <p className="text-base font-bold">{selected.machine} — {operationLabel(selected)}</p>
+                      <p className="mt-1 text-xs text-muted-foreground">{selected.workType === "CAM" ? "CAM programming prerequisite" : selected.workType}</p>
+                    </div>
+                    <div className="grid grid-cols-2">
+                      <div className="border-b border-r p-3"><p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Machine</p><p className="mt-1 text-sm font-semibold">{selected.machine}</p></div>
+                      <div className="border-b p-3"><p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Work</p><p className="mt-1 text-sm font-semibold">{operationLabel(selected)}</p></div>
+                      <div className="border-r p-3"><p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Quantity</p><p className="mt-1 text-sm font-semibold">{selected.completedQuantity} / {selected.taskQuantity} complete</p><p className="mt-0.5 text-[11px] text-muted-foreground">{selected.availableQuantity} available · {selected.claimedQuantity} claimed</p></div>
+                      <div className="p-3"><p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Your claim</p><p className="mt-1 text-sm font-semibold">{selectedAllocation.claimed} / {selected.taskQuantity}</p></div>
+                    </div>
+                    <details className="group border-t">
+                      <summary className="cursor-pointer list-none px-4 py-3 text-sm font-semibold text-primary marker:content-none">More details <ChevronRight className="ml-1 inline size-4 transition-transform group-open:rotate-90" /></summary>
+                      <div className="grid grid-cols-2 border-t bg-background/60">
+                        {[
+                          ["Revision", selected.revision || "—"], ["Assembly", selected.assemblyNumber],
+                          ["Source document", selected.documentName || "Not synced"], ["Machinist", selected.machinist || "Unclaimed"],
+                          ["Started", formatDate(selected.startedAt)], ["Finished", formatDate(selected.completedAt)],
+                        ].map(([label, value], index, details) => <div key={label} className={cn("p-3", index % 2 === 0 && "border-r", index < details.length - 2 && "border-b")}><p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{label}</p><p className="mt-1 break-words text-sm font-semibold">{value}</p></div>)}
+                      </div>
+                    </details>
                   </div>
                 </section>
 
-                {selected.requirementId && selected.workType === "Manufacturing" && (
+                {selected.requirementId !== null && (
                   <section>
-                    <StorageLocationEditor
-                      requirementId={selected.requirementId}
-                      value={selected.storageLocation}
-                      updatedBy={selected.locationUpdatedBy}
-                      updatedAt={selected.locationUpdatedAt}
-                      canEdit
-                      allowOnRobot={canUseOnRobotLocation(selected.effectiveQcResult === "passed", selected.finishingComplete)}
-                    />
+                    <h3 className="mb-3 flex items-center gap-1.5 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground"><MapPin className="size-3.5" /> Part location</h3>
+                    <div className="rounded-xl border bg-muted/20 p-3">
+                      <StorageLocationEditor
+                        requirementId={selected.requirementId}
+                        value={selected.storageLocation}
+                        updatedBy={selected.locationUpdatedBy}
+                        updatedAt={selected.locationUpdatedAt}
+                        canEdit
+                        compact
+                        allowOnRobot={canUseOnRobotLocation(selected.effectiveQcResult === "passed", selected.finishingComplete)}
+                      />
+                    </div>
                   </section>
                 )}
 
-                {selected.requirementId && (
+                {selected.requirementId !== null && (
                   <ProductionRequirementNotes
                     key={selected.requirementId}
                     requirementId={selected.requirementId}
@@ -1535,17 +1569,16 @@ export function ManufacturingDashboard({
                   </section>
                 )}
 
-                <section>
-                  <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Routing progress</h3>
-                  <div className="flex items-center">
-                    {(["Planned", "Ready", "In Progress", "Complete"] as OperationStatus[]).map((status, index, steps) => {
-                      const statusIndex = steps.indexOf(selected.status);
-                      const active = statusIndex >= index || selected.status === "Complete";
-                      return <div key={status} className="flex flex-1 items-center last:flex-none"><div className={cn("grid size-7 place-items-center rounded-full border text-[10px] font-bold", active ? "border-primary bg-primary text-primary-foreground" : "bg-muted text-muted-foreground")}>{active ? <Check className="size-3.5" /> : index + 1}</div>{index < steps.length - 1 && <div className={cn("h-0.5 flex-1", statusIndex > index ? "bg-primary" : "bg-border")} />}</div>;
-                    })}
-                  </div>
-                  <div className="mt-2 flex justify-between text-[10px] font-semibold text-muted-foreground"><span>Planned</span><span>Ready</span><span>Working</span><span>Done</span></div>
-                </section>
+                {selected.hasStepFile && (
+                  <section>
+                    <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">3D part preview</h3>
+                    <CompactPartModelPreview
+                      src={`/api/operations/${selected.id}/preview`}
+                      partName={`${selected.partNumber} ${selected.partName}`}
+                      compact
+                    />
+                  </section>
+                )}
 
                 <section>
                   <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Files & source</h3>
@@ -1563,16 +1596,6 @@ export function ManufacturingDashboard({
                   </div>
                 </section>
               </div>
-
-              <SheetFooter className="sticky bottom-0 border-t bg-card/95 p-4 backdrop-blur">
-                {["Ready", "In Progress", "Needs Rework"].includes(selected.status) && selected.availableQuantity > 0 && <Button size="lg" className="h-11" onClick={() => requestQuantityAction("claim", selected.availableQuantity)} disabled={mutation.isPending}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <CircleDot />} {selected.workType === "CAM" ? "Claim CAM task" : `Claim ${selected.availableQuantity === 1 ? "part" : "parts"}`}</Button>}
-                {isOperationStealable(selected, query.data?.user ?? null) && <Button size="lg" variant="destructive" className="h-11" onClick={requestSteal} disabled={mutation.isPending}><TriangleAlert /> Steal {selected.workType === "CAM" ? "CAM task" : "production requirement"}</Button>}
-                {selectedAllocation.claimed > 0 && <Button size="lg" className="h-11 bg-emerald-600 hover:bg-emerald-700" onClick={() => requestQuantityAction("complete", selectedAllocation.claimed)} disabled={mutation.isPending}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <Check />} Mark complete</Button>}
-                {selectedAllocation.claimed > 0 && <Button variant="outline" onClick={() => requestQuantityAction("release", selectedAllocation.claimed)} disabled={mutation.isPending}><RotateCcw /> Release claim</Button>}
-                {selectedAllocation.completed > 0 && <Button variant="outline" onClick={() => requestQuantityAction("undo_complete", selectedAllocation.completed)} disabled={mutation.isPending}><RotateCcw /> Undo completion</Button>}
-                {selected.status === "Complete" && <div className="flex items-center justify-center gap-2 rounded-xl bg-emerald-50 p-3 text-sm font-semibold text-emerald-800"><Check className="size-4" /> {selected.workType === "CAM" ? "CAM completed" : `${selected.completedQuantity} of ${selected.taskQuantity} completed`} by {selected.machinist || "machinist"}</div>}
-                <Button variant="outline" onClick={() => setSelectedId(null)}>Close</Button>
-              </SheetFooter>
             </>
           )}
         </SheetContent>

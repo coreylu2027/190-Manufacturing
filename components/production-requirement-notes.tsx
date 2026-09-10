@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { LoaderCircle, Save } from "lucide-react";
+import { LoaderCircle, Plus, Save } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -31,11 +31,13 @@ export function ProductionRequirementNotes({
 }) {
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState(notes);
+  const [expanded, setExpanded] = useState(Boolean(notes));
 
   const mutation = useMutation({
     mutationFn: () => saveProductionNotes(requirementId, draft),
     onSuccess: (result) => {
       setDraft(result.productionNotes);
+      setExpanded(Boolean(result.productionNotes));
       for (const queryKey of MANUFACTURING_QUERY_KEYS) {
         queryClient.invalidateQueries({ queryKey: [queryKey] }, { cancelRefetch: false });
       }
@@ -45,6 +47,16 @@ export function ProductionRequirementNotes({
   });
 
   const changed = draft.trim() !== notes;
+  if (compact && !expanded && !draft) {
+    return (
+      <section>
+        <Button variant="outline" className="w-full justify-start border-dashed" onClick={() => setExpanded(true)}>
+          <Plus /> Add production note
+        </Button>
+      </section>
+    );
+  }
+
   return (
     <section>
       <div className="mb-2 flex items-start justify-between gap-3">
@@ -63,7 +75,7 @@ export function ProductionRequirementNotes({
         maxLength={5000}
         disabled={mutation.isPending}
         placeholder="Add measurements, handoff details, issues, or other notes for this part…"
-        className={`${compact ? "min-h-24" : "min-h-32"} w-full resize-y rounded-xl border border-input bg-background px-4 py-3 text-sm leading-6 text-foreground caret-foreground outline-none disabled:opacity-70 focus:border-ring focus:ring-3 focus:ring-ring/50`}
+        className={`${compact ? "min-h-24 border-amber-200 bg-amber-50/40 dark:border-amber-800 dark:bg-amber-950/20" : "min-h-32 border-input bg-background"} w-full resize-y rounded-xl border px-4 py-3 text-sm leading-6 text-foreground caret-foreground outline-none disabled:opacity-70 focus:border-ring focus:ring-3 focus:ring-ring/50`}
       />
     </section>
   );
