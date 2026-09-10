@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { getAppUser } from "@/lib/auth";
 import { getCurrentManufacturingSnapshot } from "@/lib/manufacturing/cache";
-import { ManufacturingFileError, storedManufacturingFileResponse } from "@/lib/manufacturing/files";
+import { ManufacturingFileError, storedManufacturingFileRedirect } from "@/lib/manufacturing/files";
 
 export const dynamic = "force-dynamic";
 
@@ -23,7 +23,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
 
     const fallbackName = kind === "drawing-pdf" ? `${operation.partNumber}.pdf` : `${operation.partNumber}.step`;
     if (!operation.requirementId) return NextResponse.json({ error: "File not found" }, { status: 404 });
-    return storedManufacturingFileResponse(operation.requirementId, kind, fallbackName);
+    return storedManufacturingFileRedirect(operation.requirementId, kind, fallbackName);
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to open the file" }, {
       status: error instanceof ManufacturingFileError ? error.status : 502,

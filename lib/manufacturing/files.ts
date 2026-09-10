@@ -33,12 +33,6 @@ function safeFileName(value: string, fallback: string) {
   return leaf.replace(/[\r\n]/g, "").slice(0, 240) || fallback;
 }
 
-function contentDisposition(fileName: string) {
-  const ascii = fileName.normalize("NFKD").replace(/[^\x20-\x7E]/g, "_").replace(/["\\]/g, "_");
-  const encoded = encodeURIComponent(fileName).replace(/['()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
-  return `inline; filename="${ascii}"; filename*=UTF-8''${encoded}`;
-}
-
 function validStoredFile(value: unknown): value is StoredFile {
   if (!value || typeof value !== "object") return false;
   const file = value as Record<string, unknown>;
@@ -61,7 +55,7 @@ function validStoredPreview(value: unknown): value is StoredPreview {
     && typeof file.source_sha256 === "string" && /^[0-9a-f]{64}$/.test(file.source_sha256);
 }
 
-export async function storedManufacturingFileResponse(requirementId: number, kind: ManufacturingFileKind, fallbackName: string) {
+export async function storedManufacturingFileRedirect(requirementId: number, kind: ManufacturingFileKind, fallbackName: string) {
   const admin = createAdminClient();
   if (!admin) throw new ManufacturingFileError("Supabase file storage is not configured", 503);
   const { data, error } = await admin.rpc("manufacturing_file_for_requirement", {
@@ -72,20 +66,20 @@ export async function storedManufacturingFileResponse(requirementId: number, kin
   if (data === null) throw new ManufacturingFileError("File not found", 404);
   if (!validStoredFile(data)) throw new ManufacturingFileError("Stored manufacturing file metadata is invalid", 502);
 
-  const { data: blob, error: downloadError } = await admin.storage.from(data.bucket).download(data.path);
-  if (downloadError || !blob) throw new ManufacturingFileError("Unable to retrieve the stored manufacturing file", 502);
-  if (blob.size !== data.byte_size) throw new ManufacturingFileError("Stored manufacturing file failed its size check", 502);
-
   const fileName = safeFileName(data.name, fallbackName);
-  return new Response(blob.stream(), {
-    status: 200,
+  const { data: signed, error: signingError } = await admin.storage.from(data.bucket).createSignedUrl(
+    data.path,
+    5 * 60,
+    kind === "step" ? { download: fileName } : undefined,
+  );
+  if (signingError || !signed?.signedUrl) throw new ManufacturingFileError("Unable to authorize the stored manufacturing file", 502);
+
+  return new Response(null, {
+    status: 307,
     headers: {
-      "Content-Disposition": contentDisposition(fileName),
-      "Content-Type": data.content_type,
-      "Content-Length": String(data.byte_size),
+      Location: signed.signedUrl,
       "Cache-Control": "private, no-store",
-      "X-Content-Type-Options": "nosniff",
-      "X-Content-SHA256": data.sha256,
+      "Referrer-Policy": "no-referrer",
     },
   });
 }
