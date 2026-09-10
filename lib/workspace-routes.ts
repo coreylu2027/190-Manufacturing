@@ -1,4 +1,5 @@
 export const WORKSPACE_ROUTES = {
+  preferences: "/preferences",
   operations: "/operations",
   fabrication: "/finishing",
   production: "/production",

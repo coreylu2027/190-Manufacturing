@@ -7,17 +7,20 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --experimental-strip-types --test lib/manufacturing-workflow.test.mts lib/bulk-selection.test.mts lib/storage-locations.test.mts lib/quality-control.test.mts lib/slack-notifications.test.mts",
+    "test": "node --experimental-strip-types --test lib/manufacturing-workflow.test.mts lib/bulk-selection.test.mts lib/storage-locations.test.mts lib/quality-control.test.mts lib/slack-notifications.test.mts lib/manufacturing/glb.test.mts lib/manufacturing/file-names.test.mts",
     "manufacturing:snapshot": "node --experimental-strip-types --env-file=.env.local scripts/manufacturing-migration/snapshot.mts",
     "manufacturing:prepare": "node --experimental-strip-types scripts/manufacturing-migration/prepare.mts",
     "manufacturing:test-migration": "node --experimental-strip-types --test scripts/manufacturing-migration/core.test.mts lib/manufacturing/model.test.mts lib/manufacturing/projections.test.mts lib/manufacturing/write-adapter.test.mts",
     "manufacturing:import-prepare": "node --experimental-strip-types scripts/manufacturing-migration/import-normalized.mts",
     "manufacturing:shadow": "node --experimental-strip-types --env-file=.env.local scripts/manufacturing-migration/shadow-parity.mts",
     "manufacturing:migrate-attachments": "node --experimental-strip-types --env-file=.env.local scripts/manufacturing-migration/migrate-attachments.mts",
-    "manufacturing:verify-attachments": "node --experimental-strip-types --env-file=.env.local scripts/manufacturing-migration/verify-attachments.mts"
+    "manufacturing:verify-attachments": "node --experimental-strip-types --env-file=.env.local scripts/manufacturing-migration/verify-attachments.mts",
+    "manufacturing:generate-previews": "node --experimental-strip-types --env-file=.env.local scripts/manufacturing-migration/generate-part-previews.mts",
+    "manufacturing:test-assembly-previews": "node --experimental-strip-types --test scripts/manufacturing-migration/assembly-glb.test.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",
+    "@google/model-viewer": "4.3.1",
     "@supabase/ssr": "^0.12.5",
     "@supabase/supabase-js": "^2.112.4",
     "@tanstack/react-query": "^5.102.8",
@@ -45,6 +48,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.3.4",
+    "occt-import-js": "0.0.23",
     "supabase": "^2.116.0",
     "tailwindcss": "^4",
     "typescript": "^5"

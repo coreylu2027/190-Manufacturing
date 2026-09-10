@@ -7,6 +7,13 @@ transaction RPC with stale-write protection and audit history. PDFs and STEP
 files are served from private Supabase Storage, and their exact original names
 come from the private attachment catalog.
 
+The production details panels also support interactive 3D part previews. STEP
+attachments are converted ahead of time into content-addressed GLB derivatives,
+verified after upload, and registered against the exact source STEP SHA-256. The
+browser lazy-loads the viewer only when details are opened, and receives the GLB
+through an approved-user application route; neither the attachment catalog nor
+the private Storage bucket is exposed to clients.
+
 Each production requirement can carry one optional shop-wide part location at
 any workflow stage. The current location is shown in Admin, Operations,
 Production, and Finishing and can be changed or cleared by any approved
@@ -25,6 +32,8 @@ application.
 - [X] Show material in production requirement
 - [ ] Add stock size 
 - [X] Filter by assembly
+- [ ] Reduce clutter in operation detail panel
+- [ ]
 
 ## Stack
 
@@ -50,6 +59,13 @@ application.
 9. To post manufacturing activity to Slack, create an incoming webhook for the desired channel and set the server-only `SLACK_WEBHOOK_URL` variable.
 10. Run `npm run dev`.
 
+After applying the part-preview production SQL, generate or refresh the private
+GLB derivatives with:
+
+```powershell
+npm run manufacturing:generate-previews -- --apply
+```
+
 Authentication is mandatory. Missing Supabase server credentials fail closed
 instead of loading demo data or falling back to another backend.
 
@@ -65,7 +81,7 @@ Operations also include whole-number `Claimed Quantity` and `Completed Quantity`
 
 When all remaining parts are already claimed by someone else, the claim action becomes **Steal production requirement**. A second warning confirmation transfers only claimed quantities; completed quantities keep their original attribution. Each displaced account receives a durable unread website alert and a matching email.
 
-Supported statuses match the live schema: Planned, Ready, In Progress, Blocked, Needs Rework, and Complete.
+Supported operation statuses are Planned, Ready, In Progress, Blocked, and Complete. QC failures reuse these normal route states instead of introducing a separate rework status.
 
 ### CAM prerequisites
 
@@ -91,9 +107,11 @@ The shop UI treats the Onshape document name and assembly part number as separat
 - Authentication and account approval are required in every environment.
 - An approved administrator assigns either the `machinist` or `admin` role.
 - Approval and role checks are repeated on protected server routes; hiding the Admin tab is not the security boundary.
-- Production requirements enter the administrator QC queue after every active pre-QC manufacturing operation is complete. `Threaded Insert` is the sole post-QC exception: it remains planned until QC passes and, when required, powder-coat finishing completes. Passing records the requirement-level review; failing records the review and returns the final pre-QC operation to `Needs Rework`.
+- Production requirements enter the administrator QC queue after every active pre-QC manufacturing operation is complete. `Threaded Insert` is the sole post-QC exception: it remains planned until QC passes and, when required, powder-coat finishing completes. Passing records the requirement-level review. Failing requires a reason and reopens the rejected quantity at OP1; later physical operations unlock in route order while CAM stays complete. Multi-quantity batches default to rejecting the full quantity, but an administrator may reject fewer units. Accepted units retain their completion credit while the batch remains held for reinspection.
 - Supabase is the authoritative QC history by production requirement. Historical operation IDs are retained only as migration provenance. QC and its workflow update commit together in Supabase.
+- Production notes belong to the production requirement and remain editable by approved users across Operations, Finishing, and Production. Inspection notes remain a separate administrator-only QC field. `supabase/production/20260909_requirement_notes.sql` adds both the production-note field and the private, append-only revision log for changes to either note type.
 - `supabase/migrations/20260905165307_part_locations.sql` extends the canonical location choices. Apply it before the normalized production schema, then apply `supabase/production/20260905_part_locations.sql` after the location-aware manufacturing write RPC.
+- Apply `supabase/production/20260909_qc_rejected_quantities.sql` before deploying this QC flow; it backfills failure quantities, resets legacy rework routes, and installs the atomic QC write wrapper.
 - Part location is independent from QC and can be changed at any workflow stage. The `On Robot` choice is enforced in both the application and the database and requires an effective passed review plus completed finishing (or no required finish).
 - Location edits replace the current value and record the editor and time. Clearing records who cleared it. Existing QC-era locations are copied into the requirement-level location during migration.
 
@@ -104,6 +122,23 @@ The reusable notification service in `lib/notifications.ts` stores an in-site al
 `RESEND_API_KEY` and `NOTIFICATION_EMAIL_FROM` are server-only. Without both values, website alerts still work and email delivery is recorded as skipped.
 
 `SLACK_WEBHOOK_URL` is optional and server-only. When configured, successful operation and finishing claims, releases, completions, and reopenings are posted to the webhook's channel. Messages also highlight Ready for QC, Ready for Finishing, post-QC-work-ready, and fully complete milestones. Passed, failed, forced, and undone QC reviews; part-location changes; CAM handoff edits; claim takeovers; and administrator operation overrides are also posted. Slack delivery runs after the API response, retries one HTTP 429 response using Slack's `Retry-After` value, and never changes the result of the manufacturing transaction. No-op edits do not post. Keep the webhook URL out of source control; anyone holding it can post to the configured channel.
+
+## Assembly GLB previews
+
+Parts without STEP previews can use isolated meshes extracted from an Onshape assembly GLB. The `assembly_part_previews` table is a separate, private fallback; importing never updates `part_previews`, replaces an existing fallback, or overwrites a Storage object. The authenticated preview routes support both sources. Deploy the dashboard changes to show the viewer for parts without STEP files.
+
+Apply `supabase/migrations/20260910031802_assembly_glb_previews.sql` after the production part-preview schema. Obtain an inventory using the server-only `manufacturing_assembly_preview_inventory()` RPC and save its JSON array locally. Then run:
+
+```powershell
+node scripts/manufacturing-migration/extract-assembly-previews.mjs robot.glb parts.json migration-artifacts/robot-glb
+node scripts/manufacturing-migration/validate-assembly-previews.mjs migration-artifacts/robot-glb
+npm run manufacturing:test-assembly-previews
+node --env-file=.env.local scripts/manufacturing-migration/upload-assembly-previews.mjs migration-artifacts/robot-glb --apply
+```
+
+The extractor preserves geometry and materials, centers each mesh, and exports one file per distinct mesh. It supports static, uncompressed, texture-free GLBs. Automatic registration requires an exact name that occurs once in the part inventory and identifies one mesh. Repeated instances of that mesh are allowed. Duplicate names, multiple candidate meshes, transformed body nodes, and missing names remain in `review.json`; resolve their CAD identity before associating them with parts. Mesh indices and the source GLB SHA-256 identify the extraction source.
+
+Uploads use immutable SHA-256 paths, download each object to verify its hash, recheck current part identity and preview availability, and verify existing STEP-preview metadata after import. Local GLBs, inventories, review reports, and upload results remain under the git-ignored `migration-artifacts` directory. The full robot GLB is not uploaded.
 
 ## Vercel
 

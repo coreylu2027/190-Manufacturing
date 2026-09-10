@@ -1411,6 +1411,31 @@ class RecordBuildingTests(unittest.TestCase):
         self.assertEqual(statuses["route-a|OP1"], "In Progress")
         self.assertEqual(statuses["route-a|OP2"], "Planned")
 
+    def test_operation_statuses_normalize_legacy_rework_to_route_states(self):
+        operations = [
+            {
+                "Operation": "route-a|OP1",
+                "production_key": "route-a",
+                "Operation Number": "OP1",
+            },
+            {
+                "Operation": "route-a|OP2",
+                "production_key": "route-a",
+                "Operation Number": "OP2",
+            },
+        ]
+        existing_rows = [
+            {"Operation": "route-a|OP1", "Status": "Needs Rework"},
+            {"Operation": "route-a|OP2", "Status": "Ready"},
+        ]
+
+        statuses = MODULE.operation_statuses_for_routes(
+            operations, existing_rows
+        )
+
+        self.assertEqual(statuses["route-a|OP1"], "Ready")
+        self.assertEqual(statuses["route-a|OP2"], "Planned")
+
     def test_threaded_inserts_wait_for_the_app_to_release_them_after_qc(self):
         operations = [
             {

@@ -62,6 +62,20 @@ test("target unlocks only after both physical and CAM prerequisites finish", () 
   assert.equal(ready.requirementStatus, "Ready for Manufacturing");
 });
 
+test("a downstream partial-completion row stays held until the reopened prior stage completes", () => {
+  const held = planRequirementWorkflow([
+    operation({ id: 1, operationNumber: "OP1", machine: "Bandsaw", status: "Ready", completedQuantity: 3 }),
+    operation({ id: 2, operationNumber: "OP2", machine: "Lathe", status: "Planned", completedQuantity: 3 }),
+  ]);
+  assert.deepEqual(held.operationPatches, []);
+
+  const released = planRequirementWorkflow([
+    operation({ id: 1, operationNumber: "OP1", machine: "Bandsaw", status: "Complete", completedQuantity: 5 }),
+    operation({ id: 2, operationNumber: "OP2", machine: "Lathe", status: "Planned", completedQuantity: 3 }),
+  ]);
+  assert.deepEqual(released.operationPatches, [{ id: 2, status: "Ready" }]);
+});
+
 test("multiple CNC operations keep independent CAM prerequisites", () => {
   const plan = planRequirementWorkflow([
     operation({ id: 1, operationNumber: "OP1", machine: "Shop Sabre CNC" }),

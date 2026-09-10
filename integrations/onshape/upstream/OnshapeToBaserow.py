@@ -1523,7 +1523,8 @@ def operation_statuses_for_routes(
     """Gate each operation on completion of the preceding active route step.
 
     Planned and Ready are sync-managed queue states. Manufacturing-owned states
-    are preserved, including In Progress, Blocked, Needs Rework, and Complete.
+    are preserved, including In Progress, Blocked, and Complete. A legacy
+    Needs Rework value is normalized back into normal route readiness.
     """
     existing_by_key = {
         str(row.get("Operation") or ""): row for row in existing_rows
@@ -1541,6 +1542,8 @@ def operation_statuses_for_routes(
             current_status = select_option_value(
                 existing_by_key.get(operation_key, {}).get("Status")
             )
+            if current_status == "Needs Rework":
+                current_status = "Ready"
             machine = select_option_value(operation.get("Machine"))
             if machine == "Threaded Insert" and current_status in ("", "Planned"):
                 # The shop workflow releases threaded inserts only after QC (and

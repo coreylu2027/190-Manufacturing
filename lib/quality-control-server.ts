@@ -11,7 +11,7 @@ export async function loadQualitySourceData(operations: ManufacturingOperation[]
 
   const [{ data: reviews, error: reviewError }, { data: profiles, error: profileError }, retractedIds] = await Promise.all([
     admin.from("quality_control").select(
-      "id, production_requirement_id, operation_id, result, notes, reviewed_by, reviewed_at, storage_location, location_updated_by, location_updated_at",
+      "id, production_requirement_id, operation_id, result, notes, rejected_quantity, reviewed_by, reviewed_at, storage_location, location_updated_by, location_updated_at",
     ),
     admin.from("profiles").select("id, display_name"),
     getRetractedQualityReviewIds(),

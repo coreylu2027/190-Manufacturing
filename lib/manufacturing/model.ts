@@ -33,6 +33,7 @@ export const ENTITIES: readonly Entity[] = [
     ["finishing","Finishing","select","engineering"],["active_in_bom","Active in BOM","boolean","engineering"],
     ["engineering_changed","Engineering Changed","boolean","engineering"],["last_synced_at","Last Synced At","date","engineering"],
     ["status","Status","select","shop"],["machinist","Machinist","text","shop"],["qc_outcome","QC Outcome","select","shop"],
+    ["production_notes","Production Notes","text","shop"],
     ["qc_notes","QC Notes","text","shop"],["qc_reviewed_by","QC Reviewed By","text","shop"],["qc_reviewed_at","QC Reviewed At","date","shop"],
     ["disposition","Disposition","select","shop"]
   ]},

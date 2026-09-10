@@ -46,3 +46,64 @@
 * { border-color: var(--border); }
 body { margin: 0; background: var(--background); color: var(--foreground); font-family: var(--font-geist-sans), sans-serif; }
 button, a { -webkit-tap-highlight-color: transparent; }
+
+.part-model-preview:fullscreen,
+.part-model-preview:-webkit-full-screen {
+  height: 100vh;
+}
+/* Expanded detail windows retain the sheet's dialog semantics and controls. */
+[data-slot="sheet-content"][data-expanded] {
+  inset: auto;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: calc(100vw - 1.5rem);
+  max-width: 1600px;
+  max-height: calc(100dvh - 1.5rem);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  gap: 0;
+  overflow: hidden;
+}
+
+[data-expanded] > [data-slot="sheet-header"] {
+  flex-shrink: 0;
+}
+
+[data-expanded] > .detail-sections {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+[data-expanded] > [data-slot="sheet-footer"] {
+  flex-shrink: 0;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+@media (min-width: 900px) {
+  [data-expanded] .detail-columns {
+    columns: 2;
+    column-gap: 1.5rem;
+  }
+
+  [data-expanded] .detail-columns > * {
+    break-inside: avoid;
+    margin: 0 0 1.5rem;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  [data-expanded] .part-model-preview:not(:fullscreen) {
+    height: 17rem;
+  }
+}
+
+@media (min-width: 1280px) {
+  [data-expanded] .detail-columns {
+    columns: 3;
+  }
+}

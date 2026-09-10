@@ -9,6 +9,7 @@ import {
 } from "ag-grid-community";
 import { AgGridReact } from "ag-grid-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import {
   ArrowUpRight,
@@ -48,7 +49,9 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { AdminDashboard } from "@/components/admin-dashboard";
 import { ExpandableText } from "@/components/expandable-text";
 import { FabricationDashboard } from "@/components/fabrication-dashboard";
+import { ManufacturingFileLink } from "@/components/manufacturing-file-link";
 import { NotificationInbox } from "@/components/notification-inbox";
+import { ProductionRequirementNotes } from "@/components/production-requirement-notes";
 import { QualityControlDashboard } from "@/components/quality-control-dashboard";
 import { StorageLocationEditor } from "@/components/storage-location-editor";
 import { Badge } from "@/components/ui/badge";
@@ -93,6 +96,7 @@ import { isShopName } from "@/lib/profile-name";
 import { createClient } from "@/lib/supabase/client";
 import { canUseOnRobotLocation } from "@/lib/storage-locations";
 import { cn } from "@/lib/utils";
+import { PreferencesPage } from "@/components/preferences-page";
 import { WORKSPACE_ROUTES, type WorkspaceView } from "@/lib/workspace-routes";
 import {
   type CamHandoffPatch,
@@ -102,6 +106,7 @@ import {
   type OperationStatus,
   type OperationWorkType,
   type OperationsResponse,
+  type QualityFailureSummary,
 } from "@/lib/types";
 
 ModuleRegistry.registerModules([AllCommunityModule]);
@@ -113,6 +118,14 @@ type ManufacturingRealtimeStatus = "connecting" | "subscribed" | "disconnected";
 const MANUFACTURING_QUERY_KEYS = ["operations", "fabrication", "qc", "admin"] as const;
 const REALTIME_REFRESH_DEBOUNCE_MS = 300;
 const REALTIME_REFRESH_JITTER_MS = 1_200;
+
+const PartModelPreview = dynamic(
+  () => import("@/components/part-model-preview").then((module) => module.PartModelPreview),
+  {
+    ssr: false,
+    loading: () => <Skeleton className="h-[22rem] rounded-xl sm:h-[26rem]" />,
+  },
+);
 
 function activeManufacturingQueryKey(workspaceView: WorkspaceView) {
   if (workspaceView === "production") return "operations";
@@ -141,10 +154,12 @@ interface ProductionRequirement {
   activeInBom: boolean;
   engineeringChanged: boolean;
   disposition: string | null;
+  productionNotes: string;
   effectiveQcResult: ManufacturingOperation["effectiveQcResult"];
   qualityNotes: string;
   qualityReviewedBy: string | null;
   qualityReviewedAt: string | null;
+  lastQualityFailure: QualityFailureSummary | null;
   quantity: number;
   completedOperations: number;
   totalOperations: number;
@@ -184,7 +199,6 @@ const statusStyles: Record<OperationStatus, string> = {
   Ready: "border-emerald-200 bg-emerald-100 text-emerald-800",
   "In Progress": "border-blue-200 bg-blue-100 text-blue-800",
   Blocked: "border-amber-200 bg-amber-100 text-amber-900",
-  "Needs Rework": "border-rose-200 bg-rose-100 text-rose-800",
   Complete: "border-violet-200 bg-violet-100 text-violet-800",
 };
 
@@ -198,7 +212,7 @@ function StatusCell({ value }: { value: OperationStatus }) {
 
 function ActionCell({ data, onOpen, user }: { data?: ManufacturingOperation; onOpen: (operation: ManufacturingOperation) => void; user: OperationsResponse["user"] }) {
   if (!data) return null;
-  const claimable = ["Ready", "In Progress", "Needs Rework"].includes(data.status) && data.availableQuantity > 0;
+  const claimable = ["Ready", "In Progress"].includes(data.status) && data.availableQuantity > 0;
   const stealable = isOperationStealable(data, user);
   return (
     <div className="flex h-full items-center justify-end">
@@ -251,6 +265,19 @@ function formatDate(value: string | null) {
   return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(value));
 }
 
+function QualityFailureCallout({ failure }: { failure: QualityFailureSummary | null }) {
+  if (!failure) return null;
+  return (
+    <section className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-rose-950">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-xs font-bold uppercase tracking-[.14em] text-rose-800">Previous QC failure</h3>
+        <p className="text-xs text-rose-700">{failure.rejectedQuantity ? `${failure.rejectedQuantity} rejected · ` : ""}{formatDate(failure.reviewedAt)}{failure.reviewedBy ? ` · ${failure.reviewedBy}` : ""}</p>
+      </div>
+      <p className="mt-2 whitespace-pre-wrap text-sm leading-6">{failure.notes || "No failure reason was recorded."}</p>
+    </section>
+  );
+}
+
 function operationLabel(operation: Pick<ManufacturingOperation, "operationNumber" | "workType">) {
   return operation.workType === "CAM" ? `CAM for ${operation.operationNumber}` : operation.operationNumber;
 }
@@ -272,13 +299,13 @@ function otherClaimants(operation: ManufacturingOperation, user: OperationsRespo
 }
 
 function isOperationStealable(operation: ManufacturingOperation, user: OperationsResponse["user"]) {
-  return ["Ready", "In Progress", "Needs Rework"].includes(operation.status)
+  return ["Ready", "In Progress"].includes(operation.status)
     && operation.availableQuantity === 0
     && otherClaimants(operation, user).length > 0;
 }
 
 function isOperationClaimable(operation: ManufacturingOperation) {
-  return ["Ready", "In Progress", "Needs Rework"].includes(operation.status) && operation.availableQuantity > 0;
+  return ["Ready", "In Progress"].includes(operation.status) && operation.availableQuantity > 0;
 }
 
 type BulkAction = Extract<OperationQuantityAction, "claim" | "complete">;
@@ -310,7 +337,6 @@ const inverseQuantityAction: Record<OperationQuantityAction, OperationQuantityAc
 function requirementStatus(operations: ManufacturingOperation[]): OperationStatus {
   if (operations.every((operation) => operation.status === "Complete")) return "Complete";
   if (operations.some((operation) => operation.status === "Blocked")) return "Blocked";
-  if (operations.some((operation) => operation.status === "Needs Rework")) return "Needs Rework";
   if (operations.some((operation) => operation.status === "In Progress")) return "In Progress";
   if (operations.some((operation) => operation.status === "Ready")) return "Ready";
   return "Planned";
@@ -370,10 +396,12 @@ function ProductionOverview({
           activeInBom: first.activeInBom,
           engineeringChanged: first.engineeringChanged,
           disposition: first.disposition,
+          productionNotes: first.productionNotes,
           effectiveQcResult: first.effectiveQcResult,
           qualityNotes: first.qualityNotes,
           qualityReviewedBy: first.qualityReviewedBy,
           qualityReviewedAt: first.qualityReviewedAt,
+          lastQualityFailure: first.lastQualityFailure,
           quantity: first.quantity,
           completedOperations: routedOperations.filter((operation) => operation.status === "Complete").length,
           totalOperations: routedOperations.length,
@@ -408,6 +436,9 @@ function ProductionOverview({
         requirement.assemblyNumber,
         requirement.documentName,
         requirement.storageLocation,
+        requirement.productionNotes,
+        requirement.qualityNotes,
+        requirement.lastQualityFailure?.notes,
       ].join(" ").toLocaleLowerCase().includes(term)) return false;
       return true;
     });
@@ -422,7 +453,7 @@ function ProductionOverview({
     total: requirements.length,
     complete: requirements.filter((requirement) => requirement.status === "Complete").length,
     active: requirements.filter((requirement) => requirement.status === "In Progress").length,
-    attention: requirements.filter((requirement) => requirement.status === "Blocked" || requirement.status === "Needs Rework").length,
+    attention: requirements.filter((requirement) => requirement.status === "Blocked").length,
   }), [requirements]);
   const selectedRequirement = requirements.find((requirement) => requirement.key === selectedRequirementKey) ?? null;
   const openRequirement = (requirement: ProductionRequirement) => setSelectedRequirementKey(requirement.key);
@@ -474,7 +505,7 @@ function ProductionOverview({
             </div>
             <Select value={status} onValueChange={(value) => setStatus((value ?? "all") as "all" | OperationStatus)}>
               <SelectTrigger className="h-9 w-full bg-card xl:w-48"><SlidersHorizontal className="text-muted-foreground" /><SelectValue placeholder="All statuses" /></SelectTrigger>
-              <SelectContent><SelectItem value="all">All statuses</SelectItem>{(["Planned", "Ready", "In Progress", "Blocked", "Needs Rework", "Complete"] as OperationStatus[]).map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
+              <SelectContent><SelectItem value="all">All statuses</SelectItem>{(["Planned", "Ready", "In Progress", "Blocked", "Complete"] as OperationStatus[]).map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
             </Select>
             <Select value={sourceDocument} onValueChange={(value) => setSourceDocument(value ?? "all")}>
               <SelectTrigger className="h-9 w-full bg-card xl:w-56"><FileText className="text-muted-foreground" /><SelectValue placeholder="All source documents" /></SelectTrigger>
@@ -530,7 +561,7 @@ function ProductionOverview({
       </div>
 
       <Sheet open={Boolean(selectedRequirement)} onOpenChange={(open) => !open && setSelectedRequirementKey(null)}>
-        <SheetContent className="w-full overflow-y-auto sm:max-w-2xl">
+        <SheetContent detailView className="w-full overflow-y-auto sm:max-w-2xl">
           {selectedRequirement && (
             <>
               <SheetHeader className="border-b p-6 pr-14">
@@ -548,7 +579,17 @@ function ProductionOverview({
                 <SheetDescription className="font-mono text-xs font-semibold text-primary">{selectedRequirement.partNumber}{selectedRequirement.revision ? ` · Rev ${selectedRequirement.revision}` : ""}</SheetDescription>
               </SheetHeader>
 
-              <div className="space-y-6 p-6">
+              <div className="detail-sections p-6"><div className="detail-columns space-y-6">
+                {selectedRequirement.operations[0] && (
+                  <section>
+                    <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">3D part preview</h3>
+                    <PartModelPreview
+                      src={`/api/operations/${selectedRequirement.operations[0].id}/preview`}
+                      partName={`${selectedRequirement.partNumber} ${selectedRequirement.partName}`}
+                    />
+                  </section>
+                )}
+
                 <section>
                   <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Requirement details</h3>
                   <div className="grid grid-cols-2 overflow-hidden rounded-xl border">
@@ -581,6 +622,16 @@ function ProductionOverview({
                     ))}
                   </div>
                 </section>
+
+                <QualityFailureCallout failure={selectedRequirement.lastQualityFailure} />
+
+                {selectedRequirement.requirementId !== null && (
+                  <ProductionRequirementNotes
+                    key={selectedRequirement.requirementId}
+                    requirementId={selectedRequirement.requirementId}
+                    notes={selectedRequirement.productionNotes}
+                  />
+                )}
 
                 {selectedRequirement.requirementId !== null && (
                   <section>
@@ -627,12 +678,13 @@ function ProductionOverview({
                     {(() => {
                       const operation = selectedRequirement.operations[0];
                       return [
-                        { label: "Drawing PDF", href: operation.hasDrawingPdf ? `/api/operations/${operation.id}/files/drawing-pdf` : null, fileName: operation.drawingPdfName, icon: FileText },
-                        { label: "STEP file", href: operation.hasStepFile ? `/api/operations/${operation.id}/files/step` : null, fileName: operation.stepName, icon: Download },
-                        { label: "Onshape drawing", href: operation.drawingUrl, fileName: null, icon: ArrowUpRight },
-                        { label: "BOM source", href: operation.onshapeUrl, fileName: null, icon: Cloud },
-                      ].map(({ label, href, fileName, icon: Icon }) => href ? (
-                        <a key={label} href={href} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-3 rounded-xl border p-3 text-sm font-semibold transition hover:border-primary/40 hover:bg-accent/40"><div className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary"><Icon className="size-4" /></div><span className="min-w-0"><span className="block">{label}</span>{fileName && <span className="block truncate text-[10px] font-normal text-muted-foreground">{fileName}</span>}</span><ChevronRight className="ml-auto size-4 shrink-0 text-muted-foreground" /></a>
+                        { label: "Drawing PDF", href: operation.hasDrawingPdf ? `/api/operations/${operation.id}/files/drawing-pdf` : null, fileName: operation.drawingPdfName, icon: FileText, preload: true },
+                        { label: "STEP file", href: operation.hasStepFile ? `/api/operations/${operation.id}/files/step` : null, fileName: operation.stepName, icon: Download, preload: true },
+                        { label: "Onshape drawing", href: operation.drawingUrl, fileName: null, icon: ArrowUpRight, preload: false },
+                        { label: "BOM source", href: operation.onshapeUrl, fileName: null, icon: Cloud, preload: false },
+                      ].map(({ label, href, fileName, icon: Icon, preload }) => href ? (
+                        preload ? <ManufacturingFileLink key={label} href={href} download={label === "STEP file" ? fileName ?? true : undefined} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-3 rounded-xl border p-3 text-sm font-semibold transition hover:border-primary/40 hover:bg-accent/40"><div className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary"><Icon className="size-4" /></div><span className="min-w-0"><span className="block">{label}</span>{fileName && <span className="block truncate text-[10px] font-normal text-muted-foreground">{fileName}</span>}</span><ChevronRight className="ml-auto size-4 shrink-0 text-muted-foreground" /></ManufacturingFileLink>
+                          : <a key={label} href={href} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-3 rounded-xl border p-3 text-sm font-semibold transition hover:border-primary/40 hover:bg-accent/40"><div className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary"><Icon className="size-4" /></div><span className="min-w-0"><span className="block">{label}</span>{fileName && <span className="block truncate text-[10px] font-normal text-muted-foreground">{fileName}</span>}</span><ChevronRight className="ml-auto size-4 shrink-0 text-muted-foreground" /></a>
                       ) : (
                         <div key={label} className="flex items-center gap-3 rounded-xl border border-dashed p-3 text-sm text-muted-foreground"><div className="grid size-8 place-items-center rounded-lg bg-muted"><Icon className="size-4" /></div>{label}<span className="ml-auto text-[10px] uppercase">Missing</span></div>
                       ));
@@ -669,7 +721,7 @@ function ProductionOverview({
                     ))}
                   </div>
                 </section>
-              </div>
+              </div></div>
 
               <SheetFooter className="sticky bottom-0 border-t bg-card/95 p-4 backdrop-blur"><Button variant="outline" onClick={() => setSelectedRequirementKey(null)}>Close</Button></SheetFooter>
             </>
@@ -965,7 +1017,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
       const claimable = isOperationClaimable(operation);
       if (view === "available" && !claimable && !isOperationStealable(operation, query.data?.user ?? null)) return false;
       if (view === "mine" && allocation.claimed === 0) return false;
-      if (term && ![operation.partNumber, operation.revision, operation.partName, operation.documentName, operation.material, operation.machine, operation.operationNumber, operation.workType, operation.camProgramPath, operation.storageLocation].join(" ").toLowerCase().includes(term)) return false;
+      if (term && ![operation.partNumber, operation.revision, operation.partName, operation.documentName, operation.material, operation.machine, operation.operationNumber, operation.workType, operation.camProgramPath, operation.storageLocation, operation.qualityNotes, operation.lastQualityFailure?.notes].join(" ").toLowerCase().includes(term)) return false;
       return true;
     });
   }, [machine, operations, query.data?.user, search, sourceDocument, view, workType]);
@@ -1006,10 +1058,10 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
   }, [bulkSelectedIds, filtered]);
 
   const stats = useMemo(() => ({
-    ready: operations.filter((operation) => ["Ready", "In Progress", "Needs Rework"].includes(operation.status) && operation.availableQuantity > 0).length,
+    ready: operations.filter((operation) => ["Ready", "In Progress"].includes(operation.status) && operation.availableQuantity > 0).length,
     planned: operations.filter((operation) => operation.status === "Planned").length,
     active: operations.filter((operation) => operation.status === "In Progress").length,
-    attention: operations.filter((operation) => operation.status === "Blocked" || operation.status === "Needs Rework").length,
+    attention: operations.filter((operation) => operation.status === "Blocked").length,
     complete: operations.filter((operation) => operation.status === "Complete").length,
   }), [operations]);
 
@@ -1229,6 +1281,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                   <DropdownMenuLabel>Signed in as<br /><span className="font-normal text-foreground">{query.data?.user?.email ?? userName}</span></DropdownMenuLabel>
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
+                <DropdownMenuItem render={<Link href={WORKSPACE_ROUTES.preferences} />}>Preferences</DropdownMenuItem>
                 <DropdownMenuItem onClick={openProfile}>Edit shop name</DropdownMenuItem>
                 <DropdownMenuItem render={<a href="/login" />}>Switch account</DropdownMenuItem>
                 <DropdownMenuItem render={<a href="/auth/signout" />}>Sign out</DropdownMenuItem>
@@ -1251,7 +1304,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
         </nav>
       </header>
 
-      {workspaceView === "admin" ? <AdminDashboard /> : workspaceView === "qc" ? <QualityControlDashboard /> : workspaceView === "operations" ? <section className="mx-auto max-w-[1800px] px-4 py-5 md:px-7 md:py-7">
+      {workspaceView === "preferences" ? <PreferencesPage /> : workspaceView === "admin" ? <AdminDashboard /> : workspaceView === "qc" ? <QualityControlDashboard /> : workspaceView === "operations" ? <section className="mx-auto max-w-[1800px] px-4 py-5 md:px-7 md:py-7">
         <div className="mb-5 flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
           <div>
             <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-primary"><span className="size-2 rounded-full bg-emerald-500 shadow-[0_0_0_4px_rgba(16,185,129,.12)]" /> Shop queue</div>
@@ -1386,7 +1439,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
       )}
 
       <Sheet open={Boolean(selected)} onOpenChange={(open) => !open && setSelectedId(null)}>
-        <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
+        <SheetContent detailView className="w-full overflow-y-auto sm:max-w-xl">
           {selected && (
             <>
               <SheetHeader className="border-b p-6 pr-14">
@@ -1395,7 +1448,17 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                 <SheetDescription className="font-mono text-xs font-semibold text-primary">{selected.partNumber}</SheetDescription>
               </SheetHeader>
 
-              <div className="space-y-6 p-6">
+              <div className="detail-sections p-6"><div className="detail-columns space-y-6">
+                {selected.requirementId && (
+                  <section>
+                    <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">3D part preview</h3>
+                    <PartModelPreview
+                      src={`/api/operations/${selected.id}/preview`}
+                      partName={`${selected.partNumber} ${selected.partName}`}
+                    />
+                  </section>
+                )}
+
                 <section>
                   <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Operation details</h3>
                   <div className="grid grid-cols-2 overflow-hidden rounded-xl border">
@@ -1423,6 +1486,17 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                     />
                   </section>
                 )}
+
+                {selected.requirementId && (
+                  <ProductionRequirementNotes
+                    key={selected.requirementId}
+                    requirementId={selected.requirementId}
+                    notes={selected.productionNotes}
+                    compact
+                  />
+                )}
+
+                <QualityFailureCallout failure={selected.lastQualityFailure} />
 
                 {(selected.workType === "CAM" || selected.camDependency) && (
                   <section>
@@ -1470,21 +1544,22 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                   <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Files & source</h3>
                   <div className="grid gap-2 sm:grid-cols-2">
                     {[
-                      { label: "Drawing PDF", href: selected.hasDrawingPdf ? `/api/operations/${selected.id}/files/drawing-pdf` : null, fileName: selected.drawingPdfName, icon: FileText },
-                      { label: "STEP file", href: selected.hasStepFile ? `/api/operations/${selected.id}/files/step` : null, fileName: selected.stepName, icon: Download },
-                      { label: "Onshape drawing", href: selected.drawingUrl, fileName: null, icon: ArrowUpRight },
-                      { label: "BOM source", href: selected.onshapeUrl, fileName: null, icon: Cloud },
-                    ].map(({ label, href, fileName, icon: Icon }) => href ? (
-                      <a key={label} href={href} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-3 rounded-xl border p-3 text-sm font-semibold transition hover:border-primary/40 hover:bg-accent/40"><div className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary"><Icon className="size-4" /></div><span className="min-w-0"><span className="block">{label}</span>{fileName && <span className="block truncate text-[10px] font-normal text-muted-foreground">{fileName}</span>}</span><ChevronRight className="ml-auto size-4 shrink-0 text-muted-foreground" /></a>
+                      { label: "Drawing PDF", href: selected.hasDrawingPdf ? `/api/operations/${selected.id}/files/drawing-pdf` : null, fileName: selected.drawingPdfName, icon: FileText, preload: true },
+                      { label: "STEP file", href: selected.hasStepFile ? `/api/operations/${selected.id}/files/step` : null, fileName: selected.stepName, icon: Download, preload: true },
+                      { label: "Onshape drawing", href: selected.drawingUrl, fileName: null, icon: ArrowUpRight, preload: false },
+                      { label: "BOM source", href: selected.onshapeUrl, fileName: null, icon: Cloud, preload: false },
+                    ].map(({ label, href, fileName, icon: Icon, preload }) => href ? (
+                      preload ? <ManufacturingFileLink key={label} href={href} download={label === "STEP file" ? fileName ?? true : undefined} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-3 rounded-xl border p-3 text-sm font-semibold transition hover:border-primary/40 hover:bg-accent/40"><div className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary"><Icon className="size-4" /></div><span className="min-w-0"><span className="block">{label}</span>{fileName && <span className="block truncate text-[10px] font-normal text-muted-foreground">{fileName}</span>}</span><ChevronRight className="ml-auto size-4 shrink-0 text-muted-foreground" /></ManufacturingFileLink>
+                        : <a key={label} href={href} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-3 rounded-xl border p-3 text-sm font-semibold transition hover:border-primary/40 hover:bg-accent/40"><div className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary"><Icon className="size-4" /></div><span className="min-w-0"><span className="block">{label}</span>{fileName && <span className="block truncate text-[10px] font-normal text-muted-foreground">{fileName}</span>}</span><ChevronRight className="ml-auto size-4 shrink-0 text-muted-foreground" /></a>
                     ) : (
                       <div key={label} className="flex items-center gap-3 rounded-xl border border-dashed p-3 text-sm text-muted-foreground"><div className="grid size-8 place-items-center rounded-lg bg-muted"><Icon className="size-4" /></div>{label}<span className="ml-auto text-[10px] uppercase">Missing</span></div>
                     ))}
                   </div>
                 </section>
-              </div>
+              </div></div>
 
               <SheetFooter className="sticky bottom-0 border-t bg-card/95 p-4 backdrop-blur">
-                {["Ready", "In Progress", "Needs Rework"].includes(selected.status) && selected.availableQuantity > 0 && <Button size="lg" className="h-11" onClick={() => requestQuantityAction("claim", selected.availableQuantity)} disabled={mutation.isPending}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <CircleDot />} {selected.workType === "CAM" ? "Claim CAM task" : `Claim ${selected.availableQuantity === 1 ? "part" : "parts"}`}</Button>}
+                {["Ready", "In Progress"].includes(selected.status) && selected.availableQuantity > 0 && <Button size="lg" className="h-11" onClick={() => requestQuantityAction("claim", selected.availableQuantity)} disabled={mutation.isPending}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <CircleDot />} {selected.workType === "CAM" ? "Claim CAM task" : `Claim ${selected.availableQuantity === 1 ? "part" : "parts"}`}</Button>}
                 {isOperationStealable(selected, query.data?.user ?? null) && <Button size="lg" variant="destructive" className="h-11" onClick={requestSteal} disabled={mutation.isPending}><TriangleAlert /> Steal {selected.workType === "CAM" ? "CAM task" : "production requirement"}</Button>}
                 {selectedAllocation.claimed > 0 && <Button size="lg" className="h-11 bg-emerald-600 hover:bg-emerald-700" onClick={() => requestQuantityAction("complete", selectedAllocation.claimed)} disabled={mutation.isPending}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <Check />} Mark complete</Button>}
                 {selectedAllocation.claimed > 0 && <Button variant="outline" onClick={() => requestQuantityAction("release", selectedAllocation.claimed)} disabled={mutation.isPending}><RotateCcw /> Release claim</Button>}

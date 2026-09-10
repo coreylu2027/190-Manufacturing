@@ -113,9 +113,25 @@ declare
   rejected_location_request constant uuid := '00000000-0000-4000-8000-000000000197';
   robot_location_request constant uuid := '00000000-0000-4000-8000-000000000200';
   rejected_robot_request constant uuid := '00000000-0000-4000-8000-000000000201';
+  note_request constant uuid := '00000000-0000-4000-8000-000000000202';
+  note_delete_request constant uuid := '00000000-0000-4000-8000-000000000203';
+  qc_failure_request constant uuid := '00000000-0000-4000-8000-000000000204';
+  invalid_quantity_request constant uuid := '00000000-0000-4000-8000-000000000205';
   state jsonb;
   rejected boolean := false;
 begin
+  state := public.manufacturing_write_state();
+  perform public.manufacturing_update_requirement_notes(
+    note_request, mover, state->>'token', -190, 'Deburr the bore before inspection',
+    '{"requirementId":-190,"productionNotes":"Deburr the bore before inspection"}'
+  );
+  if (select production_notes from manufacturing.requirements where id=-190) <> 'Deburr the bore before inspection'
+    or (select count(*) from manufacturing.requirement_note_revisions
+      where requirement_id=-190 and note_kind='production' and changed_by=mover
+        and previous_text='' and new_text='Deburr the bore before inspection') <> 1 then
+    raise exception 'Production note or its revision was not recorded';
+  end if;
+
   update manufacturing.operations set status='Complete', claimed_quantity=0,
     completed_quantity=2, quantity_ledger='[{"userId":"00000000-0000-4000-8000-000000000190","name":"Test Admin","claimed":0,"completed":2}]'
     where id=-190;
@@ -123,7 +139,7 @@ begin
     where id=-190;
 
   state := public.manufacturing_write_state();
-  perform public.manufacturing_commit_with_locations(
+  perform public.manufacturing_commit_with_qc_quantities(
     review_request, actor, 'qc_review', state->>'token',
     jsonb_build_array(jsonb_build_object('entity','requirements','id',-190,'patch',jsonb_build_object(
       'status','Complete','qc_outcome','Passed','qc_notes','Looks good',
@@ -132,8 +148,27 @@ begin
     '{"requirementId":-190,"result":"passed","notes":"Looks good"}'
   );
   if (select status from manufacturing.requirements where id=-190) <> 'Complete'
+    or (select production_notes from manufacturing.requirements where id=-190) <> 'Deburr the bore before inspection'
+    or (select qc_notes from manufacturing.requirements where id=-190) <> 'Looks good'
     or (select count(*) from public.quality_control where production_requirement_id=-190 and result='passed' and storage_location='Clarke 1') <> 1 then
     raise exception 'QC review was not committed atomically';
+  end if;
+  if (select count(*) from manufacturing.requirement_note_revisions
+      where requirement_id=-190 and note_kind='inspection' and changed_by=actor
+        and previous_text='' and new_text='Looks good') <> 1 then
+    raise exception 'Inspection note revision was not recorded';
+  end if;
+
+  state := public.manufacturing_write_state();
+  perform public.manufacturing_update_requirement_notes(
+    note_delete_request, actor, state->>'token', -190, '',
+    '{"requirementId":-190,"productionNotes":""}'
+  );
+  if (select production_notes from manufacturing.requirements where id=-190) <> ''
+    or (select qc_notes from manufacturing.requirements where id=-190) <> 'Looks good'
+    or (select count(*) from manufacturing.requirement_note_revisions
+      where requirement_id=-190 and note_kind='production') <> 2 then
+    raise exception 'QC reviewer could not delete only the production note';
   end if;
 
   state := public.manufacturing_write_state();
@@ -205,6 +240,50 @@ begin
     or exists(select 1 from manufacturing.write_requests where request_id=failed_request) then
     raise exception 'Failed QC transaction left partial changes';
   end if;
+
+  state := public.manufacturing_write_state();
+  perform public.manufacturing_commit_with_qc_quantities(
+    qc_failure_request, actor, 'qc_review', state->>'token',
+    jsonb_build_array(
+      jsonb_build_object('entity','operations','id',-190,'patch',jsonb_build_object(
+        'status','Ready','machinist','Test Admin (1)','claimed_quantity',0,
+        'completed_quantity',1,'quantity_ledger','[{"userId":"00000000-0000-4000-8000-000000000190","name":"Test Admin","claimed":0,"completed":1}]',
+        'completed_at',null)),
+      jsonb_build_object('entity','requirements','id',-190,'patch',jsonb_build_object(
+        'status','Ready for Manufacturing','qc_outcome','Failed','qc_notes','Bore is oversized',
+        'qc_reviewed_by','Test Admin','qc_reviewed_at','2026-09-05T00:03:00Z'))
+    ),
+    jsonb_build_object('requirement_id',-190,'result','failed','notes','Bore is oversized',
+      'rejected_quantity',1,'reviewed_at','2026-09-05T00:03:00Z','location',null),
+    '{"requirementId":-190,"result":"failed","rejectedQuantity":1}'
+  );
+  if (select status from manufacturing.operations where id=-190) <> 'Ready'
+    or (select claimed_quantity from manufacturing.operations where id=-190) <> 0
+    or (select completed_quantity from manufacturing.operations where id=-190) <> 1
+    or (select status from manufacturing.requirements where id=-190) <> 'Ready for Manufacturing'
+    or (select count(*) from public.quality_control
+      where production_requirement_id=-190 and result='failed'
+        and rejected_quantity=1 and notes='Bore is oversized') <> 1
+    or (select count(*) from manufacturing.write_history where request_id=qc_failure_request) <> 2 then
+    raise exception 'Rejected QC quantity was not committed atomically';
+  end if;
+
+  state := public.manufacturing_write_state();
+  rejected := false;
+  begin
+    perform public.manufacturing_commit_with_qc_quantities(
+      invalid_quantity_request, actor, 'qc_review', state->>'token',
+      jsonb_build_array(jsonb_build_object('entity','requirements','id',-190,'patch',
+        jsonb_build_object('status','Complete'))),
+      jsonb_build_object('requirement_id',-190,'result','failed','notes','Bad bore',
+        'rejected_quantity',3,'reviewed_at','2026-09-05T00:04:00Z','location',null), '{}'
+    );
+  exception when others then rejected := true; end;
+  if not rejected then raise exception 'Out-of-range rejected quantity was accepted'; end if;
+  if (select status from manufacturing.requirements where id=-190) <> 'Ready for Manufacturing'
+    or exists(select 1 from manufacturing.write_requests where request_id=invalid_quantity_request) then
+    raise exception 'Invalid rejected quantity left partial changes';
+  end if;
 end;
 $test$;
 
@@ -220,11 +299,23 @@ begin
       'public.manufacturing_commit_with_locations(uuid,uuid,text,text,jsonb,jsonb,jsonb)','EXECUTE') then
       raise exception 'Manufacturing location commit exposed to %', role_name;
     end if;
+    if has_function_privilege(role_name,
+      'public.manufacturing_commit_with_qc_quantities(uuid,uuid,text,text,jsonb,jsonb,jsonb)','EXECUTE') then
+      raise exception 'Manufacturing QC quantity commit exposed to %', role_name;
+    end if;
+    if has_function_privilege(role_name,
+      'public.manufacturing_update_requirement_notes(uuid,uuid,text,bigint,text,jsonb)','EXECUTE') then
+      raise exception 'Manufacturing note update exposed to %', role_name;
+    end if;
   end loop;
   if not has_function_privilege('service_role',
     'public.manufacturing_commit(uuid,uuid,text,text,jsonb,jsonb,jsonb)','EXECUTE')
     or not has_function_privilege('service_role',
       'public.manufacturing_commit_with_locations(uuid,uuid,text,text,jsonb,jsonb,jsonb)','EXECUTE')
+    or not has_function_privilege('service_role',
+      'public.manufacturing_commit_with_qc_quantities(uuid,uuid,text,text,jsonb,jsonb,jsonb)','EXECUTE')
+    or not has_function_privilege('service_role',
+      'public.manufacturing_update_requirement_notes(uuid,uuid,text,bigint,text,jsonb)','EXECUTE')
     or not has_function_privilege('service_role',
       'public.manufacturing_data_version()','EXECUTE')
     or has_table_privilege('service_role','manufacturing.operations','UPDATE') then

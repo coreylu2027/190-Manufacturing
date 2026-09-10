@@ -3,6 +3,7 @@
 import { themeQuartz, type ColDef } from "ag-grid-community";
 import { AgGridReact } from "ag-grid-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import dynamic from "next/dynamic";
 import {
   ArrowUpRight,
   Check,
@@ -26,11 +27,13 @@ import { useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
+import { ManufacturingFileLink } from "@/components/manufacturing-file-link";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ProductionRequirementNotes } from "@/components/production-requirement-notes";
 import { StorageLocationEditor } from "@/components/storage-location-editor";
 import { isShopName } from "@/lib/profile-name";
 import { canUseOnRobotLocation } from "@/lib/storage-locations";
@@ -38,6 +41,14 @@ import type { FabricationAction, FabricationActionPatch, FabricationJob, Fabrica
 import { cn } from "@/lib/utils";
 
 type QueueView = "available" | "mine" | "all";
+
+const PartModelPreview = dynamic(
+  () => import("@/components/part-model-preview").then((module) => module.PartModelPreview),
+  {
+    ssr: false,
+    loading: () => <Skeleton className="h-[22rem] rounded-xl sm:h-[26rem]" />,
+  },
+);
 
 const gridTheme = themeQuartz.withParams({
   accentColor: "#3159c6",
@@ -63,7 +74,6 @@ const statusStyles: Record<OperationStatus, string> = {
   Ready: "border-emerald-200 bg-emerald-100 text-emerald-800",
   "In Progress": "border-blue-200 bg-blue-100 text-blue-800",
   Blocked: "border-amber-200 bg-amber-100 text-amber-900",
-  "Needs Rework": "border-rose-200 bg-rose-100 text-rose-800",
   Complete: "border-violet-200 bg-violet-100 text-violet-800",
 };
 
@@ -193,7 +203,7 @@ export function FabricationDashboard({
       if (color !== "all" && job.color !== color) return false;
       if (view === "available" && job.status !== "Ready") return false;
       if (view === "mine" && !(ownedBy(job, userName) && job.status === "In Progress")) return false;
-      if (term && ![job.partNumber, job.partName, job.documentName, job.color, job.qcNotes, job.machinist, job.storageLocation].join(" ").toLocaleLowerCase().includes(term)) return false;
+      if (term && ![job.partNumber, job.partName, job.documentName, job.color, job.productionNotes, job.qcNotes, job.lastQualityFailure?.notes, job.machinist, job.storageLocation].join(" ").toLocaleLowerCase().includes(term)) return false;
       return true;
     });
   }, [color, jobs, search, userName, view]);
@@ -201,7 +211,7 @@ export function FabricationDashboard({
   const stats = useMemo(() => ({
     ready: jobs.filter((job) => job.status === "Ready").length,
     active: jobs.filter((job) => job.status === "In Progress").length,
-    waiting: jobs.filter((job) => job.status === "Planned" || job.status === "Needs Rework").length,
+    waiting: jobs.filter((job) => job.status === "Planned").length,
     complete: jobs.filter((job) => job.status === "Complete").length,
   }), [jobs]);
 
@@ -301,7 +311,7 @@ export function FabricationDashboard({
       <div className="mt-3 flex flex-col gap-1 text-[11px] text-muted-foreground sm:flex-row sm:items-center sm:justify-between"><span>Finishing jobs become available after manufacturing QC passes.</span><span>Last refreshed {query.data ? formatDate(query.data.syncedAt) : "—"}</span></div>
 
       <Sheet open={Boolean(selected)} onOpenChange={(open) => !open && setSelectedId(null)}>
-        <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
+        <SheetContent detailView className="w-full overflow-y-auto sm:max-w-xl">
           {selected && (
             <>
               <SheetHeader className="border-b p-6 pr-14">
@@ -310,7 +320,17 @@ export function FabricationDashboard({
                 <SheetDescription className="font-mono text-xs font-semibold text-primary">{selected.partNumber}</SheetDescription>
               </SheetHeader>
 
-              <div className="space-y-6 p-6">
+              <div className="detail-sections p-6"><div className="detail-columns space-y-6">
+                {selected.requirementId && (
+                  <section>
+                    <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">3D part preview</h3>
+                    <PartModelPreview
+                      src={`/api/fabrication/${selected.id}/preview`}
+                      partName={`${selected.partNumber} ${selected.partName}`}
+                    />
+                  </section>
+                )}
+
                 <section>
                   <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Finishing details</h3>
                   <div className="grid grid-cols-2 overflow-hidden rounded-xl border">
@@ -321,6 +341,12 @@ export function FabricationDashboard({
                     ].map(([label, value], index) => <div key={label} className={cn("p-3", index % 2 === 0 && "border-r", index < 4 && "border-b")}><p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{label}</p><p className="mt-1 text-sm font-semibold">{value}</p></div>)}
                   </div>
                 </section>
+
+                <ProductionRequirementNotes
+                  key={selected.requirementId}
+                  requirementId={selected.requirementId}
+                  notes={selected.productionNotes}
+                />
 
                 <section>
                   <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">QC inspection notes</h3>
@@ -356,18 +382,19 @@ export function FabricationDashboard({
                   <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Files & source</h3>
                   <div className="grid gap-2 sm:grid-cols-2">
                     {[
-                      { label: "Drawing PDF", href: selected.hasDrawingPdf ? `/api/fabrication/${selected.id}/files/drawing-pdf` : null, fileName: selected.drawingPdfName, icon: FileText },
-                      { label: "STEP file", href: selected.hasStepFile ? `/api/fabrication/${selected.id}/files/step` : null, fileName: selected.stepName, icon: Download },
-                      { label: "Onshape drawing", href: selected.drawingUrl, fileName: null, icon: ArrowUpRight },
-                      { label: "BOM source", href: selected.onshapeUrl, fileName: null, icon: Cloud },
-                    ].map(({ label, href, fileName, icon: Icon }) => href ? (
-                      <a key={label} href={href} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-3 rounded-xl border p-3 text-sm font-semibold transition hover:border-primary/40 hover:bg-accent/40"><div className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary"><Icon className="size-4" /></div><span className="min-w-0"><span className="block">{label}</span>{fileName && <span className="block truncate text-[10px] font-normal text-muted-foreground">{fileName}</span>}</span><ChevronRight className="ml-auto size-4 shrink-0 text-muted-foreground" /></a>
+                      { label: "Drawing PDF", href: selected.hasDrawingPdf ? `/api/fabrication/${selected.id}/files/drawing-pdf` : null, fileName: selected.drawingPdfName, icon: FileText, preload: true },
+                      { label: "STEP file", href: selected.hasStepFile ? `/api/fabrication/${selected.id}/files/step` : null, fileName: selected.stepName, icon: Download, preload: true },
+                      { label: "Onshape drawing", href: selected.drawingUrl, fileName: null, icon: ArrowUpRight, preload: false },
+                      { label: "BOM source", href: selected.onshapeUrl, fileName: null, icon: Cloud, preload: false },
+                    ].map(({ label, href, fileName, icon: Icon, preload }) => href ? (
+                      preload ? <ManufacturingFileLink key={label} href={href} download={label === "STEP file" ? fileName ?? true : undefined} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-3 rounded-xl border p-3 text-sm font-semibold transition hover:border-primary/40 hover:bg-accent/40"><div className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary"><Icon className="size-4" /></div><span className="min-w-0"><span className="block">{label}</span>{fileName && <span className="block truncate text-[10px] font-normal text-muted-foreground">{fileName}</span>}</span><ChevronRight className="ml-auto size-4 shrink-0 text-muted-foreground" /></ManufacturingFileLink>
+                        : <a key={label} href={href} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-3 rounded-xl border p-3 text-sm font-semibold transition hover:border-primary/40 hover:bg-accent/40"><div className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary"><Icon className="size-4" /></div><span className="min-w-0"><span className="block">{label}</span>{fileName && <span className="block truncate text-[10px] font-normal text-muted-foreground">{fileName}</span>}</span><ChevronRight className="ml-auto size-4 shrink-0 text-muted-foreground" /></a>
                     ) : (
                       <div key={label} className="flex items-center gap-3 rounded-xl border border-dashed p-3 text-sm text-muted-foreground"><div className="grid size-8 place-items-center rounded-lg bg-muted"><Icon className="size-4" /></div>{label}<span className="ml-auto text-[10px] uppercase">Missing</span></div>
                     ))}
                   </div>
                 </section>
-              </div>
+              </div></div>
 
               <SheetFooter className="sticky bottom-0 border-t bg-card/95 p-4 backdrop-blur">
                 {selected.status === "Ready" && <Button size="lg" className="h-11" onClick={() => runAction("claim")} disabled={mutation.isPending}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <CircleDot />} Claim finishing job</Button>}

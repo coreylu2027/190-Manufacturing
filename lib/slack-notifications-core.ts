@@ -30,6 +30,7 @@ export type SlackManufacturingEvent =
       actorName: string;
       result: "passed" | "failed";
       notes: string;
+      rejectedQuantity?: number | null;
       storageLocation?: string | null;
       forced?: boolean;
       becameReadyForFinishing?: boolean;
@@ -223,11 +224,14 @@ export function formatSlackManufacturingEvent(event: SlackManufacturingEvent): S
     : "";
   const notes = truncate(event.notes, MAX_NOTES_LENGTH);
   const notesLine = notes ? `\n*Notes:* ${escapeMrkdwn(notes)}` : "";
+  const rejectedLine = !passed && event.rejectedQuantity
+    ? `\n*Rejected:* ${event.rejectedQuantity} ${plural(event.rejectedQuantity, "part")}`
+    : "";
   const fallback = `${heading}: ${event.partNumber} — ${event.partName}; reviewed by ${event.actorName}${forceLabel}`;
   return {
     text: fallback,
     blocks: [
-      { type: "section", text: { type: "mrkdwn", text: `*${heading}*\n*${partLabel(event)}*\nReviewed by ${escapeMrkdwn(event.actorName)}${forceLabel}.${locationLine}${notesLine}${milestoneLines(event)}` } },
+      { type: "section", text: { type: "mrkdwn", text: `*${heading}*\n*${partLabel(event)}*\nReviewed by ${escapeMrkdwn(event.actorName)}${forceLabel}.${rejectedLine}${locationLine}${notesLine}${milestoneLines(event)}` } },
       { type: "context", elements: [{ type: "mrkdwn", text: context }] },
     ],
   };

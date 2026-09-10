@@ -40,10 +40,12 @@ test("QC notifications include the result, reviewer, notes, and storage location
     assemblyNumber: "A-1",
     result: "failed",
     notes: "Hole is out of tolerance",
+    rejectedQuantity: 2,
   });
   assert.match(payload.text, /QC failed/);
   assert.match(JSON.stringify(payload.blocks), /Corey L\./);
   assert.match(JSON.stringify(payload.blocks), /Hole is out of tolerance/);
+  assert.match(JSON.stringify(payload.blocks), /Rejected.*2 parts/);
 });
 
 test("high-value workflow events have distinct, useful Slack messages", () => {

@@ -11,7 +11,8 @@ function operation(completedAt = "2026-09-05T12:00:00Z"): ManufacturingOperation
     sourceAssemblyRevision: null, requiredPartRevision: null, configuration: null,
     bomPositions: null, material: null, finishing: null, finishingRequired: false,
     finishingComplete: true, requirementStatus: "Ready for QC", requirementMachinist: "Alex A.",
-    activeInBom: true, engineeringChanged: false, disposition: null, qualityNotes: "",
+    activeInBom: true, engineeringChanged: false, disposition: null, productionNotes: "Check the bore",
+    qualityNotes: "",
     qualityReviewedBy: null, qualityReviewedAt: null,
     quantity: 1, taskQuantity: 1, claimedQuantity: 0, completedQuantity: 1,
     availableQuantity: 0, allocations: [], operationNumber: "OP1", workType: "Manufacturing",
@@ -20,12 +21,14 @@ function operation(completedAt = "2026-09-05T12:00:00Z"): ManufacturingOperation
     drawingUrl: null, hasDrawingPdf: false, drawingPdfName: null, hasStepFile: false,
     stepName: null, onshapeUrl: null, storageLocation: null, locationUpdatedBy: null,
     locationUpdatedAt: null, effectiveQcResult: "pending",
+    lastQualityFailure: null,
   };
 }
 
 function review(overrides: Partial<QualityReviewRow> = {}): QualityReviewRow {
   return {
     id: 30, production_requirement_id: 20, operation_id: null, result: "passed", notes: "Good",
+    rejected_quantity: null,
     reviewed_by: "reviewer", reviewed_at: "2026-09-05T13:00:00Z", storage_location: "Clarke 1",
     location_updated_by: "mover", location_updated_at: "2026-09-05T14:00:00Z", ...overrides,
   };
@@ -59,10 +62,43 @@ test("missing, stale, and retracted reviews are pending and expose no location",
 });
 
 test("a failed review remains failed during rework and never exposes a location", () => {
-  const rework = { ...operation(), status: "Needs Rework" as const, completedAt: null };
-  const result = qualityMetadataByRequirement([rework], [review({ result: "failed" })], [], profiles).metadata.get(20);
+  const rework = { ...operation(), status: "Ready" as const, completedAt: null, completedQuantity: 0 };
+  const result = qualityMetadataByRequirement([rework], [review({ result: "failed", rejected_quantity: 1 })], [], profiles).metadata.get(20);
   assert.equal(result?.effectiveQcResult, "failed");
   assert.equal(result?.storageLocation, null);
+  assert.deepEqual(result?.lastQualityFailure, {
+    notes: "Good",
+    rejectedQuantity: 1,
+    reviewedAt: "2026-09-05T13:00:00Z",
+    reviewedBy: "Robin R.",
+  });
+});
+
+test("the latest QC failure remains visible after rework and a later pass", () => {
+  const failed = review({ id: 29, result: "failed", notes: "Bore oversized", rejected_quantity: 1, reviewed_at: "2026-09-05T11:00:00Z" });
+  const passed = review({ id: 30, result: "passed", notes: "Accepted after rerun", reviewed_at: "2026-09-05T13:00:00Z" });
+  const result = qualityMetadataByRequirement([operation("2026-09-05T12:00:00Z")], [failed, passed], [], profiles).metadata.get(20);
+  assert.equal(result?.effectiveQcResult, "passed");
+  assert.deepEqual(result?.lastQualityFailure, {
+    notes: "Bore oversized",
+    rejectedQuantity: 1,
+    reviewedAt: "2026-09-05T11:00:00Z",
+    reviewedBy: "Robin R.",
+  });
+});
+
+test("the latest QC failure remains visible when the completed reroute returns to pending QC", () => {
+  const failed = review({ result: "failed", notes: "Thread is undersized", rejected_quantity: 1 });
+  const result = qualityMetadataByRequirement(
+    [operation("2026-09-05T14:00:00Z")],
+    [failed],
+    [],
+    profiles,
+  ).metadata.get(20);
+  assert.equal(result?.effectiveQcResult, "pending");
+  assert.equal(result?.notes, "");
+  assert.equal(result?.lastQualityFailure?.notes, "Thread is undersized");
+  assert.equal(result?.lastQualityFailure?.rejectedQuantity, 1);
 });
 
 test("cleared locations retain the most recent editor attribution", () => {
@@ -87,4 +123,10 @@ test("threaded inserts are excluded from the pre-QC gate and do not stale its re
   };
   const quality = qualityMetadataByRequirement([primary, completedInsert], [review()], [], profiles).metadata.get(20);
   assert.equal(quality?.effectiveQcResult, "passed");
+});
+
+test("production and inspection notes remain separate in the QC projection", () => {
+  const [item] = projectQualityControl([operation()], [review({ notes: "Bore accepted" })], [], []);
+  assert.equal(item.productionNotes, "Check the bore");
+  assert.equal(item.notes, "Bore accepted");
 });
