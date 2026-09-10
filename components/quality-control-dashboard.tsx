@@ -23,6 +23,7 @@ import { useCallback, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { StorageLocationEditor } from "@/components/storage-location-editor";
+import { ManufacturingFileLink } from "@/components/manufacturing-file-link";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -445,7 +446,7 @@ export function QualityControlDashboard() {
                 <section>
                   <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Files & source</h3>
                   <div className="grid gap-2 sm:grid-cols-2">
-                    <Button variant="outline" className="h-11 justify-start" nativeButton={!operation.hasDrawingPdf} render={operation.hasDrawingPdf ? <a href={`/api/operations/${operation.id}/files/drawing-pdf`} target="_blank" rel="noreferrer" /> : undefined} disabled={!operation.hasDrawingPdf}><FileText /> Drawing PDF</Button>
+                    <Button variant="outline" className="h-11 justify-start" nativeButton={!operation.hasDrawingPdf} render={operation.hasDrawingPdf ? <ManufacturingFileLink href={`/api/operations/${operation.id}/files/drawing-pdf`} target="_blank" rel="noreferrer" /> : undefined} disabled={!operation.hasDrawingPdf}><FileText /> Drawing PDF</Button>
                     <Button variant="outline" className="h-11 justify-start" nativeButton={!operation.onshapeUrl} render={operation.onshapeUrl ? <a href={operation.onshapeUrl} target="_blank" rel="noreferrer" /> : undefined} disabled={!operation.onshapeUrl}><ExternalLink /> Onshape source</Button>
                   </div>
                 </section>

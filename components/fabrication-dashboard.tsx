@@ -26,6 +26,7 @@ import { useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
+import { ManufacturingFileLink } from "@/components/manufacturing-file-link";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -356,12 +357,13 @@ export function FabricationDashboard({
                   <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Files & source</h3>
                   <div className="grid gap-2 sm:grid-cols-2">
                     {[
-                      { label: "Drawing PDF", href: selected.hasDrawingPdf ? `/api/fabrication/${selected.id}/files/drawing-pdf` : null, fileName: selected.drawingPdfName, icon: FileText },
-                      { label: "STEP file", href: selected.hasStepFile ? `/api/fabrication/${selected.id}/files/step` : null, fileName: selected.stepName, icon: Download },
-                      { label: "Onshape drawing", href: selected.drawingUrl, fileName: null, icon: ArrowUpRight },
-                      { label: "BOM source", href: selected.onshapeUrl, fileName: null, icon: Cloud },
-                    ].map(({ label, href, fileName, icon: Icon }) => href ? (
-                      <a key={label} href={href} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-3 rounded-xl border p-3 text-sm font-semibold transition hover:border-primary/40 hover:bg-accent/40"><div className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary"><Icon className="size-4" /></div><span className="min-w-0"><span className="block">{label}</span>{fileName && <span className="block truncate text-[10px] font-normal text-muted-foreground">{fileName}</span>}</span><ChevronRight className="ml-auto size-4 shrink-0 text-muted-foreground" /></a>
+                      { label: "Drawing PDF", href: selected.hasDrawingPdf ? `/api/fabrication/${selected.id}/files/drawing-pdf` : null, fileName: selected.drawingPdfName, icon: FileText, preload: true },
+                      { label: "STEP file", href: selected.hasStepFile ? `/api/fabrication/${selected.id}/files/step` : null, fileName: selected.stepName, icon: Download, preload: true },
+                      { label: "Onshape drawing", href: selected.drawingUrl, fileName: null, icon: ArrowUpRight, preload: false },
+                      { label: "BOM source", href: selected.onshapeUrl, fileName: null, icon: Cloud, preload: false },
+                    ].map(({ label, href, fileName, icon: Icon, preload }) => href ? (
+                      preload ? <ManufacturingFileLink key={label} href={href} download={label === "STEP file" ? fileName ?? true : undefined} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-3 rounded-xl border p-3 text-sm font-semibold transition hover:border-primary/40 hover:bg-accent/40"><div className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary"><Icon className="size-4" /></div><span className="min-w-0"><span className="block">{label}</span>{fileName && <span className="block truncate text-[10px] font-normal text-muted-foreground">{fileName}</span>}</span><ChevronRight className="ml-auto size-4 shrink-0 text-muted-foreground" /></ManufacturingFileLink>
+                        : <a key={label} href={href} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-3 rounded-xl border p-3 text-sm font-semibold transition hover:border-primary/40 hover:bg-accent/40"><div className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary"><Icon className="size-4" /></div><span className="min-w-0"><span className="block">{label}</span>{fileName && <span className="block truncate text-[10px] font-normal text-muted-foreground">{fileName}</span>}</span><ChevronRight className="ml-auto size-4 shrink-0 text-muted-foreground" /></a>
                     ) : (
                       <div key={label} className="flex items-center gap-3 rounded-xl border border-dashed p-3 text-sm text-muted-foreground"><div className="grid size-8 place-items-center rounded-lg bg-muted"><Icon className="size-4" /></div>{label}<span className="ml-auto text-[10px] uppercase">Missing</span></div>
                     ))}
