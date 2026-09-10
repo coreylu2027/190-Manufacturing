@@ -123,19 +123,33 @@ export function OperationFlowDiagram({
     ?? (currentTile?.node.kind === "qc" ? "Quality" : "Finishing");
   useLayoutEffect(() => {
     const scroller = scrollerRef.current;
-    const tile = currentTileRef.current;
-    if (!scroller || !tile || currentTileIndex < 0) return;
+    if (!scroller || currentTileIndex < 0) return;
 
-    if (currentTileIndex === 0) {
-      scroller.scrollLeft = 0;
-      return;
-    }
-    if (currentTileIndex === tiles.length - 1) {
-      scroller.scrollLeft = scroller.scrollWidth - scroller.clientWidth;
-      return;
-    }
+    const positionCurrentTile = () => {
+      const tile = currentTileRef.current;
+      if (!tile) return;
 
-    scroller.scrollLeft = tile.offsetLeft - (scroller.clientWidth - tile.clientWidth) / 2;
+      const maxScroll = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+      const target = currentTileIndex === 0
+        ? 0
+        : currentTileIndex === tiles.length - 1
+          ? maxScroll
+          : tile.offsetLeft - (scroller.clientWidth - tile.clientWidth) / 2;
+      const inlineScrollBehavior = scroller.style.scrollBehavior;
+      scroller.style.scrollBehavior = "auto";
+      scroller.scrollLeft = Math.max(0, Math.min(maxScroll, target));
+      scroller.style.scrollBehavior = inlineScrollBehavior;
+    };
+
+    positionCurrentTile();
+    const frame = requestAnimationFrame(positionCurrentTile);
+    const resizeObserver = new ResizeObserver(positionCurrentTile);
+    resizeObserver.observe(scroller);
+
+    return () => {
+      cancelAnimationFrame(frame);
+      resizeObserver.disconnect();
+    };
   }, [currentTileIndex, tiles.length]);
 
   if (!currentTile) return null;
