@@ -69,13 +69,15 @@ type ManufacturingFileLinkProps = Omit<ComponentPropsWithoutRef<"a">, "href"> & 
 
 /** Silently warm a private manufacturing file in this browser while its link is visible. */
 export const ManufacturingFileLink = forwardRef<HTMLAnchorElement, ManufacturingFileLinkProps>(
-  function ManufacturingFileLink({ href, ...props }, ref) {
+  function ManufacturingFileLink({ href, download, ...props }, ref) {
+    const canUsePrefetchedBlob = download !== undefined && download !== false;
     const [prefetched, setPrefetched] = useState<{ sourceHref: string; objectUrl: string } | null>(() => {
-      const objectUrl = prefetchedFiles.get(href)?.file?.objectUrl;
+      const objectUrl = canUsePrefetchedBlob ? prefetchedFiles.get(href)?.file?.objectUrl : null;
       return objectUrl ? { sourceHref: href, objectUrl } : null;
     });
 
     useEffect(() => {
+      if (!canUsePrefetchedBlob) return;
       let active = true;
       void prefetchFile(href).then((file) => {
         if (active && file) setPrefetched({ sourceHref: href, objectUrl: file.objectUrl });
@@ -83,9 +85,9 @@ export const ManufacturingFileLink = forwardRef<HTMLAnchorElement, Manufacturing
       return () => {
         active = false;
       };
-    }, [href]);
+    }, [canUsePrefetchedBlob, href]);
 
-    const resolvedHref = prefetched?.sourceHref === href ? prefetched.objectUrl : href;
-    return <a ref={ref} href={resolvedHref} {...props} />;
+    const resolvedHref = canUsePrefetchedBlob && prefetched?.sourceHref === href ? prefetched.objectUrl : href;
+    return <a ref={ref} href={resolvedHref} download={download} {...props} />;
   },
 );

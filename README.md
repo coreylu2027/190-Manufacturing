@@ -32,6 +32,8 @@ application.
 - [X] Show material in production requirement
 - [ ] Add stock size 
 - [X] Filter by assembly
+- [ ] Reduce clutter in operation detail panel
+- [ ]
 
 ## Stack
 
