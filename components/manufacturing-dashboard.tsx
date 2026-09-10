@@ -1451,7 +1451,7 @@ export function ManufacturingDashboard({
                 <section>
                   <div className="mb-3">
                     <h3 className="text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Part flow</h3>
-                    <p className="mt-1 text-xs text-muted-foreground">Select an operation to open it. Scroll sideways to see the full route.</p>
+                    <p className="mt-1 text-xs text-muted-foreground">Select a step to open it. Use the arrows for the rest of the route.</p>
                   </div>
                   <OperationFlowDiagram
                     operations={selectedRouteOperations}

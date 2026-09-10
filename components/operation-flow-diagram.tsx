@@ -1,5 +1,8 @@
+"use client";
+
 import Link from "next/link";
-import { ChevronRight } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, ListTree, Wrench } from "lucide-react";
+import { useRef } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { buildOperationFlow, type OperationFlowNode } from "@/lib/operation-flow";
@@ -16,21 +19,83 @@ const statusStyles: Record<OperationStatus, string> = {
   Complete: "border-violet-200 bg-violet-100 text-violet-800",
 };
 
+const statusDotStyles: Record<OperationStatus, string> = {
+  Planned: "bg-slate-400",
+  Ready: "bg-emerald-500",
+  "In Progress": "bg-blue-500",
+  Blocked: "bg-amber-500",
+  "Needs Rework": "bg-rose-500",
+  Complete: "bg-violet-600",
+};
+
 function statusLabel(status: OperationStatus) {
   return status === "Complete" ? "Completed" : status;
 }
 
-function NodeContent({ node, current }: { node: OperationFlowNode; current: boolean }) {
+function StatusDot({ status }: { status: OperationStatus }) {
   return (
+    <span className={cn("grid size-6 shrink-0 place-items-center rounded-full shadow-sm", statusDotStyles[status])} aria-hidden>
+      {status === "Complete" ? <Check className="size-3.5 text-white" strokeWidth={3} /> : <span className="size-1.5 rounded-full bg-white/90" />}
+    </span>
+  );
+}
+
+function FlowTile({
+  node,
+  step,
+  current,
+  onOpenOperation,
+}: {
+  node: OperationFlowNode;
+  step: number;
+  current: boolean;
+  onOpenOperation: (operationId: number) => void;
+}) {
+  const classes = cn(
+    "block h-[5.25rem] w-[6.5rem] shrink-0 rounded-xl border bg-card p-2.5 text-left shadow-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+    current ? "border-blue-500 bg-blue-50/60 ring-1 ring-blue-500/20" : "border-border",
+    node.kind !== "qc" && "hover:border-primary/50 hover:bg-accent/30",
+  );
+  const content = (
     <>
       <div className="flex items-center justify-between gap-2">
-        <span className="font-mono text-xs font-bold text-foreground">{node.label}</span>
-        {current && <Badge className="h-5 px-1.5 text-[9px] uppercase tracking-wider">Current</Badge>}
+        <span className="text-[10px] font-bold text-muted-foreground">{step}</span>
+        <StatusDot status={node.status} />
       </div>
-      <p className="mt-1.5 truncate text-xs font-semibold text-muted-foreground" title={node.description}>{node.description}</p>
-      <Badge variant="outline" className={cn("mt-2 font-semibold", statusStyles[node.status])}>{statusLabel(node.status)}</Badge>
+      <p className="mt-0.5 truncate font-mono text-xs font-bold text-foreground">{node.label}</p>
+      <p className="mt-0.5 truncate text-[10px] font-medium text-muted-foreground" title={node.description}>{node.description}</p>
     </>
   );
+  const ariaLabel = `${current ? "Current step, " : ""}${node.label}, ${node.description}, ${statusLabel(node.status)}`;
+
+  if (node.kind === "operation" && node.operationId !== null) {
+    const operationId = node.operationId;
+    return (
+      <button
+        type="button"
+        className={classes}
+        aria-current={current ? "step" : undefined}
+        aria-label={`Open ${ariaLabel}`}
+        onClick={() => onOpenOperation(operationId)}
+      >
+        {content}
+      </button>
+    );
+  }
+
+  if (node.kind === "finishing" && node.finishingJobId !== null && node.requirementId !== null) {
+    return (
+      <Link
+        href={`${WORKSPACE_ROUTES.fabrication}?requirementId=${node.requirementId}`}
+        className={classes}
+        aria-label={`Open ${ariaLabel}`}
+      >
+        {content}
+      </Link>
+    );
+  }
+
+  return <div className={cn(classes, "cursor-default")} aria-label={ariaLabel}>{content}</div>;
 }
 
 export function OperationFlowDiagram({
@@ -44,57 +109,54 @@ export function OperationFlowDiagram({
   currentOperationId: number;
   onOpenOperation: (operationId: number) => void;
 }) {
+  const scrollerRef = useRef<HTMLDivElement>(null);
   const stages = buildOperationFlow(operations, finishingStages);
+  const tiles = stages.flatMap((stage, stageIndex) => stage.nodes.map((node) => ({
+    node,
+    step: stageIndex + 1,
+  })));
+  const currentTile = tiles.find(({ node }) => node.operationId === currentOperationId) ?? tiles[0];
+  const currentOperation = operations.find((operation) => operation.id === currentTile?.node.operationId);
+  const currentCategory = currentOperation?.workType
+    ?? (currentTile?.node.kind === "qc" ? "Quality" : "Finishing");
+  const scrollSteps = (direction: -1 | 1) => {
+    scrollerRef.current?.scrollBy({ left: direction * 336, behavior: "smooth" });
+  };
+
+  if (!currentTile) return null;
 
   return (
-    <div className="overflow-x-auto pb-2">
-      <div className="flex min-w-max items-center py-1">
-        {stages.map((stage, stageIndex) => (
-          <div key={stage.key} className="flex items-center">
-            {stageIndex > 0 && <ChevronRight aria-hidden className="mx-2 size-5 shrink-0 text-muted-foreground/60" />}
-            <div className="flex flex-col gap-2">
-              {stage.nodes.map((node) => {
-                const current = node.operationId === currentOperationId;
-                const classes = cn(
-                  "block w-40 rounded-xl border bg-card p-3 text-left shadow-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
-                  current && "border-primary ring-2 ring-primary/25",
-                  node.kind !== "qc" && "hover:border-primary/50 hover:bg-accent/30",
-                );
-                const content = <NodeContent node={node} current={current} />;
-
-                if (node.kind === "operation" && node.operationId !== null) {
-                  return (
-                    <button
-                      key={node.key}
-                      type="button"
-                      className={classes}
-                      aria-current={current ? "step" : undefined}
-                      aria-label={`Open ${node.label}, ${node.description}, ${statusLabel(node.status)}`}
-                      onClick={() => onOpenOperation(node.operationId as number)}
-                    >
-                      {content}
-                    </button>
-                  );
-                }
-
-                if (node.kind === "finishing" && node.finishingJobId !== null && node.requirementId !== null) {
-                  return (
-                    <Link
-                      key={node.key}
-                      href={`${WORKSPACE_ROUTES.fabrication}?requirementId=${node.requirementId}`}
-                      className={classes}
-                      aria-label={`Open finishing, ${node.description}, ${statusLabel(node.status)}`}
-                    >
-                      {content}
-                    </Link>
-                  );
-                }
-
-                return <div key={node.key} className={cn(classes, "cursor-default")}>{content}</div>;
-              })}
-            </div>
+    <div>
+      <div className="flex items-center gap-1.5">
+        <button type="button" className="grid size-8 shrink-0 place-items-center rounded-lg text-muted-foreground transition hover:bg-muted hover:text-foreground" aria-label="Show earlier flow steps" onClick={() => scrollSteps(-1)}>
+          <ChevronLeft className="size-5" />
+        </button>
+        <div ref={scrollerRef} className="min-w-0 flex-1 snap-x snap-mandatory overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          <div className="flex min-w-max gap-2 py-1">
+            {tiles.map(({ node, step }) => (
+              <div key={node.key} className="snap-start">
+                <FlowTile node={node} step={step} current={node.operationId === currentOperationId} onOpenOperation={onOpenOperation} />
+              </div>
+            ))}
           </div>
-        ))}
+        </div>
+        <button type="button" className="grid size-8 shrink-0 place-items-center rounded-lg text-muted-foreground transition hover:bg-muted hover:text-foreground" aria-label="Show later flow steps" onClick={() => scrollSteps(1)}>
+          <ChevronRight className="size-5" />
+        </button>
+      </div>
+
+      <div className="mt-3 rounded-xl border border-blue-100 bg-blue-50/30 p-4 shadow-sm">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="font-mono text-base font-bold text-foreground">{currentTile.node.label}</p>
+            <p className="mt-0.5 truncate text-sm text-muted-foreground" title={currentTile.node.description}>{currentTile.node.description}</p>
+          </div>
+          <Badge variant="outline" className={cn("shrink-0 font-semibold", statusStyles[currentTile.node.status])}>{statusLabel(currentTile.node.status)}</Badge>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-muted-foreground">
+          <span className="flex items-center gap-1.5"><ListTree className="size-3.5" />Step {currentTile.step} of {stages.length}</span>
+          <span className="flex items-center gap-1.5"><Wrench className="size-3.5" />{currentCategory}</span>
+        </div>
       </div>
     </div>
   );
