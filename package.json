@@ -15,7 +15,8 @@
     "manufacturing:shadow": "node --experimental-strip-types --env-file=.env.local scripts/manufacturing-migration/shadow-parity.mts",
     "manufacturing:migrate-attachments": "node --experimental-strip-types --env-file=.env.local scripts/manufacturing-migration/migrate-attachments.mts",
     "manufacturing:verify-attachments": "node --experimental-strip-types --env-file=.env.local scripts/manufacturing-migration/verify-attachments.mts",
-    "manufacturing:generate-previews": "node --experimental-strip-types --env-file=.env.local scripts/manufacturing-migration/generate-part-previews.mts"
+    "manufacturing:generate-previews": "node --experimental-strip-types --env-file=.env.local scripts/manufacturing-migration/generate-part-previews.mts",
+    "manufacturing:test-assembly-previews": "node --experimental-strip-types --test scripts/manufacturing-migration/assembly-glb.test.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

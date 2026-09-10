@@ -321,7 +321,7 @@ export function FabricationDashboard({
               </SheetHeader>
 
               <div className="detail-sections p-6"><div className="detail-columns space-y-6">
-                {selected.hasStepFile && (
+                {selected.requirementId && (
                   <section>
                     <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">3D part preview</h3>
                     <PartModelPreview

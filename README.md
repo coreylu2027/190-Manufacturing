@@ -123,6 +123,23 @@ The reusable notification service in `lib/notifications.ts` stores an in-site al
 
 `SLACK_WEBHOOK_URL` is optional and server-only. When configured, successful operation and finishing claims, releases, completions, and reopenings are posted to the webhook's channel. Messages also highlight Ready for QC, Ready for Finishing, post-QC-work-ready, and fully complete milestones. Passed, failed, forced, and undone QC reviews; part-location changes; CAM handoff edits; claim takeovers; and administrator operation overrides are also posted. Slack delivery runs after the API response, retries one HTTP 429 response using Slack's `Retry-After` value, and never changes the result of the manufacturing transaction. No-op edits do not post. Keep the webhook URL out of source control; anyone holding it can post to the configured channel.
 
+## Assembly GLB previews
+
+Parts without STEP previews can use isolated meshes extracted from an Onshape assembly GLB. The `assembly_part_previews` table is a separate, private fallback; importing never updates `part_previews`, replaces an existing fallback, or overwrites a Storage object. The authenticated preview routes support both sources. Deploy the dashboard changes to show the viewer for parts without STEP files.
+
+Apply `supabase/migrations/20260910031802_assembly_glb_previews.sql` after the production part-preview schema. Obtain an inventory using the server-only `manufacturing_assembly_preview_inventory()` RPC and save its JSON array locally. Then run:
+
+```powershell
+node scripts/manufacturing-migration/extract-assembly-previews.mjs robot.glb parts.json migration-artifacts/robot-glb
+node scripts/manufacturing-migration/validate-assembly-previews.mjs migration-artifacts/robot-glb
+npm run manufacturing:test-assembly-previews
+node --env-file=.env.local scripts/manufacturing-migration/upload-assembly-previews.mjs migration-artifacts/robot-glb --apply
+```
+
+The extractor preserves geometry and materials, centers each mesh, and exports one file per distinct mesh. It supports static, uncompressed, texture-free GLBs. Automatic registration requires an exact name that occurs once in the part inventory and identifies one mesh. Repeated instances of that mesh are allowed. Duplicate names, multiple candidate meshes, transformed body nodes, and missing names remain in `review.json`; resolve their CAD identity before associating them with parts. Mesh indices and the source GLB SHA-256 identify the extraction source.
+
+Uploads use immutable SHA-256 paths, download each object to verify its hash, recheck current part identity and preview availability, and verify existing STEP-preview metadata after import. Local GLBs, inventories, review reports, and upload results remain under the git-ignored `migration-artifacts` directory. The full robot GLB is not uploaded.
+
 ## Vercel
 
 Import this directory as a Vercel project, add the values from `.env.example`, and deploy. Set `NEXT_PUBLIC_APP_URL` to the production origin for canonical metadata. Do not add legacy backend tokens or manufacturing source-selection flags.

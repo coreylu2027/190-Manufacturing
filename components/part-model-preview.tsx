@@ -31,7 +31,7 @@ export function PartModelPreview({ src, partName }: { src: string; partName: str
       if (response.status === 404) {
         if (!cancelled) {
           setState("missing");
-          setMessage("The STEP file is available, but its optimized 3D preview has not been generated yet.");
+          setMessage("A 3D preview is not available for this part yet.");
         }
         return;
       }
@@ -52,7 +52,7 @@ export function PartModelPreview({ src, partName }: { src: string; partName: str
       if (controller.signal.aborted || cancelled) return;
       console.error("Unable to load part preview", error);
       setState("error");
-      setMessage("The 3D preview could not be loaded. The original STEP download is still available below.");
+      setMessage("The 3D preview could not be loaded. Close and reopen the part to try again.");
     });
 
     return () => {
@@ -69,7 +69,7 @@ export function PartModelPreview({ src, partName }: { src: string; partName: str
     const handleLoad = () => setState("ready");
     const handleError = () => {
       setState("error");
-      setMessage("The stored model could not be rendered. The original STEP download is still available below.");
+      setMessage("The stored model could not be rendered.");
     };
     const timeout = window.setTimeout(() => {
       if (viewer.loaded) {
@@ -77,7 +77,7 @@ export function PartModelPreview({ src, partName }: { src: string; partName: str
         return;
       }
       setState("error");
-      setMessage("The 3D renderer did not become ready. Try reloading the page or use the original STEP download below.");
+      setMessage("The 3D renderer did not become ready. Try reloading the page.");
     }, 20_000);
 
     viewer.addEventListener("load", handleLoad);

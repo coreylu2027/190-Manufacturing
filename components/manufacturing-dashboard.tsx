@@ -580,7 +580,7 @@ function ProductionOverview({
               </SheetHeader>
 
               <div className="detail-sections p-6"><div className="detail-columns space-y-6">
-                {selectedRequirement.operations[0]?.hasStepFile && (
+                {selectedRequirement.operations[0] && (
                   <section>
                     <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">3D part preview</h3>
                     <PartModelPreview
@@ -1449,7 +1449,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
               </SheetHeader>
 
               <div className="detail-sections p-6"><div className="detail-columns space-y-6">
-                {selected.hasStepFile && (
+                {selected.requirementId && (
                   <section>
                     <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">3D part preview</h3>
                     <PartModelPreview
