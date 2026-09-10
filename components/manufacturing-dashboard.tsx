@@ -50,6 +50,7 @@ import { AdminDashboard } from "@/components/admin-dashboard";
 import { ExpandableText } from "@/components/expandable-text";
 import { FabricationDashboard } from "@/components/fabrication-dashboard";
 import { NotificationInbox } from "@/components/notification-inbox";
+import { OperationFlowDiagram } from "@/components/operation-flow-diagram";
 import { ProductionRequirementNotes } from "@/components/production-requirement-notes";
 import { QualityControlDashboard } from "@/components/quality-control-dashboard";
 import { StorageLocationEditor } from "@/components/storage-location-editor";
@@ -711,7 +712,13 @@ function ProductionOverview({
   );
 }
 
-export function ManufacturingDashboard({ workspaceView }: { workspaceView: WorkspaceView }) {
+export function ManufacturingDashboard({
+  workspaceView,
+  initialFinishingRequirementId = null,
+}: {
+  workspaceView: WorkspaceView;
+  initialFinishingRequirementId?: number | null;
+}) {
   const router = useRouter();
   const queryClient = useQueryClient();
   const operationsGridRef = useRef<AgGridReact<ManufacturingOperation>>(null);
@@ -973,6 +980,16 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
 
   const operations = useMemo(() => query.data?.operations ?? [], [query.data?.operations]);
   const selected = selectedId === null ? null : operations.find((operation) => operation.id === selectedId) ?? null;
+  const selectedRouteOperations = useMemo(() => {
+    if (!selected) return [];
+    if (selected.requirementId !== null) {
+      return operations.filter((operation) => operation.requirementId === selected.requirementId);
+    }
+    return operations.filter((operation) => operation.requirementId === null
+      && operation.assemblyNumber === selected.assemblyNumber
+      && operation.partNumber === selected.partNumber
+      && operation.revision === selected.revision);
+  }, [operations, selected]);
   const selectedCamHandoff = selected?.workType === "CAM" ? {
     operationId: selected.id,
     status: selected.status,
@@ -1404,7 +1421,11 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
           <span>Last refreshed {query.data ? formatDate(query.data.syncedAt) : "—"}</span>
         </div>
       </section> : workspaceView === "fabrication" ? (
-        <FabricationDashboard user={query.data?.user ?? null} onProfileRequired={openProfile} />
+        <FabricationDashboard
+          user={query.data?.user ?? null}
+          onProfileRequired={openProfile}
+          initialRequirementId={initialFinishingRequirementId}
+        />
       ) : (
         <ProductionOverview
           canForceQc={query.data?.user?.role === "admin" && query.data.user.approved}
@@ -1427,6 +1448,19 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
               </SheetHeader>
 
               <div className="space-y-6 p-6">
+                <section>
+                  <div className="mb-3">
+                    <h3 className="text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Part flow</h3>
+                    <p className="mt-1 text-xs text-muted-foreground">Select an operation to open it. Scroll sideways to see the full route.</p>
+                  </div>
+                  <OperationFlowDiagram
+                    operations={selectedRouteOperations}
+                    finishingStages={query.data?.finishingStages ?? []}
+                    currentOperationId={selected.id}
+                    onOpenOperation={setSelectedId}
+                  />
+                </section>
+
                 {selected.hasStepFile && (
                   <section>
                     <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">3D part preview</h3>

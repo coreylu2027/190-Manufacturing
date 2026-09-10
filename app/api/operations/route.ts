@@ -18,6 +18,12 @@ export async function GET() {
     const { version, snapshot } = await getCurrentManufacturingSnapshot();
     return NextResponse.json({
       operations: snapshot.operations,
+      finishingStages: snapshot.jobs.map((job) => ({
+        id: job.id,
+        requirementId: job.requirementId,
+        status: job.status,
+        finish: job.color,
+      })),
       dataVersion: version,
       syncedAt: new Date().toISOString(),
       user,

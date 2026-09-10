@@ -4,7 +4,13 @@ import { ManufacturingDashboard } from "@/components/manufacturing-dashboard";
 import { getAppUser, recordSiteVisit } from "@/lib/auth";
 import { WORKSPACE_ROUTES, type WorkspaceView } from "@/lib/workspace-routes";
 
-export async function WorkspacePage({ workspaceView }: { workspaceView: WorkspaceView }) {
+export async function WorkspacePage({
+  workspaceView,
+  initialFinishingRequirementId,
+}: {
+  workspaceView: WorkspaceView;
+  initialFinishingRequirementId?: number | null;
+}) {
   const user = await getAppUser();
 
   if (!user) redirect("/login");
@@ -12,5 +18,5 @@ export async function WorkspacePage({ workspaceView }: { workspaceView: Workspac
   if (!user.approved) redirect("/pending");
   if (["admin", "qc"].includes(workspaceView) && user.role !== "admin") redirect(WORKSPACE_ROUTES.operations);
 
-  return <ManufacturingDashboard workspaceView={workspaceView} />;
+  return <ManufacturingDashboard workspaceView={workspaceView} initialFinishingRequirementId={initialFinishingRequirementId} />;
 }

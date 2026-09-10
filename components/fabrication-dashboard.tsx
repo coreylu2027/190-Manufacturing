@@ -4,6 +4,7 @@ import { themeQuartz, type ColDef } from "ag-grid-community";
 import { AgGridReact } from "ag-grid-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import dynamic from "next/dynamic";
+import { useRouter } from "next/navigation";
 import {
   ArrowUpRight,
   Check,
@@ -38,6 +39,7 @@ import { isShopName } from "@/lib/profile-name";
 import { canUseOnRobotLocation } from "@/lib/storage-locations";
 import type { FabricationAction, FabricationActionPatch, FabricationJob, FabricationResponse, OperationStatus, OperationsResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { WORKSPACE_ROUTES } from "@/lib/workspace-routes";
 
 type QueueView = "available" | "mine" | "all";
 
@@ -139,18 +141,25 @@ const inverseAction: Record<FabricationAction, FabricationAction> = {
 export function FabricationDashboard({
   user,
   onProfileRequired,
+  initialRequirementId = null,
 }: {
   user: OperationsResponse["user"];
   onProfileRequired: () => void;
+  initialRequirementId?: number | null;
 }) {
+  const router = useRouter();
   const queryClient = useQueryClient();
   const [view, setView] = useState<QueueView>("available");
   const [color, setColor] = useState("all");
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [dismissedInitialSelection, setDismissedInitialSelection] = useState(false);
   const query = useQuery({ queryKey: ["fabrication"], queryFn: fetchFabrication });
   const jobs = useMemo(() => query.data?.jobs ?? [], [query.data?.jobs]);
-  const selected = selectedId === null ? null : jobs.find((job) => job.id === selectedId) ?? null;
+  const deepLinkedJob = !dismissedInitialSelection && initialRequirementId !== null
+    ? jobs.find((job) => job.requirementId === initialRequirementId) ?? null
+    : null;
+  const selected = selectedId === null ? deepLinkedJob : jobs.find((job) => job.id === selectedId) ?? null;
   const userName = user?.name ?? "Machinist";
 
   const mutation = useMutation({
@@ -216,6 +225,13 @@ export function FabricationDashboard({
   }), [jobs]);
 
   const openJob = (job: FabricationJob) => setSelectedId(job.id);
+  const closeJob = () => {
+    setSelectedId(null);
+    if (deepLinkedJob) {
+      setDismissedInitialSelection(true);
+      router.replace(WORKSPACE_ROUTES.fabrication, { scroll: false });
+    }
+  };
   const columnDefs = useMemo<ColDef<FabricationJob>[]>(() => [
     { field: "partNumber", headerName: "PART", minWidth: 155, pinned: "left", cellClass: "font-mono font-semibold" },
     { field: "partName", headerName: "DESCRIPTION", minWidth: 230, flex: 1 },
@@ -310,7 +326,7 @@ export function FabricationDashboard({
       </div>
       <div className="mt-3 flex flex-col gap-1 text-[11px] text-muted-foreground sm:flex-row sm:items-center sm:justify-between"><span>Finishing jobs become available after manufacturing QC passes.</span><span>Last refreshed {query.data ? formatDate(query.data.syncedAt) : "—"}</span></div>
 
-      <Sheet open={Boolean(selected)} onOpenChange={(open) => !open && setSelectedId(null)}>
+      <Sheet open={Boolean(selected)} onOpenChange={(open) => !open && closeJob()}>
         <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
           {selected && (
             <>
@@ -402,7 +418,7 @@ export function FabricationDashboard({
                 {selected.status === "Complete" && ownedBy(selected, userName) && <Button variant="outline" onClick={() => runAction("undo_complete")} disabled={mutation.isPending}><RotateCcw /> Undo completion</Button>}
                 {selected.status === "Complete" && <div className="flex items-center justify-center gap-2 rounded-xl bg-emerald-50 p-3 text-sm font-semibold text-emerald-800"><Check className="size-4" /> {selected.quantity} finished by {selected.machinist || "machinist"}</div>}
                 {selected.status === "Planned" && <div className="flex items-center justify-center gap-2 rounded-xl bg-slate-100 p-3 text-sm font-semibold text-slate-700"><PackageCheck className="size-4" /> Waiting on manufacturing and QC</div>}
-                <Button variant="outline" onClick={() => setSelectedId(null)}>Close</Button>
+                <Button variant="outline" onClick={closeJob}>Close</Button>
               </SheetFooter>
             </>
           )}

@@ -96,9 +96,17 @@ export interface ManufacturingOperation extends QualityLocationFields {
 
 export interface OperationsResponse {
   operations: ManufacturingOperation[];
+  finishingStages: FinishingStage[];
   dataVersion?: string;
   syncedAt: string;
   user: { id: string; name: string; email: string | null; role: UserRole; approved: boolean } | null;
+}
+
+export interface FinishingStage {
+  id: number;
+  requirementId: number;
+  status: OperationStatus;
+  finish: string;
 }
 
 export interface FabricationJob extends QualityLocationFields {
