@@ -67,7 +67,7 @@ begin
       or existing.original_name is distinct from p_original_name or existing.content_type is distinct from p_content_type
       or existing.byte_size is distinct from p_byte_size or existing.sha256 is distinct from p_sha256
       or existing.storage_bucket is distinct from p_storage_bucket or existing.storage_path is distinct from p_storage_path then
-      raise exception 'Attachment registration conflicts with verified data' using errcode = '40001';
+      raise sqlstate 'PT409' using message = 'Attachment registration conflicts with verified data';
     end if;
     return existing.id;
   end if;

@@ -43,7 +43,7 @@ begin
       repeat('a', 64), 'manufacturing-files', 'sha256/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.pdf',
       '2026-09-05T00:02:00Z'
     );
-  exception when serialization_failure then rejected := true; end;
+  exception when sqlstate 'PT409' then rejected := true; end;
   if not rejected then raise exception 'Conflicting attachment registration was accepted'; end if;
 end;
 $test$;

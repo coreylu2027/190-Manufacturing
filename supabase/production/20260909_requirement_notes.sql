@@ -106,20 +106,20 @@ begin
   select * into prior from manufacturing.write_requests where request_id = p_request_id;
   if found then
     if prior.payload_hash <> fingerprint then
-      raise exception 'Request ID reused with different payload' using errcode = '40001';
+      raise sqlstate 'PT409' using message = 'Request ID reused with different payload';
     end if;
     return prior.result;
   end if;
 
   if p_expected is distinct from md5(manufacturing.write_snapshot()::text) then
-    raise exception 'Manufacturing state changed' using errcode = '40001';
+    raise sqlstate 'PT409' using message = 'Manufacturing state changed';
   end if;
 
   select to_jsonb(r) into before_row
   from manufacturing.requirements r
   where r.id = p_requirement_id;
   if before_row is null then
-    raise exception 'Production requirement no longer exists' using errcode = '40001';
+    raise sqlstate 'PT409' using message = 'Production requirement no longer exists';
   end if;
 
   insert into manufacturing.write_requests(request_id, actor, action, payload_hash, result)

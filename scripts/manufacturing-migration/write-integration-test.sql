@@ -96,7 +96,7 @@ begin
       '00000000-0000-4000-8000-000000000192', actor, 'claim', state->>'token',
       '[]', null, '{}'
     );
-  exception when serialization_failure then rejected := true; end;
+  exception when sqlstate 'PT409' then rejected := true; end;
   if not rejected then raise exception 'Stale concurrent edit was accepted'; end if;
 end;
 $test$;
@@ -223,7 +223,7 @@ begin
       rejected_robot_request, mover, 'part_location', state->>'token', '[]',
       jsonb_build_object('requirement_id',-190,'location','On Robot','location_updated_at','2026-09-05T00:01:40Z'), '{}'
     );
-  exception when serialization_failure then rejected := true; end;
+  exception when sqlstate 'PT409' then rejected := true; end;
   if not rejected then raise exception 'Part moved onto the robot without an effective QC pass'; end if;
 
   state := public.manufacturing_write_state();

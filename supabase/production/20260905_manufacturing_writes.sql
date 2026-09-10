@@ -86,11 +86,11 @@ begin
   fingerprint := md5(jsonb_build_array(p_actor,p_action,p_expected,p_changes,p_qc,p_result)::text);
   select * into prior from manufacturing.write_requests where request_id=p_request_id;
   if found then
-    if prior.payload_hash <> fingerprint then raise exception 'Request ID reused with different payload' using errcode='40001'; end if;
+    if prior.payload_hash <> fingerprint then raise sqlstate 'PT409' using message = 'Request ID reused with different payload'; end if;
     return prior.result;
   end if;
   if p_expected is distinct from md5(manufacturing.write_snapshot()::text) then
-    raise exception 'Manufacturing state changed' using errcode='40001';
+    raise sqlstate 'PT409' using message = 'Manufacturing state changed';
   end if;
   if jsonb_typeof(p_changes) is distinct from 'array' then raise exception 'Invalid changes'; end if;
   if (p_action in ('qc_review','qc_undo')) <> (p_qc is not null) then raise exception 'QC action must be atomic'; end if;
@@ -108,7 +108,7 @@ begin
     end if;
     if p_action not in ('qc_review','qc_undo') and patch ?| array['qc_notes','qc_reviewed_by','qc_reviewed_at'] then raise exception 'QC review required'; end if;
     execute format('select to_jsonb(r) from manufacturing.%I r where id=$1',entity) into before_row using row_id;
-    if before_row is null then raise exception 'Manufacturing row missing' using errcode='40001'; end if;
+    if before_row is null then raise sqlstate 'PT409' using message = 'Manufacturing row missing'; end if;
     select string_agg(format('%I = (jsonb_populate_record(null::manufacturing.%I, $1)).%I',k,entity,k), ', ' order by k)
       into assignments from jsonb_object_keys(patch) k;
     execute format('update manufacturing.%I set %s, updated_at=clock_timestamp() where id=$2 returning to_jsonb(%I.*)',entity,assignments,entity)
@@ -163,7 +163,7 @@ begin
           (select 1 from manufacturing.operations o where o.id=q.operation_id and o.requirement_id=target_requirement_id))
         order by q.reviewed_at desc,q.id desc limit 1;
       if review_result is distinct from 'passed' or exists(select 1 from manufacturing.quality_review_retractions r where r.review_id=target_review_id) then
-        raise exception 'Only the latest passed QC review can be undone' using errcode='40001'; end if;
+        raise sqlstate 'PT409' using message = 'Only the latest passed QC review can be undone'; end if;
       insert into manufacturing.quality_review_retractions values(target_review_id,p_request_id,p_actor,clock_timestamp());
     end if;
   end if;

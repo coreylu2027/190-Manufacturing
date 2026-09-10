@@ -92,7 +92,7 @@ test("Force QC transport retries reuse the atomic payload and database conflicts
   await retry.adapter.forceQualityReview(20, "", "fixture-token", ACTOR);
   assert.equal(retry.commits.length, 2);
   assert.deepEqual(retry.commits[0], retry.commits[1]);
-  const conflict = harness(fixture(), () => Response.json({ code: "40001" }, { status: 409 }));
+  const conflict = harness(fixture(), () => Response.json({ code: "PT409" }, { status: 409 }));
   await assert.rejects(conflict.adapter.forceQualityReview(20, "", "fixture-token", ACTOR), error => error instanceof ManufacturingWriteError && error.status === 409);
   assert.equal(conflict.commits.length, 1);
 

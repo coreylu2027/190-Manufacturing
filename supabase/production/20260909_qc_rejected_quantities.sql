@@ -128,7 +128,7 @@ begin
       and reviewed_at = (p_qc->>'reviewed_at')::timestamptz
       and result = 'failed';
     if not found then
-      raise exception 'QC failure record missing' using errcode = '40001';
+      raise sqlstate 'PT409' using message = 'QC failure record missing';
     end if;
   end if;
 
