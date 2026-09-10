@@ -43,6 +43,7 @@ function SheetContent({
   side = "right",
   showCloseButton = true,
   detailView = false,
+  initialFocus,
   ...props
 }: SheetPrimitive.Popup.Props & {
   side?: "top" | "right" | "bottom" | "left"
@@ -51,10 +52,13 @@ function SheetContent({
 }) {
   const preference = useDetailView()
   const expanded = detailView && preference === "expanded"
+  const contentRef = React.useRef<HTMLDivElement>(null)
   return (
     <SheetPortal>
       <SheetOverlay />
       <SheetPrimitive.Popup
+        ref={contentRef}
+        initialFocus={detailView ? contentRef : initialFocus}
         data-slot="sheet-content"
         data-side={expanded ? undefined : side}
         data-expanded={expanded || undefined}
