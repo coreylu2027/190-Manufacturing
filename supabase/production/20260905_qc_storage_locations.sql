@@ -28,7 +28,7 @@ begin
   select * into prior from manufacturing.write_requests where request_id = p_request_id;
   if found then
     if prior.payload_hash <> fingerprint then
-      raise exception 'Request ID reused with different payload' using errcode='40001';
+      raise sqlstate 'PT409' using message = 'Request ID reused with different payload';
     end if;
     return prior.result;
   end if;
@@ -52,7 +52,7 @@ begin
         and reviewed_by = p_actor
         and reviewed_at = (p_qc->>'reviewed_at')::timestamptz
         and result = 'passed';
-      if not found then raise exception 'QC review location target missing' using errcode='40001'; end if;
+      if not found then raise sqlstate 'PT409' using message = 'QC review location target missing'; end if;
     elsif p_action = 'qc_undo' then
       select q.id into target_review_id
       from public.quality_control q
@@ -82,7 +82,7 @@ begin
   if p_qc->>'location_updated_at' is null then raise exception 'Location update time required'; end if;
 
   if p_expected is distinct from md5(manufacturing.write_snapshot()::text) then
-    raise exception 'Manufacturing state changed' using errcode='40001';
+    raise sqlstate 'PT409' using message = 'Manufacturing state changed';
   end if;
 
   target_requirement_id := (p_qc->>'requirement_id')::bigint;
@@ -118,7 +118,7 @@ begin
         case o.status when 'Needs Rework' then 5 when 'Complete' then 4 when 'In Progress' then 3
           when 'Blocked' then 2 when 'Ready' then 1 else 0 end desc,o.id
     ) canonical where canonical.status is distinct from 'Complete' or canonical.completed_at > review_time) then
-    raise exception 'A location can only be edited for the latest effective passed QC review' using errcode='40001';
+    raise sqlstate 'PT409' using message = 'A location can only be edited for the latest effective passed QC review';
   end if;
 
   insert into manufacturing.write_requests(request_id,actor,action,payload_hash,result)

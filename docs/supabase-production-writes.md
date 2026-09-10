@@ -12,7 +12,7 @@ changes in memory. `public.manufacturing_commit` then commits the complete chang
 set in one PostgreSQL transaction. It:
 
 - obtains table locks in a fixed order before checking the snapshot token;
-- rejects a stale token with SQLSTATE `40001`, surfaced to the UI as HTTP 409;
+- rejects a stale token with PostgREST SQLSTATE `PT409`, surfaced to the UI as HTTP 409;
 - records an idempotency key so a transport retry cannot apply an action twice;
 - limits patches to shop-owned columns and rebuilds relational allocations from
   the validated quantity ledger;
@@ -117,6 +117,12 @@ For a new Supabase environment:
 For an existing normalized installation, apply any unapplied scripts in the
 order above. Apply both September 9 scripts before deploying application code
 that exposes the note editor or rejected-quantity QC flow.
+
+Existing installations created before September 10, 2026 must also apply
+`supabase/production/20260910_postgrest_40001_hotfix.sql`. The hotfix updates
+the five deployed manufacturing RPCs in place so conflict responses use
+PostgREST's `PT409` code instead of PostgreSQL's retryable `40001` serialization
+failure. It is idempotent and does not modify manufacturing data.
 
 The browser does not poll when Realtime is unavailable. It shows `Manual
 refresh` and retains the explicit refresh button, avoiding a full request every

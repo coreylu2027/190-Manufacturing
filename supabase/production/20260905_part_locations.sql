@@ -91,13 +91,13 @@ begin
       raise exception 'Failed QC cannot assign a location';
     end if;
     if p_action = 'qc_review' and requested_location = 'On Robot' then
-      raise exception 'On Robot becomes available after QC passes and finishing is complete' using errcode='40001';
+      raise sqlstate 'PT409' using message = 'On Robot becomes available after QC passes and finishing is complete';
     end if;
     if p_action = 'qc_undo' and exists (
       select 1 from manufacturing.requirements r
       where r.id = (p_qc->>'requirement_id')::bigint and r.part_location = 'On Robot'
     ) then
-      raise exception 'Move the part off the robot before undoing QC' using errcode='40001';
+      raise sqlstate 'PT409' using message = 'Move the part off the robot before undoing QC';
     end if;
     if p_action = 'finishing_undo_complete' and exists (
       select 1
@@ -107,7 +107,7 @@ begin
         and change->'patch'->>'status' = 'Ready for Finishing'
         and r.part_location = 'On Robot'
     ) then
-      raise exception 'Move the part off the robot before reopening finishing' using errcode='40001';
+      raise sqlstate 'PT409' using message = 'Move the part off the robot before reopening finishing';
     end if;
 
     committed_result := public.manufacturing_commit(
@@ -125,7 +125,7 @@ begin
         and reviewed_by = p_actor
         and reviewed_at = (p_qc->>'reviewed_at')::timestamptz
         and result = 'passed';
-      if not found then raise exception 'QC review location target missing' using errcode='40001'; end if;
+      if not found then raise sqlstate 'PT409' using message = 'QC review location target missing'; end if;
 
       update manufacturing.requirements
       set part_location = requested_location,
@@ -133,7 +133,7 @@ begin
           location_updated_at = (p_qc->>'reviewed_at')::timestamptz,
           updated_at = clock_timestamp()
       where id = (p_qc->>'requirement_id')::bigint;
-      if not found then raise exception 'Part location target missing' using errcode='40001'; end if;
+      if not found then raise sqlstate 'PT409' using message = 'Part location target missing'; end if;
     elsif p_action = 'qc_undo' then
       select q.id into target_review_id
       from public.quality_control q
@@ -167,19 +167,19 @@ begin
   select * into prior from manufacturing.write_requests where request_id = p_request_id;
   if found then
     if prior.payload_hash <> fingerprint then
-      raise exception 'Request ID reused with different payload' using errcode='40001';
+      raise sqlstate 'PT409' using message = 'Request ID reused with different payload';
     end if;
     return prior.result;
   end if;
 
   if p_expected is distinct from md5(manufacturing.write_snapshot()::text) then
-    raise exception 'Manufacturing state changed' using errcode='40001';
+    raise sqlstate 'PT409' using message = 'Manufacturing state changed';
   end if;
 
   target_requirement_id := (p_qc->>'requirement_id')::bigint;
   select to_jsonb(r) into before_row
   from manufacturing.requirements r where r.id = target_requirement_id;
-  if before_row is null then raise exception 'Part location target missing' using errcode='40001'; end if;
+  if before_row is null then raise sqlstate 'PT409' using message = 'Part location target missing'; end if;
 
   if requested_location = 'On Robot' then
     select q.id, q.result::text, q.reviewed_at
@@ -219,7 +219,7 @@ begin
       ) canonical where canonical.status is distinct from 'Complete' or canonical.completed_at > review_time)
       or (coalesce(before_row->>'finishing','None') not in ('','None')
         and coalesce(before_row->>'status','Needs Triage') in ('Ready for QC','Ready for Finishing','Needs Rework')) then
-      raise exception 'On Robot requires passed QC and completed finishing' using errcode='40001';
+      raise sqlstate 'PT409' using message = 'On Robot requires passed QC and completed finishing';
     end if;
   end if;
 

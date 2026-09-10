@@ -44,7 +44,14 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     });
     if (!response.ok) {
       const error = await response.json().catch(() => ({})) as { code?: string; message?: string };
-      if (error.code === "40001") throw new ManufacturingWriteError("Manufacturing changed while you were editing. Refresh and try again.", 409);
+      if (error.code === "40001" || error.code === "PT409" || response.status === 409) {
+        throw new ManufacturingWriteError(
+          error.message && error.message !== "Manufacturing state changed"
+            ? error.message
+            : "Manufacturing changed while you were editing. Refresh and try again.",
+          409,
+        );
+      }
       if (error.code === "42501") throw new ManufacturingWriteError("Supabase writes are disabled or this account is not authorized.", 403);
       if (error.code === "57014" || error.code === "55P03") {
         throw new ManufacturingWriteError("The manufacturing database is busy. Wait a moment and try again.", 503);
