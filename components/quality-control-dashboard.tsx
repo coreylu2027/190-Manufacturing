@@ -542,7 +542,7 @@ export function QualityControlDashboard() {
       </div>
 
       <Sheet open={Boolean(selected)} onOpenChange={(open) => !open && setSelectedId(null)}>
-        <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
+        <SheetContent detailView className="w-full overflow-y-auto sm:max-w-xl">
           {selected && (() => {
             const operation = selected.operations[0];
             const ready = selected.operations.every((item) => item.status === "Complete");
@@ -556,7 +556,7 @@ export function QualityControlDashboard() {
                 <SheetDescription className="font-mono text-xs font-semibold text-primary">{operation.partNumber}</SheetDescription>
               </SheetHeader>
 
-              <div className="space-y-6 p-6">
+              <div className="detail-sections p-6"><div className="detail-columns space-y-6">
                 <section>
                   <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Operations</h3>
                   <div className="grid gap-2">
@@ -603,7 +603,7 @@ export function QualityControlDashboard() {
                     <Button variant="outline" className="h-11 justify-start" nativeButton={!operation.onshapeUrl} render={operation.onshapeUrl ? <a href={operation.onshapeUrl} target="_blank" rel="noreferrer" /> : undefined} disabled={!operation.onshapeUrl}><ExternalLink /> Onshape source</Button>
                   </div>
                 </section>
-              </div>
+              </div></div>
 
               <SheetFooter className="sticky bottom-0 border-t bg-card/95 p-4 backdrop-blur">
                 {selected.result === "pending" ? <>

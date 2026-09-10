@@ -96,6 +96,7 @@ import { isShopName } from "@/lib/profile-name";
 import { createClient } from "@/lib/supabase/client";
 import { canUseOnRobotLocation } from "@/lib/storage-locations";
 import { cn } from "@/lib/utils";
+import { PreferencesPage } from "@/components/preferences-page";
 import { WORKSPACE_ROUTES, type WorkspaceView } from "@/lib/workspace-routes";
 import {
   type CamHandoffPatch,
@@ -560,7 +561,7 @@ function ProductionOverview({
       </div>
 
       <Sheet open={Boolean(selectedRequirement)} onOpenChange={(open) => !open && setSelectedRequirementKey(null)}>
-        <SheetContent className="w-full overflow-y-auto sm:max-w-2xl">
+        <SheetContent detailView className="w-full overflow-y-auto sm:max-w-2xl">
           {selectedRequirement && (
             <>
               <SheetHeader className="border-b p-6 pr-14">
@@ -578,7 +579,7 @@ function ProductionOverview({
                 <SheetDescription className="font-mono text-xs font-semibold text-primary">{selectedRequirement.partNumber}{selectedRequirement.revision ? ` · Rev ${selectedRequirement.revision}` : ""}</SheetDescription>
               </SheetHeader>
 
-              <div className="space-y-6 p-6">
+              <div className="detail-sections p-6"><div className="detail-columns space-y-6">
                 {selectedRequirement.operations[0]?.hasStepFile && (
                   <section>
                     <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">3D part preview</h3>
@@ -720,7 +721,7 @@ function ProductionOverview({
                     ))}
                   </div>
                 </section>
-              </div>
+              </div></div>
 
               <SheetFooter className="sticky bottom-0 border-t bg-card/95 p-4 backdrop-blur"><Button variant="outline" onClick={() => setSelectedRequirementKey(null)}>Close</Button></SheetFooter>
             </>
@@ -1280,6 +1281,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                   <DropdownMenuLabel>Signed in as<br /><span className="font-normal text-foreground">{query.data?.user?.email ?? userName}</span></DropdownMenuLabel>
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
+                <DropdownMenuItem render={<Link href={WORKSPACE_ROUTES.preferences} />}>Preferences</DropdownMenuItem>
                 <DropdownMenuItem onClick={openProfile}>Edit shop name</DropdownMenuItem>
                 <DropdownMenuItem render={<a href="/login" />}>Switch account</DropdownMenuItem>
                 <DropdownMenuItem render={<a href="/auth/signout" />}>Sign out</DropdownMenuItem>
@@ -1302,7 +1304,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
         </nav>
       </header>
 
-      {workspaceView === "admin" ? <AdminDashboard /> : workspaceView === "qc" ? <QualityControlDashboard /> : workspaceView === "operations" ? <section className="mx-auto max-w-[1800px] px-4 py-5 md:px-7 md:py-7">
+      {workspaceView === "preferences" ? <PreferencesPage /> : workspaceView === "admin" ? <AdminDashboard /> : workspaceView === "qc" ? <QualityControlDashboard /> : workspaceView === "operations" ? <section className="mx-auto max-w-[1800px] px-4 py-5 md:px-7 md:py-7">
         <div className="mb-5 flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
           <div>
             <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-primary"><span className="size-2 rounded-full bg-emerald-500 shadow-[0_0_0_4px_rgba(16,185,129,.12)]" /> Shop queue</div>
@@ -1437,7 +1439,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
       )}
 
       <Sheet open={Boolean(selected)} onOpenChange={(open) => !open && setSelectedId(null)}>
-        <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
+        <SheetContent detailView className="w-full overflow-y-auto sm:max-w-xl">
           {selected && (
             <>
               <SheetHeader className="border-b p-6 pr-14">
@@ -1446,7 +1448,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                 <SheetDescription className="font-mono text-xs font-semibold text-primary">{selected.partNumber}</SheetDescription>
               </SheetHeader>
 
-              <div className="space-y-6 p-6">
+              <div className="detail-sections p-6"><div className="detail-columns space-y-6">
                 {selected.hasStepFile && (
                   <section>
                     <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">3D part preview</h3>
@@ -1554,7 +1556,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                     ))}
                   </div>
                 </section>
-              </div>
+              </div></div>
 
               <SheetFooter className="sticky bottom-0 border-t bg-card/95 p-4 backdrop-blur">
                 {["Ready", "In Progress"].includes(selected.status) && selected.availableQuantity > 0 && <Button size="lg" className="h-11" onClick={() => requestQuantityAction("claim", selected.availableQuantity)} disabled={mutation.isPending}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <CircleDot />} {selected.workType === "CAM" ? "Claim CAM task" : `Claim ${selected.availableQuantity === 1 ? "part" : "parts"}`}</Button>}

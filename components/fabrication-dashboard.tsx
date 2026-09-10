@@ -311,7 +311,7 @@ export function FabricationDashboard({
       <div className="mt-3 flex flex-col gap-1 text-[11px] text-muted-foreground sm:flex-row sm:items-center sm:justify-between"><span>Finishing jobs become available after manufacturing QC passes.</span><span>Last refreshed {query.data ? formatDate(query.data.syncedAt) : "—"}</span></div>
 
       <Sheet open={Boolean(selected)} onOpenChange={(open) => !open && setSelectedId(null)}>
-        <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
+        <SheetContent detailView className="w-full overflow-y-auto sm:max-w-xl">
           {selected && (
             <>
               <SheetHeader className="border-b p-6 pr-14">
@@ -320,7 +320,7 @@ export function FabricationDashboard({
                 <SheetDescription className="font-mono text-xs font-semibold text-primary">{selected.partNumber}</SheetDescription>
               </SheetHeader>
 
-              <div className="space-y-6 p-6">
+              <div className="detail-sections p-6"><div className="detail-columns space-y-6">
                 {selected.hasStepFile && (
                   <section>
                     <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">3D part preview</h3>
@@ -394,7 +394,7 @@ export function FabricationDashboard({
                     ))}
                   </div>
                 </section>
-              </div>
+              </div></div>
 
               <SheetFooter className="sticky bottom-0 border-t bg-card/95 p-4 backdrop-blur">
                 {selected.status === "Ready" && <Button size="lg" className="h-11" onClick={() => runAction("claim")} disabled={mutation.isPending}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <CircleDot />} Claim finishing job</Button>}
