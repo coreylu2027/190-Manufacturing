@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { Check, ChevronLeft, ChevronRight, ListTree, Wrench } from "lucide-react";
-import { useRef } from "react";
+import { useLayoutEffect, useRef } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { buildOperationFlow, type OperationFlowNode } from "@/lib/operation-flow";
@@ -110,18 +110,37 @@ export function OperationFlowDiagram({
   onOpenOperation: (operationId: number) => void;
 }) {
   const scrollerRef = useRef<HTMLDivElement>(null);
+  const currentTileRef = useRef<HTMLDivElement>(null);
   const stages = buildOperationFlow(operations, finishingStages);
   const tiles = stages.flatMap((stage, stageIndex) => stage.nodes.map((node) => ({
     node,
     step: stageIndex + 1,
   })));
-  const currentTile = tiles.find(({ node }) => node.operationId === currentOperationId) ?? tiles[0];
+  const currentTileIndex = tiles.findIndex(({ node }) => node.operationId === currentOperationId);
+  const currentTile = tiles[currentTileIndex] ?? tiles[0];
   const currentOperation = operations.find((operation) => operation.id === currentTile?.node.operationId);
   const currentCategory = currentOperation?.workType
     ?? (currentTile?.node.kind === "qc" ? "Quality" : "Finishing");
   const scrollSteps = (direction: -1 | 1) => {
     scrollerRef.current?.scrollBy({ left: direction * 336, behavior: "smooth" });
   };
+
+  useLayoutEffect(() => {
+    const scroller = scrollerRef.current;
+    const tile = currentTileRef.current;
+    if (!scroller || !tile || currentTileIndex < 0) return;
+
+    if (currentTileIndex === 0) {
+      scroller.scrollLeft = 0;
+      return;
+    }
+    if (currentTileIndex === tiles.length - 1) {
+      scroller.scrollLeft = scroller.scrollWidth - scroller.clientWidth;
+      return;
+    }
+
+    scroller.scrollLeft = tile.offsetLeft - (scroller.clientWidth - tile.clientWidth) / 2;
+  }, [currentTileIndex, tiles.length]);
 
   if (!currentTile) return null;
 
@@ -134,7 +153,7 @@ export function OperationFlowDiagram({
         <div ref={scrollerRef} className="min-w-0 flex-1 snap-x snap-mandatory overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           <div className="flex min-w-max gap-2 py-1">
             {tiles.map(({ node, step }) => (
-              <div key={node.key} className="snap-start">
+              <div key={node.key} ref={node.operationId === currentOperationId ? currentTileRef : undefined} className="snap-start">
                 <FlowTile node={node} step={step} current={node.operationId === currentOperationId} onOpenOperation={onOpenOperation} />
               </div>
             ))}
