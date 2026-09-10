@@ -5,6 +5,7 @@ import { ForceQcPicker } from "@/components/force-qc";
 import { themeQuartz, type ColDef } from "ag-grid-community";
 import { AgGridReact } from "ag-grid-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import dynamic from "next/dynamic";
 import {
   Check,
   ChevronRight,
@@ -36,6 +37,14 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { canUseOnRobotLocation } from "@/lib/storage-locations";
 import type { AdminResponse, QualityControlItem, QualityFailureSummary, QualityResult } from "@/lib/types";
 import { cn } from "@/lib/utils";
+
+const PartModelPreview = dynamic(
+  () => import("@/components/part-model-preview").then((module) => module.PartModelPreview),
+  {
+    ssr: false,
+    loading: () => <Skeleton className="h-[22rem] rounded-xl sm:h-[26rem]" />,
+  },
+);
 
 const gridTheme = themeQuartz.withParams({
   accentColor: "#3159c6",
@@ -557,6 +566,14 @@ export function QualityControlDashboard() {
               </SheetHeader>
 
               <div className="detail-sections p-6"><div className="detail-columns space-y-6">
+                <section>
+                  <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">3D part preview</h3>
+                  <PartModelPreview
+                    src={`/api/operations/${operation.id}/preview`}
+                    partName={`${operation.partNumber} ${operation.partName}`}
+                  />
+                </section>
+
                 <section>
                   <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Operations</h3>
                   <div className="grid gap-2">
