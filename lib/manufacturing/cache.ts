@@ -29,7 +29,7 @@ const loadSnapshotByVersion = unstable_cache(
       retractedQualityReviewIds: quality.retractedIds,
     };
   },
-  ["manufacturing-projected-snapshot-v2"],
+  ["manufacturing-projected-snapshot-v3"],
   { revalidate: false },
 );
 
