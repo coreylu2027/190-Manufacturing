@@ -91,7 +91,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
-import { mergeVisibleSelection } from "@/lib/bulk-selection";
+import { mergeVisibleSelection, settleSequentially } from "@/lib/bulk-selection";
 import { isShopName } from "@/lib/profile-name";
 import { createClient } from "@/lib/supabase/client";
 import { canUseOnRobotLocation } from "@/lib/storage-locations";
@@ -905,7 +905,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
       programPath: string;
       notes: string;
     }) => {
-      const results = await Promise.allSettled(items.map(async (item) => {
+      const results = await settleSequentially(items, async (item) => {
         const response = await fetch(`/api/operations/${item.id}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
@@ -921,7 +921,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
         const body = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(body.error ?? (action === "claim" ? "Claim failed" : "Completion failed"));
         return { item, updated: body.updated as Partial<ManufacturingOperation> | undefined };
-      }));
+      });
       const succeeded = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
       const failed = results.length - succeeded.length;
       if (succeeded.length === 0) {
