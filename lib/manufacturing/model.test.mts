@@ -69,7 +69,7 @@ test("Supabase reader exhausts pagination and rejects duplicates and source coun
  await assert.rejects(drift.readEntity("operations"),/changed/);
 });
 
-test("snapshot reads omit unused assemblies and bound entity concurrency", async () => {
+test("snapshot reads include assembly identities and bound entity concurrency", async () => {
  let activeEntityReads=0;let maxEntityReads=0;const requestedEntities:string[]=[];
  const adapter=createSupabaseManufacturingAdapter({url:"https://example.test",serviceKey:"test",fetch:async(input)=>{
   const url=new URL(String(input));
@@ -80,10 +80,48 @@ test("snapshot reads omit unused assemblies and bound entity concurrency", async
   return Response.json({total:0,rows:[]});
  }});
  assert.deepEqual(await adapter.readSnapshot(),{operations:[],jobs:[]});
- assert.deepEqual(requestedEntities.sort(),["finishing","operations","parts","requirements"]);
+ assert.deepEqual(requestedEntities.sort(),["assemblies","finishing","operations","parts","requirements"]);
  assert.equal(maxEntityReads,2);
 });
 
 test("timestamp comparison detects microsecond changes",()=>{
  const entity=ENTITIES.find(e=>e.name==="operations")!;const raw={id:1,"Started At":"2026-09-01T00:00:00.123456Z"};const row=normalizeRow(entity,raw) as NormalizedRow;row.started_at="2026-09-01T00:00:00.123789+00:00";assert.equal(denormalizeRow(entity,row)["Started At"],row.started_at);
+});
+
+test("synced identities override stale Baserow labels and support records with no source row metadata", async () => {
+ const rows: Record<string, object[]> = {
+  assemblies: [{id:4,source_row:{},assembly_number:"A-CURRENT"}],
+  parts: [{id:3,source_row:{},part_number:"P-CURRENT",name:"Gear Spacer",revision:"C",drawing_url:"https://example.test/current-drawing"}],
+  requirements: [
+   {id:2,source_row:{Part:[{id:3,value:"P-OLD"}],Assembly:[{id:4,value:"A-OLD"}],Revision:"A"},part_id:3,assembly_id:4,required_quantity:2,required_part_revision:"B",active_in_bom:true},
+   {id:5,source_row:{},part_id:3,assembly_id:4,required_quantity:4,required_part_revision:"B",active_in_bom:true},
+  ],
+  operations: [
+   {id:1,source_row:{"Production Requirement":[{id:2,value:"P-OLD — 95T Belt [A-OLD]"}]},requirement_id:2,operation_key:"old|OP1",operation_number:"OP1",machine:"Bambu 3D Printer",status:"In Progress",active_in_routing:true,claimed_quantity:2},
+   {id:6,source_row:{},requirement_id:5,operation_key:"new|OP1",operation_number:"OP1",machine:"Haas CNC",status:"Planned",active_in_routing:true},
+   {id:7,source_row:{},requirement_id:5,operation_key:"new|OP2",operation_number:"OP2",machine:"Countersinking",status:"Planned",active_in_routing:true},
+  ],
+  finishing: [{id:8,source_row:{},requirement_id:5,production_key:"new",active:true}],
+ };
+ const adapter=createSupabaseManufacturingAdapter({url:"https://example.test",serviceKey:"test",fetch:async(input)=>{
+  const url=new URL(String(input));
+  if(url.pathname.endsWith("manufacturing_attachment_manifest")) return Response.json([]);
+  const entity=rows[url.searchParams.get("p_entity")!];
+  return Response.json({total:entity.length,rows:entity});
+ }});
+ const {operations,jobs}=await adapter.readSnapshot();
+ assert.equal(operations.length,3);
+ for(const operation of operations) {
+  assert.equal(operation.partNumber,"P-CURRENT");
+  assert.equal(operation.partName,"Gear Spacer");
+  assert.equal(operation.assemblyNumber,"A-CURRENT");
+  assert.equal(operation.revision,"B");
+  assert.equal(operation.drawingUrl,"https://example.test/current-drawing");
+ }
+ assert.equal(operations[0].status,"In Progress");
+ assert.equal(operations[0].claimedQuantity,2);
+ assert.deepEqual(operations.filter(o=>o.requirementId===5).map(o=>o.machine),["Haas CNC","Countersinking"]);
+ assert.equal(jobs[0].partName,"Gear Spacer");
+ assert.equal(jobs[0].partNumber,"P-CURRENT");
+ assert.equal(jobs[0].assemblyNumber,"A-CURRENT");
 });

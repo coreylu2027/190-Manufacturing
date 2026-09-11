@@ -55,7 +55,7 @@ function sourceDocumentName(requirement: SourceRow | undefined): string | null {
 }
 
 function revisionName(requirement: SourceRow | undefined, part: SourceRow | undefined): string | null {
-  for (const value of [requirement?.Revision, part?.Revision]) {
+  for (const value of [requirement?.["Required Part Revision"], part?.Revision, requirement?.Revision]) {
     if (typeof value === "number") return String(value);
     const revision = textValue(value) || selectValue(value);
     if (revision) return revision;
@@ -69,6 +69,24 @@ function parseRequirement(display: string) {
     partNumber: match?.[1] ?? display.split(" ")[0] ?? "Unknown",
     partName: match?.[2] ?? display,
     assemblyNumber: match?.[3] ?? "Unassigned",
+  };
+}
+
+// Baserow lookup labels in source_row are migration history, not live joins.
+// Native Supabase rows have no such labels at all.
+function requirementIdentity(
+  requirement: SourceRow | undefined,
+  part: SourceRow | undefined,
+  assembly: SourceRow | undefined,
+  legacyDisplay: string,
+) {
+  const legacy = parseRequirement(legacyDisplay);
+  const partNumber = part ? textValue(part["Part Number"]) : linkedValue(requirement?.Part) || legacy.partNumber;
+  return {
+    partNumber,
+    partName: part ? textValue(part.Name) || partNumber : legacy.partName,
+    assemblyNumber: assembly ? textValue(assembly["Assembly Number"])
+      : linkedValue(requirement?.Assembly) || legacy.assemblyNumber,
   };
 }
 
@@ -131,9 +149,10 @@ function fabricationStatus(requirementStatus: string, machinist: string): Manufa
   return "Planned";
 }
 
-export function projectOperations(operationRows: SourceRow[], requirementRows: SourceRow[], partRows: SourceRow[], attachments: ManufacturingAttachment[] = []): ManufacturingOperation[] {
+export function projectOperations(operationRows: SourceRow[], requirementRows: SourceRow[], partRows: SourceRow[], attachments: ManufacturingAttachment[] = [], assemblyRows: SourceRow[] = []): ManufacturingOperation[] {
   const requirements = new Map(requirementRows.map((row) => [row.id, row]));
   const parts = new Map(partRows.map((row) => [row.id, row]));
+  const assemblies = new Map(assemblyRows.map((row) => [row.id, row]));
   const files = attachmentIndex(attachments);
 
   const parsedOperations = operationRows.map((row) => {
@@ -141,7 +160,8 @@ export function projectOperations(operationRows: SourceRow[], requirementRows: S
     const requirement = requirementId ? requirements.get(requirementId) : undefined;
     const partId = linkedId(requirement?.Part);
     const part = partId ? parts.get(partId) : undefined;
-    const parsed = parseRequirement(linkedValue(row["Production Requirement"]));
+    const parsed = requirementIdentity(requirement, part,
+      assemblies.get(linkedId(requirement?.Assembly) ?? -1), linkedValue(row["Production Requirement"]));
     const operationNumber = selectValue(row["Operation Number"], "OP1") as ManufacturingOperation["operationNumber"];
     const machine = selectValue(row.Machine, "Unassigned");
     const rawStoredStatus = selectValue(row.Status, "Planned");
@@ -204,7 +224,7 @@ export function projectOperations(operationRows: SourceRow[], requirementRows: S
       camProgramPath: textValue(row["CAM Program Path"]) || null,
       camNotes: textValue(row["CAM Notes"]),
       camDependency: null,
-      drawingUrl: linkedValue(requirement?.Drawing) || null,
+      drawingUrl: part ? textValue(part["Onshape Drawing"]) || null : linkedValue(requirement?.Drawing) || null,
       hasDrawingPdf: Boolean(drawingPdf),
       drawingPdfName: drawingPdf?.originalName ?? null,
       hasStepFile: Boolean(stepFile),
@@ -244,8 +264,12 @@ export function projectFinishing(
   requirementRows: SourceRow[],
   attachments: ManufacturingAttachment[] = [],
   operationRows: SourceRow[] = [],
+  partRows: SourceRow[] = [],
+  assemblyRows: SourceRow[] = [],
 ): FabricationJob[] {
   const requirements = new Map(requirementRows.map((row) => [row.id, row]));
+  const parts = new Map(partRows.map((row) => [row.id, row]));
+  const assemblies = new Map(assemblyRows.map((row) => [row.id, row]));
   const files = attachmentIndex(attachments);
   const requirementsWithPostQcWork = new Set(operationRows.filter((row) =>
     Boolean(row["Active in Routing"])
@@ -261,7 +285,9 @@ export function projectFinishing(
     const requirement = requirementId ? requirements.get(requirementId) : undefined;
     if (!requirementId || !requirement) return [];
 
-    const parsed = parseRequirement(linkedValue(row["Production Requirement"]));
+    const part = parts.get(linkedId(requirement.Part) ?? -1);
+    const parsed = requirementIdentity(requirement, part,
+      assemblies.get(linkedId(requirement.Assembly) ?? -1), linkedValue(row["Production Requirement"]));
     const machinist = String(row.Machinist ?? "").trim();
     const requirementStatus = selectValue(requirement.Status, "Needs Triage");
     const finishingCompleteBeforePostQcWork = requirementsWithPostQcWork.has(requirementId)
@@ -285,7 +311,7 @@ export function projectFinishing(
       machinist,
       active: Boolean(row.Active),
       lastSyncedAt: row["Last Synced At"] ? String(row["Last Synced At"]) : null,
-      drawingUrl: linkedValue(requirement.Drawing) || null,
+      drawingUrl: part ? textValue(part["Onshape Drawing"]) || null : linkedValue(requirement.Drawing) || null,
       hasDrawingPdf: Boolean(drawingPdf),
       drawingPdfName: drawingPdf?.originalName ?? null,
       hasStepFile: Boolean(stepFile),

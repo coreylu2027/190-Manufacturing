@@ -2,7 +2,7 @@ import { ENTITIES, denormalizeRow, type ManufacturingAttachment, type Normalized
 import { projectOperations, projectFinishing } from "./projections.ts";
 export interface AdapterConfig { url: string; serviceKey: string; fetch?: typeof fetch }
 export type ManufacturingRows = Record<string, RawRow[]>;
-const SNAPSHOT_ENTITY_NAMES = new Set(["parts", "requirements", "operations", "finishing"]);
+const SNAPSHOT_ENTITY_NAMES = new Set(["assemblies", "parts", "requirements", "operations", "finishing"]);
 const READ_CONCURRENCY = 2;
 export function supabaseApiHeaders(key: string): Record<string, string> {
   const headers: Record<string, string> = { apikey: key };
@@ -104,8 +104,8 @@ export function createSupabaseManufacturingAdapter(config: AdapterConfig) {
     const snapshotEntities = ENTITIES.filter(entity => SNAPSHOT_ENTITY_NAMES.has(entity.name));
     const [rows, attachments] = await Promise.all([readRows(snapshotEntities), readAttachments()]);
     return {
-      operations: projectOperations(rows.operations, rows.requirements, rows.parts, attachments),
-      jobs: projectFinishing(rows.finishing, rows.requirements, attachments, rows.operations),
+      operations: projectOperations(rows.operations, rows.requirements, rows.parts, attachments, rows.assemblies),
+      jobs: projectFinishing(rows.finishing, rows.requirements, attachments, rows.operations, rows.parts, rows.assemblies),
     };
   }
   return {
