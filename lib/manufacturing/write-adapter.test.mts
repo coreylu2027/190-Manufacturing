@@ -1,10 +1,61 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { ENTITIES, normalizeRow, type NormalizedRow, type RawRow } from "./model.ts";
+import { ENTITIES, normalizeRow, runtimeRow, type NormalizedRow, type RawRow } from "./model.ts";
 import { createSupabaseWriteAdapter, ManufacturingWriteError, type WriteState } from "./write-adapter.ts";
+import { formatSlackManufacturingEvent } from "../slack-notifications-core.ts";
 
 const ACTOR = { id: "00000000-0000-4000-8000-000000000190", name: "Alex A." };
+
+for (const metadata of ["absent", "stale"] as const) {
+  test(`native CAM claims resolve current identities with ${metadata} migration metadata`, async () => {
+    const state = fixture({ operation: { "Work Type": { value: "CAM" } } });
+    for (const records of Object.values(state.rows)) for (const row of records) {
+      delete row.baserow_id;
+      delete row.source_row;
+      if (metadata === "stale") row.source_row = { id: row.id,
+        "Production Requirement": [{ id: 20, value: "OLD — Obsolete [OLD-ASSEMBLY]" }],
+        Status: { value: "Complete" }, "Claimed Quantity": 999 };
+    }
+    state.rows.assemblies[0].assembly_number = "a26c-0002";
+    const { adapter, commits } = harness(state);
+    const result = await adapter.applyQuantityAction(10, "claim", 1, ACTOR);
+    const payload = formatSlackManufacturingEvent({ ...result.notificationContext,
+      type: "operation_claimed", actorName: ACTOR.name, quantity: 1 });
+    assert.match(payload.text, /P-1 — Fixture/);
+    assert.match(JSON.stringify(payload.blocks), /Assembly a26c-0002/);
+    assert.doesNotMatch(JSON.stringify(payload), /OLD|Unknown|Unassigned/);
+    assert.equal(commits.length, 1);
+  });
+}
+
+test("write snapshots without identity tables load current part and assembly columns", async () => {
+  const state = fixture();
+  const parts = state.rows.parts;
+  const assemblies = state.rows.assemblies;
+  delete state.rows.parts;
+  delete state.rows.assemblies;
+  const entities: string[] = [];
+  const adapter = createSupabaseWriteAdapter({ url: "https://example.test", serviceKey: "test", fetch: async (input, init) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("manufacturing_write_state")) return Response.json(state);
+    const entity = url.searchParams.get("p_entity");
+    if (entity) {
+      entities.push(entity);
+      const rows = entity === "parts" ? parts : assemblies;
+      return Response.json({ rows, total: rows.length });
+    }
+    if (url.pathname.endsWith("manufacturing_commit_with_qc_quantities")) {
+      return Response.json(JSON.parse(String(init?.body)).p_result);
+    }
+    throw new Error("Unexpected request");
+  } });
+  const result = await adapter.applyQuantityAction(10, "claim", 1, ACTOR);
+  assert.equal(result.notificationContext.partNumber, "P-1");
+  assert.equal(result.notificationContext.partName, "Fixture");
+  assert.equal(result.notificationContext.assemblyNumber, "A-1");
+  assert.deepEqual(entities.sort(), ["assemblies", "parts"]);
+});
 
 test("Force QC preserves completed credit, clears claims, includes CAM, and commits one passed review", async () => {
   const state = fixture({ operation: {
@@ -141,7 +192,10 @@ test("Force QC normalizes legacy rework rows and propagates database permission 
 function normalized(entityName: string, raw: RawRow): NormalizedRow {
   const entity = ENTITIES.find((candidate) => candidate.name === entityName);
   assert.ok(entity);
-  return normalizeRow(entity, raw) as NormalizedRow;
+  const row = normalizeRow(entity, raw) as NormalizedRow;
+  delete row.source_row;
+  delete row.baserow_id;
+  return row;
 }
 
 function fixture(options: {
@@ -154,6 +208,7 @@ function fixture(options: {
   const requirement = normalized("requirements", {
     id: 20,
     "Production Key": "fixture",
+    Part: [{ id: 40 }], Assembly: [{ id: 50 }],
     "Required Quantity": 2,
     Finishing: { value: "None" },
     "Active in BOM": true,
@@ -189,7 +244,7 @@ function fixture(options: {
   });
   return {
     token: "fixture-token",
-    rows: { operations: [operation], requirements: [requirement], finishing: [finishing] },
+    rows: { parts: [{ id: 40, part_number: "P-1", name: "Fixture" }], assemblies: [{ id: 50, assembly_number: "A-1" }], operations: [operation], requirements: [requirement], finishing: [finishing] },
     reviews: options.reviews ?? [],
     retractions: options.retractions ?? [],
   };
@@ -444,7 +499,7 @@ test("part locations are editable before QC while On Robot requires passed QC an
   assert.equal(withoutQc.commits.length, 0);
 
   const awaitingFinishing = harness(fixture({
-    operation: passedState.rows.operations[0].source_row,
+    operation: runtimeRow(ENTITIES.find(entity => entity.name === "operations")!, passedState.rows.operations[0]),
     requirement: { "QC Outcome": { value: "Passed" }, Finishing: { value: "Black" }, Status: { value: "Ready for Finishing" } },
     reviews: passedState.reviews,
   }));
@@ -531,7 +586,7 @@ test("QC releases threaded inserts only after any required finishing completes",
   assert.equal(uncoatedChanges.find(({ entity }) => entity === "requirements")?.patch.status, "Ready for Manufacturing");
 
   const coatedState = withThreadedInsert(fixture({
-    operation: readyForQc.rows.operations[0].source_row,
+    operation: runtimeRow(ENTITIES.find(entity => entity.name === "operations")!, readyForQc.rows.operations[0]),
     requirement: {
       Status: { value: "Ready for Finishing" }, Finishing: { value: "Black" },
       "QC Outcome": { value: "Passed" },

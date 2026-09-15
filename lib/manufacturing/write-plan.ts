@@ -1,7 +1,8 @@
 // Manufacturing workflow planning is pure; all I/O is committed by the Supabase transaction adapter.
 import { deduplicateOperations, planRequirementWorkflow, requiresPassedQc, targetMachineHasStarted, validateCamAction } from '../manufacturing-workflow.ts';
 import type { FabricationAction, ManufacturingOperation, OperationAllocation, OperationPatch, OperationQuantityAction, OperationStatus, OperationWorkType, QualityResult } from '../types.ts';
-import { ENTITIES, denormalizeRow, normalizeRow, type NormalizedRow, type RawRow } from './model.ts';
+import { ENTITIES, runtimeRow, normalizeRow, type NormalizedRow, type RawRow } from './model.ts';
+import { notificationPartContext } from "./identity.ts";
 type SourceRow = RawRow;
 function canonicalRows(rows: RawRow[]) {
   return deduplicateOperations(rows.filter(row => row["Active in Routing"]).map(row => ({
@@ -46,26 +47,12 @@ function linkedId(value: unknown): number | null {
     ? Number((value[0] as { id: unknown }).id)
     : null;
 }
-function linkedValue(value: unknown): string {
-  return Array.isArray(value) && value[0] && typeof value[0] === "object" && "value" in value[0]
-    ? String((value[0] as { value: unknown }).value ?? "")
-    : "";
-}
 function textValue(value: unknown): string {
   if (typeof value === "string") return value.trim();
   if (Array.isArray(value) && value[0] && typeof value[0] === "object" && "value" in value[0]) {
     return String((value[0] as { value: unknown }).value ?? "").trim();
   }
   return "";
-}
-function parseRequirement(display: string) {
-  const match = display.match(/^(.+?)\s+—\s+(.+?)\s+\[([^\]]+)]$/);
-  const fallback = display.trim() || "Unknown part";
-  return {
-    partNumber: match?.[1] ?? fallback.split(" ")[0] ?? "Unknown",
-    partName: match?.[2] ?? fallback,
-    assemblyNumber: match?.[3] ?? "Unassigned",
-  };
 }
 function operationStatus(value: unknown): OperationStatus {
   const status = selectValue(value, "Planned");
@@ -160,25 +147,25 @@ function fabricationStatus(requirementStatus: string, machinist: string): Manufa
 }
 
 export function createWritePlan(input: Record<string, NormalizedRow[]>) {
- const rows = Object.fromEntries(ENTITIES.map(entity=>[String(entity.tableId),(input[entity.name]??[]).map(row=>denormalizeRow(entity,structuredClone(row)))]));
- const OPERATIONS_TABLE_ID='1169282', REQUIREMENTS_TABLE_ID='1119642', FINISHING_TABLE_ID='1170619';
- async function getRow(tableId:string,id:number):Promise<RawRow> { const row=rows[tableId]?.find(r=>r.id===id); if(!row) throw new Error('Manufacturing row not found'); return structuredClone(row); }
- async function listAllRows(tableId:string):Promise<RawRow[]> { return structuredClone(rows[tableId]??[]); }
- async function patchRow(tableId:string,id:number,patch:Record<string,unknown>) {
- const row=rows[tableId]?.find(r=>r.id===id); if(!row) throw new Error('Manufacturing row not found');
- const entity=ENTITIES.find(e=>String(e.tableId)===tableId)!;
+ const rows = Object.fromEntries(ENTITIES.map(entity=>[entity.name,(input[entity.name]??[]).map(row=>runtimeRow(entity,structuredClone(row)))]));
+ const OPERATIONS='operations', REQUIREMENTS='requirements', FINISHING='finishing';
+ async function getRow(entityName:string,id:number):Promise<RawRow> { const row=rows[entityName]?.find(r=>r.id===id); if(!row) throw new Error('Manufacturing row not found'); return structuredClone(row); }
+ async function listAllRows(entityName:string):Promise<RawRow[]> { return structuredClone(rows[entityName]??[]); }
+ async function patchRow(entityName:string,id:number,patch:Record<string,unknown>) {
+ const row=rows[entityName]?.find(r=>r.id===id); if(!row) throw new Error('Manufacturing row not found');
+ const entity=ENTITIES.find(e=>e.name===entityName)!;
  for(const [key,value] of Object.entries(patch)) { const column=entity.columns.find(c=>c[1]===key&&c[3]==='shop'); if(!column)throw new Error('Engineering field is not writable'); row[key]=column[2]==='select' && value!==null ? {value}:value; }
  return structuredClone(row);
  }
 async function applyFabricationAction(id: number, action: FabricationAction, actor: { name: string }) {
   
 
-  const finishing = await getRow(FINISHING_TABLE_ID, id);
+  const finishing = await getRow(FINISHING, id);
   if (!Boolean(finishing.Active)) throw new Error("This finishing job is no longer active");
   const requirementId = linkedId(finishing["Production Requirement"]);
   if (!requirementId) throw new Error("Finishing job is not linked to a production requirement");
-  const requirement = await getRow(REQUIREMENTS_TABLE_ID, requirementId);
-  const operationRows = await listAllRows(OPERATIONS_TABLE_ID);
+  const requirement = await getRow(REQUIREMENTS, requirementId);
+  const operationRows = await listAllRows(OPERATIONS);
   const postQcRows = canonicalRows(operationRows).filter((row) =>
     linkedId(row["Production Requirement"]) === requirementId
     && Boolean(row["Active in Routing"])
@@ -193,15 +180,15 @@ async function applyFabricationAction(id: number, action: FabricationAction, act
   if (action === "claim") {
     if (requirementStatus !== "Ready for Finishing" || assignedMachinist) throw new Error("This finishing job is not available to claim");
     nextMachinist = actor.name;
-    await patchRow(FINISHING_TABLE_ID, id, { Machinist: nextMachinist });
+    await patchRow(FINISHING, id, { Machinist: nextMachinist });
   } else if (action === "release") {
     if (requirementStatus !== "Ready for Finishing" || !isAssignedActor) throw new Error("Only the assigned machinist can release this job");
     nextMachinist = "";
-    await patchRow(FINISHING_TABLE_ID, id, { Machinist: "" });
+    await patchRow(FINISHING, id, { Machinist: "" });
   } else if (action === "complete") {
     if (requirementStatus !== "Ready for Finishing" || !isAssignedActor) throw new Error("Claim this finishing job before completing it");
     nextRequirementStatus = postQcRows.length > 0 ? "Ready for Manufacturing" : "Complete";
-    await patchRow(REQUIREMENTS_TABLE_ID, requirementId, { Status: nextRequirementStatus });
+    await patchRow(REQUIREMENTS, requirementId, { Status: nextRequirementStatus });
     if (postQcRows.length > 0) {
       nextRequirementStatus = (await reconcileRequirementWorkflow(requirementId, { finishingComplete: true })).requirementStatus;
     }
@@ -220,7 +207,7 @@ async function applyFabricationAction(id: number, action: FabricationAction, act
         : "Only the assigned machinist can undo this completion");
     }
     nextRequirementStatus = "Ready for Finishing";
-    await patchRow(REQUIREMENTS_TABLE_ID, requirementId, { Status: nextRequirementStatus });
+    await patchRow(REQUIREMENTS, requirementId, { Status: nextRequirementStatus });
     if (postQcRows.length > 0) {
       await reconcileRequirementWorkflow(requirementId, { finishingComplete: false });
     }
@@ -233,7 +220,7 @@ async function applyFabricationAction(id: number, action: FabricationAction, act
     machinist: nextMachinist,
     notificationContext: {
       requirementId,
-      ...parseRequirement(linkedValue(finishing["Production Requirement"])),
+      ...notificationPartContext(input, requirementId),
       color: selectValue(finishing["Powder Coat Color"], "Unspecified"),
       quantity: Math.max(1, Math.floor(Number(finishing["Required Quantity"] ?? requirement["Required Quantity"] ?? 1))),
       previousRequirementStatus: requirementStatus,
@@ -243,8 +230,8 @@ async function applyFabricationAction(id: number, action: FabricationAction, act
 }
 async function reconcileRequirementWorkflow(requirementId: number, options: { finishingComplete?: boolean } = {}) {
   const [requirement, operationRows] = await Promise.all([
-    getRow(REQUIREMENTS_TABLE_ID, requirementId),
-    listAllRows(OPERATIONS_TABLE_ID),
+    getRow(REQUIREMENTS, requirementId),
+    listAllRows(OPERATIONS),
   ]);
   const relatedRows = operationRows.filter((row) => linkedId(row["Production Requirement"]) === requirementId);
   const finishing = selectValue(requirement.Finishing);
@@ -268,16 +255,16 @@ async function reconcileRequirementWorkflow(requirementId: number, options: { fi
     completedAt: row["Completed At"] ? String(row["Completed At"]) : null,
   })), requirementStatus, { qcPassed, finishingRequired, finishingComplete });
 
-  await Promise.all(plan.operationPatches.map((patch) => patchRow(OPERATIONS_TABLE_ID, patch.id, { Status: patch.status })));
+  await Promise.all(plan.operationPatches.map((patch) => patchRow(OPERATIONS, patch.id, { Status: patch.status })));
   if (requirementStatus !== plan.requirementStatus) {
-    await patchRow(REQUIREMENTS_TABLE_ID, requirementId, { Status: plan.requirementStatus });
+    await patchRow(REQUIREMENTS, requirementId, { Status: plan.requirementStatus });
   }
   return plan;
 }
 async function patchOperation(id: number, patch: OperationPatch, machinist: string) {
   
 
-  const operation = await getRow(OPERATIONS_TABLE_ID, id);
+  const operation = await getRow(OPERATIONS, id);
   const workType = operationWorkType(operation);
   const body: Record<string, unknown> = {};
   if (patch.status) body.Status = patch.status;
@@ -285,13 +272,13 @@ async function patchOperation(id: number, patch: OperationPatch, machinist: stri
   if ((patch.status === "In Progress" || patch.status === "Complete") && patch.machinist === undefined) body.Machinist = machinist;
   if (patch.status === "In Progress") body["Started At"] = new Date().toISOString();
   if (patch.status === "Complete") body["Completed At"] = new Date().toISOString();
-  await patchRow(OPERATIONS_TABLE_ID, id, body);
+  await patchRow(OPERATIONS, id, body);
 
   const requirementId = linkedId(operation["Production Requirement"]);
   let previousRequirementStatus = "Needs Triage";
   let requirementStatus = "Needs Triage";
   if (requirementId) {
-    const requirement = await getRow(REQUIREMENTS_TABLE_ID, requirementId);
+    const requirement = await getRow(REQUIREMENTS, requirementId);
     previousRequirementStatus = selectValue(requirement.Status, "Needs Triage");
     const requirementPatch: Record<string, unknown> = {};
     if (workType === "Manufacturing" && patch.machinist !== undefined) requirementPatch.Machinist = patch.machinist;
@@ -299,19 +286,19 @@ async function patchOperation(id: number, patch: OperationPatch, machinist: stri
       requirementPatch.Machinist = machinist;
     }
     if (Object.keys(requirementPatch).length > 0) {
-      await patchRow(REQUIREMENTS_TABLE_ID, requirementId, requirementPatch);
+      await patchRow(REQUIREMENTS, requirementId, requirementPatch);
     }
     const plan = await reconcileRequirementWorkflow(requirementId);
     requirementStatus = plan.requirementStatus;
     if (plan.requirementStatus === "Ready for QC") {
-      await patchRow(REQUIREMENTS_TABLE_ID, requirementId, { "QC Outcome": "Not Inspected" });
+      await patchRow(REQUIREMENTS, requirementId, { "QC Outcome": "Not Inspected" });
     }
   }
   return {
     ...body,
     notificationContext: {
       requirementId: requirementId ?? 0,
-      ...parseRequirement(linkedValue(operation["Production Requirement"])),
+      ...notificationPartContext(input, requirementId),
       operationNumber: selectValue(operation["Operation Number"], "OP1"),
       workType,
       machine: selectValue(operation.Machine, "Unassigned"),
@@ -336,7 +323,7 @@ async function updateCamHandoff(
 
   
 
-  const operation = await getRow(OPERATIONS_TABLE_ID, id);
+  const operation = await getRow(OPERATIONS, id);
   if (operationWorkType(operation) !== "CAM") throw new Error("Only CAM handoffs can be edited");
   const status = operationStatus(operation.Status);
   if (status !== "Complete") throw new Error("Only completed CAM handoffs can be edited");
@@ -346,7 +333,7 @@ async function updateCamHandoff(
   const allocations = quantitiesForRow(operation, 1, status).allocations.map((allocation) => allocation.completed > 0
     ? { ...allocation, name: completedBy }
     : allocation);
-  await patchRow(OPERATIONS_TABLE_ID, id, {
+  await patchRow(OPERATIONS, id, {
     Machinist: completedBy,
     "Quantity Ledger": JSON.stringify(allocations),
     "CAM Program Path": programPath,
@@ -361,7 +348,7 @@ async function updateCamHandoff(
     camNotes: notes,
     notificationContext: {
       requirementId,
-      ...parseRequirement(linkedValue(operation["Production Requirement"])),
+      ...notificationPartContext(input, requirementId),
       operationNumber: selectValue(operation["Operation Number"], "OP1"),
       machine: selectValue(operation.Machine, "Unassigned"),
       previousCompletedBy: String(operation.Machinist ?? "").trim(),
@@ -380,10 +367,10 @@ async function applyQuantityAction(
   if (!Number.isInteger(quantity) || quantity < 1) throw new Error("Quantity must be a positive whole number");
   
 
-  const operation = await getRow(OPERATIONS_TABLE_ID, id);
+  const operation = await getRow(OPERATIONS, id);
   const requirementId = linkedId(operation["Production Requirement"]);
   if (!requirementId) throw new Error("Operation is not linked to a production requirement");
-  const requirement = await getRow(REQUIREMENTS_TABLE_ID, requirementId);
+  const requirement = await getRow(REQUIREMENTS, requirementId);
   const requiredQuantity = Math.max(1, Math.floor(Number(requirement["Required Quantity"] ?? 1)));
   const workType = operationWorkType(operation);
   const postQcOperation = isPostQcOperationRow(operation);
@@ -402,7 +389,7 @@ async function applyQuantityAction(
   const allocations = current.allocations.map((allocation) => ({ ...allocation }));
 
   if (workType === "CAM" && action === "undo_complete") {
-    const operationRows = await listAllRows(OPERATIONS_TABLE_ID);
+    const operationRows = await listAllRows(OPERATIONS);
     const target = operationRows.find((candidate) =>
       linkedId(candidate["Production Requirement"]) === requirementId
       && operationWorkType(candidate) === "Manufacturing"
@@ -477,11 +464,11 @@ async function applyQuantityAction(
     }
     operationPatch["CAM Notes"] = camHandoff?.notes?.trim() ?? "";
   }
-  await patchRow(OPERATIONS_TABLE_ID, id, operationPatch);
+  await patchRow(OPERATIONS, id, operationPatch);
   if (workType === "Manufacturing") {
     const requirementPatch: Record<string, unknown> = { Machinist: summary };
     if (action === "undo_complete" && !postQcOperation) requirementPatch["QC Outcome"] = "Not Inspected";
-    await patchRow(REQUIREMENTS_TABLE_ID, requirementId, requirementPatch);
+    await patchRow(REQUIREMENTS, requirementId, requirementPatch);
   }
   const workflow = await reconcileRequirementWorkflow(requirementId);
 
@@ -507,7 +494,7 @@ async function applyQuantityAction(
       : textValue(operation["CAM Notes"]),
     notificationContext: {
       requirementId,
-      ...parseRequirement(linkedValue(operation["Production Requirement"])),
+      ...notificationPartContext(input, requirementId),
       operationNumber: selectValue(operation["Operation Number"], "OP1"),
       workType,
       machine: selectValue(operation.Machine, "Unassigned"),
@@ -522,10 +509,10 @@ async function stealOperationClaim(
 ) {
   
 
-  const operation = await getRow(OPERATIONS_TABLE_ID, id);
+  const operation = await getRow(OPERATIONS, id);
   const requirementId = linkedId(operation["Production Requirement"]);
   if (!requirementId) throw new Error("Operation is not linked to a production requirement");
-  const requirement = await getRow(REQUIREMENTS_TABLE_ID, requirementId);
+  const requirement = await getRow(REQUIREMENTS, requirementId);
   if (isPostQcOperationRow(operation)) {
     const finishing = selectValue(requirement.Finishing);
     if (selectValue(requirement["QC Outcome"]) !== "Passed") {
@@ -581,13 +568,13 @@ async function stealOperationClaim(
     "Started At": operation["Started At"] ?? timestamp,
     "Completed At": null,
   };
-  await patchRow(OPERATIONS_TABLE_ID, id, operationPatch);
+  await patchRow(OPERATIONS, id, operationPatch);
   if (workType === "Manufacturing") {
-    await patchRow(REQUIREMENTS_TABLE_ID, requirementId, { Machinist: summary });
+    await patchRow(REQUIREMENTS, requirementId, { Machinist: summary });
   }
   await reconcileRequirementWorkflow(requirementId);
 
-  const parsed = parseRequirement(linkedValue(operation["Production Requirement"]));
+  const parsed = notificationPartContext(input, requirementId);
   const operationNumber = selectValue(operation["Operation Number"], "OP1") as ManufacturingOperation["operationNumber"];
   return {
     updated: {
@@ -617,8 +604,8 @@ async function renameMachinistAllocations(userId: string, oldName: string, newNa
   if (oldName === newName) return;
 
   const [operationRows, requirementRows] = await Promise.all([
-    listAllRows(OPERATIONS_TABLE_ID),
-    listAllRows(REQUIREMENTS_TABLE_ID),
+    listAllRows(OPERATIONS),
+    listAllRows(REQUIREMENTS),
   ]);
   const requirements = new Map(requirementRows.map((row) => [row.id, row]));
 
@@ -643,17 +630,17 @@ async function renameMachinistAllocations(userId: string, oldName: string, newNa
     if (!changed) return;
 
     const summary = machinistSummary(allocations, taskQuantity);
-    await patchRow(OPERATIONS_TABLE_ID, operation.id, {
+    await patchRow(OPERATIONS, operation.id, {
       Machinist: summary,
       "Quantity Ledger": JSON.stringify(allocations),
     });
-    if (requirementId) await patchRow(REQUIREMENTS_TABLE_ID, requirementId, { Machinist: summary });
+    if (requirementId) await patchRow(REQUIREMENTS, requirementId, { Machinist: summary });
   }));
 
-  const finishingRows = await listAllRows(FINISHING_TABLE_ID);
+  const finishingRows = await listAllRows(FINISHING);
   await Promise.all(finishingRows.map(async (job) => {
     if (String(job.Machinist ?? "").trim().toLocaleLowerCase() !== oldName.toLocaleLowerCase()) return;
-    await patchRow(FINISHING_TABLE_ID, job.id, { Machinist: newName });
+    await patchRow(FINISHING, job.id, { Machinist: newName });
   }));
 }
 async function patchRequirementQualityOutcome(
@@ -667,8 +654,8 @@ async function patchRequirementQualityOutcome(
   
 
   const [requirement, operationRows] = await Promise.all([
-    getRow(REQUIREMENTS_TABLE_ID, requirementId),
-    listAllRows(OPERATIONS_TABLE_ID),
+    getRow(REQUIREMENTS, requirementId),
+    listAllRows(OPERATIONS),
   ]);
   const manufacturingRows = canonicalRows(operationRows).filter((row) =>
     linkedId(row["Production Requirement"]) === requirementId
@@ -695,7 +682,7 @@ async function patchRequirementQualityOutcome(
       }
       const allocations = subtractCompletedQuantity(current.allocations, quantity);
       const completedQuantity = allocations.reduce((sum, allocation) => sum + allocation.completed, 0);
-      await patchRow(OPERATIONS_TABLE_ID, row.id, {
+      await patchRow(OPERATIONS, row.id, {
         Status: operationIndex(row["Operation Number"]) === firstStage ? "Ready" : "Planned",
         Machinist: machinistSummary(allocations, requiredQuantity),
         "Claimed Quantity": 0,
@@ -716,7 +703,7 @@ async function patchRequirementQualityOutcome(
         ? "Ready for Manufacturing"
         : "Complete";
 
-  await patchRow(REQUIREMENTS_TABLE_ID, requirementId, {
+  await patchRow(REQUIREMENTS, requirementId, {
     "QC Outcome": result === "passed" ? "Passed" : "Failed",
     "QC Notes": notes,
     "QC Reviewed By": actorName,
@@ -726,7 +713,7 @@ async function patchRequirementQualityOutcome(
   if (result === "passed" && hasPostQcWork) {
     await reconcileRequirementWorkflow(requirementId, { finishingComplete: !finishing || finishing === "None" });
   }
-  return getRow(REQUIREMENTS_TABLE_ID, requirementId);
+  return getRow(REQUIREMENTS, requirementId);
 }
 async function patchRequirementQualityNote(
   requirementId: number,
@@ -734,18 +721,18 @@ async function patchRequirementQualityNote(
   notes: string,
   reviewedAt: string,
 ) {
-  await getRow(REQUIREMENTS_TABLE_ID, requirementId);
-  await patchRow(REQUIREMENTS_TABLE_ID, requirementId, {
+  await getRow(REQUIREMENTS, requirementId);
+  await patchRow(REQUIREMENTS, requirementId, {
     "QC Notes": notes,
     "QC Reviewed By": actorName,
     "QC Reviewed At": reviewedAt,
   });
-  return getRow(REQUIREMENTS_TABLE_ID, requirementId);
+  return getRow(REQUIREMENTS, requirementId);
 }
 async function clearPassedRequirementQualityOutcome(requirementId: number) {
   
 
-  const operationRows = await listAllRows(OPERATIONS_TABLE_ID);
+  const operationRows = await listAllRows(OPERATIONS);
   const manufacturingRows = canonicalRows(operationRows).filter((row) =>
     linkedId(row["Production Requirement"]) === requirementId
     && operationWorkType(row) === "Manufacturing"
@@ -760,12 +747,12 @@ async function clearPassedRequirementQualityOutcome(requirementId: number) {
     || Number(row["Claimed Quantity"] ?? 0) > 0 || Number(row["Completed Quantity"] ?? 0) > 0)) {
     throw new Error("Undo threaded-insert work before undoing the QC pass");
   }
-  const finishing = selectValue((await getRow(REQUIREMENTS_TABLE_ID, requirementId)).Finishing);
-  const currentStatus = selectValue((await getRow(REQUIREMENTS_TABLE_ID, requirementId)).Status);
+  const finishing = selectValue((await getRow(REQUIREMENTS, requirementId)).Finishing);
+  const currentStatus = selectValue((await getRow(REQUIREMENTS, requirementId)).Status);
   if (finishing && finishing !== "None" && currentStatus !== "Ready for Finishing") {
     throw new Error("QC cannot be undone after finishing is complete");
   }
-  await patchRow(REQUIREMENTS_TABLE_ID, requirementId, {
+  await patchRow(REQUIREMENTS, requirementId, {
     "QC Outcome": "Not Inspected",
     "QC Notes": "",
     "QC Reviewed By": "",
@@ -775,9 +762,9 @@ async function clearPassedRequirementQualityOutcome(requirementId: number) {
   await reconcileRequirementWorkflow(requirementId, { finishingComplete: false });
 }
 async function previewForceQuality(requirementId: number) {
-  const requirement = await getRow(REQUIREMENTS_TABLE_ID, requirementId);
+  const requirement = await getRow(REQUIREMENTS, requirementId);
   if (!requirement["Active in BOM"]) throw new Error("This production requirement is inactive");
-  const active = canonicalRows(await listAllRows(OPERATIONS_TABLE_ID)).filter(row => linkedId(row["Production Requirement"]) === requirementId);
+  const active = canonicalRows(await listAllRows(OPERATIONS)).filter(row => linkedId(row["Production Requirement"]) === requirementId);
   const manufacturing = active.filter(row => operationWorkType(row) === "Manufacturing" && !isPostQcOperationRow(row));
   if (!manufacturing.length) throw new Error("Production requirement has no pre-QC manufacturing operations");
   const quantity = Math.max(1, Math.floor(Number(requirement["Required Quantity"] ?? 1)));
@@ -800,7 +787,7 @@ async function previewForceQuality(requirementId: number) {
 async function forceCompletePrerequisites(requirementId: number, actor: { id: string; name: string }, timestamp: string) {
   const preview = await previewForceQuality(requirementId);
   for (const item of preview.operations) {
-    const row = await getRow(OPERATIONS_TABLE_ID, item.id);
+    const row = await getRow(OPERATIONS, item.id);
     const total = taskQuantityForRow(row, preview.quantity);
     const allocations = quantitiesForRow(row, total, item.previousStatus).allocations.map(allocation => ({ ...allocation, claimed: 0 }));
     let credit = allocations.find(allocation => allocation.userId === actor.id);
@@ -808,7 +795,7 @@ async function forceCompletePrerequisites(requirementId: number, actor: { id: st
     credit.name = actor.name;
     credit.completed += item.quantity;
     const ledger = allocations.filter(allocation => allocation.completed > 0);
-    await patchRow(OPERATIONS_TABLE_ID, item.id, {
+    await patchRow(OPERATIONS, item.id, {
       Status: "Complete", "Completed At": timestamp, "Claimed Quantity": 0, "Completed Quantity": total,
       "Quantity Ledger": JSON.stringify(ledger), Machinist: machinistSummary(ledger, total),
     });
@@ -818,8 +805,8 @@ async function forceCompletePrerequisites(requirementId: number, actor: { id: st
 return { previewForceQuality, forceCompletePrerequisites, applyFabricationAction,patchOperation,updateCamHandoff,applyQuantityAction,stealOperationClaim,renameMachinistAllocations,patchRequirementQualityOutcome,patchRequirementQualityNote,clearPassedRequirementQualityOutcome,
  changes() {
  return ENTITIES.flatMap(entity=>(input[entity.name]??[]).flatMap(before=>{
- const after=normalizeRow(entity,rows[String(entity.tableId)].find(r=>r.id===before.id)!);
- const baseline=normalizeRow(entity,denormalizeRow(entity,before)) as Record<string,unknown>;
+ const after=normalizeRow(entity,rows[entity.name].find(r=>r.id===before.id)!);
+ const baseline=normalizeRow(entity,runtimeRow(entity,before)) as Record<string,unknown>;
  const patch=Object.fromEntries(entity.columns.filter(([column,,,owner])=>owner==='shop'&&JSON.stringify(baseline[column]??null)!==JSON.stringify((after as Record<string,unknown>)[column]??null)).map(([column])=>[column,(after as Record<string,unknown>)[column]??null]));
  if(entity.name==='operations' && 'quantity_ledger' in patch) {
    const ledger=JSON.parse(String(patch.quantity_ledger)) as OperationAllocation[];

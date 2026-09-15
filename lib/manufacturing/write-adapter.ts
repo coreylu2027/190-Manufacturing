@@ -1,9 +1,11 @@
 import { createWritePlan } from "./write-plan.ts";
 import { deduplicateOperations, requiresPassedQc } from "../manufacturing-workflow.ts";
-import { supabaseApiHeaders, type AdapterConfig } from "./supabase-adapter.ts";
+import { createSupabaseManufacturingAdapter, supabaseApiHeaders, type AdapterConfig } from "./supabase-adapter.ts";
 import type { NormalizedRow } from "./model.ts";
 import type { FabricationAction, OperationPatch, OperationQuantityAction, QualityResult } from "../types.ts";
 import { ROBOT_LOCATION, canUseOnRobotLocation, isStorageLocation, type StorageLocation } from "../storage-locations.ts";
+
+import { notificationPartContext as resolvePartContext } from "./identity.ts";
 
 export class ManufacturingWriteError extends Error {
   status: number;
@@ -68,6 +70,12 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
   ) {
     if (!UUID_PATTERN.test(actor.id) || !actor.name.trim()) throw new ManufacturingWriteError("An authenticated manufacturing actor is required", 401);
     const state = await rpc<WriteState>("manufacturing_write_state");
+    const reader = createSupabaseManufacturingAdapter(config);
+    const [parts, assemblies] = await Promise.all([
+      state.rows.parts ?? reader.readEntity("parts"),
+      state.rows.assemblies ?? reader.readEntity("assemblies"),
+    ]);
+    state.rows = { ...state.rows, parts, assemblies };
     const plan = createWritePlan(state.rows);
     const result = await build(plan, state);
     const qualityPayload = typeof qc === "function" ? qc(state, result) : qc;
@@ -101,21 +109,8 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     return row;
   }
   function notificationPartContext(state: WriteState, requirementId: number) {
-    const requirementRow = requirement(state, requirementId);
-    const linkedRow = state.rows.operations.find((candidate) => Number(candidate.requirement_id) === requirementId)
-      ?? state.rows.finishing.find((candidate) => Number(candidate.requirement_id) === requirementId);
-    const sourceLink = linkedRow?.source_row?.["Production Requirement"];
-    const display = Array.isArray(sourceLink) && sourceLink[0] && typeof sourceLink[0] === "object" && "value" in sourceLink[0]
-      ? String((sourceLink[0] as { value: unknown }).value ?? "")
-      : "";
-    const parsed = display.match(/^(.+?)\s+—\s+(.+?)\s+\[([^\]]+)]$/);
-    const fallback = display.trim() || String(requirementRow.production_key ?? `Requirement ${requirementId}`);
-    return {
-      requirementId,
-      partNumber: parsed?.[1] ?? fallback.split(" ")[0] ?? "Unknown",
-      partName: parsed?.[2] ?? fallback,
-      assemblyNumber: parsed?.[3] ?? "Unassigned",
-    };
+    requirement(state, requirementId);
+    return { ...resolvePartContext(state.rows, requirementId), requirementId };
   }
   function assertEffectivePassedReview(
     state: WriteState,

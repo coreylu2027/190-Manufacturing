@@ -53,7 +53,16 @@ export const ENTITIES: readonly Entity[] = [
     ["machinist","Machinist","text","shop"]
   ]}
 ];
-export type NormalizedRow = Record<string, unknown> & { id: number; baserow_id: number | null; source_row: RawRow };
+export type NormalizedRow = Record<string, unknown> & { id: number; baserow_id?: number | null; source_row?: RawRow };
+// Runtime values come exclusively from current columns. Archive reconstruction
+// below is retained only for migration/parity tooling.
+export function runtimeRow(entity: Entity, record: NormalizedRow): RawRow {
+  return { id: record.id, ...Object.fromEntries(entity.columns.map(([column, field, kind]) => {
+    const value = record[column] ?? null;
+    return [field, kind === "link" ? value === null ? [] : [{ id: value }]
+      : kind === "select" ? value === null ? null : { value } : value];
+  })) };
+}
 export function fieldValue(value: unknown, kind: Kind): unknown {
   if (value === undefined || value === null || value === "") return null;
   if (kind === "select") return typeof value === "object" && "value" in value ? (value as {value: unknown}).value : value;
