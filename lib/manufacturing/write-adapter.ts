@@ -156,17 +156,17 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       try { return { ...await createWritePlan(state.rows).previewForceQuality(requirementId), token: state.token }; }
       catch (error) { throw new ManufacturingWriteError(error instanceof Error ? error.message : "Unable to preview Force QC", 409); }
     },
-    forceQualityReview(requirementId: number, notes: string, token: string, actor: Actor) {
+    forceQualityReview(requirementId: number, notes: string, token: string, actor: Actor, result: "passed" | "failed" = "passed") {
       const reviewedAt = new Date().toISOString();
       return transact(actor, "qc_review", async (plan, state) => {
         if (token !== state.token) throw new ManufacturingWriteError("Manufacturing changed. Refresh the preview and review the affected work before submitting again.", 409);
         assertForceEligible(state, requirementId);
         try { await plan.forceCompletePrerequisites(requirementId, actor, reviewedAt); }
         catch (error) { throw new ManufacturingWriteError(error instanceof Error ? error.message : "Unable to force complete work", 409); }
-        const updatedRequirement = await plan.patchRequirementQualityOutcome(requirementId, "passed", actor.name, notes, reviewedAt);
+        const updatedRequirement = await plan.patchRequirementQualityOutcome(requirementId, result, actor.name, notes, reviewedAt);
         return {
           requirementId,
-          result: "passed",
+          result,
           notes,
           notificationContext: {
             ...notificationPartContext(state, requirementId),
@@ -174,7 +174,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
             requirementStatus: sourceSelectValue(updatedRequirement.Status, "Needs Triage"),
           },
         };
-      }, { requirement_id: requirementId, result: "passed", notes, reviewed_at: reviewedAt, location: null });
+      }, { requirement_id: requirementId, result, notes, reviewed_at: reviewedAt, location: null });
     },
     async retractedReviewIds() {
       return (await rpc<WriteState>("manufacturing_write_state")).retractions.map(row => row.review_id);

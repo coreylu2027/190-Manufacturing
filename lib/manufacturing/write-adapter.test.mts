@@ -44,6 +44,31 @@ test("Force QC preserves completed credit, clears claims, includes CAM, and comm
   assert.equal(changes.find(change => change.entity === "requirements")!.patch.status, "Complete");
 });
 
+test("Force QC can fail an unfinished batch and return it to manufacturing atomically", async () => {
+  const { adapter, commits } = harness(withThreadedInsert(fixture({ operation: {
+    Status: { value: "In Progress" }, "Completed Quantity": 1, "Claimed Quantity": 1,
+    "Quantity Ledger": JSON.stringify([{ userId: "other", name: "Other", claimed: 1, completed: 1 }]),
+  } })));
+  const preview = await adapter.previewForceQuality(20);
+  const review = await adapter.forceQualityReview(20, "Rejected batch", preview.token, ACTOR, "failed");
+  assert.equal(review.result, "failed");
+  assert.equal(review.notificationContext.requirementStatus, "Ready for Manufacturing");
+  assert.equal(commits.length, 1);
+  assert.equal(commits[0].p_action, "qc_review");
+  const qc = commits[0].p_qc as Record<string, unknown>;
+  assert.equal(qc.result, "failed");
+  assert.equal(qc.notes, "Rejected batch");
+  const changes = commits[0].p_changes as Array<{ entity: string; id: number; patch: Record<string, unknown> }>;
+  const machining = changes.find(change => change.entity === "operations" && change.id === 10)!.patch;
+  assert.equal(machining.status, "Ready");
+  assert.equal(machining.claimed_quantity, 0);
+  assert.equal(machining.completed_quantity, 0);
+  assert.deepEqual(JSON.parse(String(machining.quantity_ledger)), []);
+  const requirement = changes.find(change => change.entity === "requirements")!.patch;
+  assert.equal(requirement.qc_outcome, "Failed");
+  assert.equal(changes.find(change => change.entity === "operations" && change.id === 11), undefined);
+});
+
 test("Force QC routes finishing and post-QC work without completing inserts", async () => {
   for (const finishing of ["None", "Black"]) {
     const state = withThreadedInsert(fixture({ requirement: { Finishing: { value: finishing } } }));

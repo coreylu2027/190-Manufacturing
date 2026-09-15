@@ -5,7 +5,7 @@ import { forceQualityReview, previewForceQuality } from "@/lib/manufacturing";
 import { ManufacturingWriteError } from "@/lib/manufacturing/write-adapter";
 import { scheduleSlackManufacturingEvent } from "@/lib/slack-notifications";
 
-const schema = z.object({ notes: z.string().trim().max(2000), token: z.string().min(1) }).strict();
+const schema = z.object({ notes: z.string().trim().max(2000), token: z.string().min(1), result: z.enum(["passed", "failed"]).default("passed") }).strict();
 type Context = { params: Promise<{ id: string }> };
 async function handle(request: Request, context: Context) {
   const actor = await getAdminActor();
@@ -17,18 +17,18 @@ async function handle(request: Request, context: Context) {
     if (request.method === "GET") return NextResponse.json(await previewForceQuality(id));
     const parsed = schema.safeParse(await request.json().catch(() => null));
     if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message }, { status: 400 });
-    const result = await forceQualityReview(id, parsed.data.notes, parsed.data.token, actor);
+    const result = await forceQualityReview(id, parsed.data.notes, parsed.data.token, actor, parsed.data.result);
     const { notificationContext, ...review } = result;
     scheduleSlackManufacturingEvent({
       type: "qc_reviewed",
       actorName: actor.name,
-      result: "passed",
+      result: parsed.data.result,
       notes: parsed.data.notes,
       storageLocation: null,
       forced: true,
       becameReadyForFinishing: notificationContext.previousRequirementStatus !== "Ready for Finishing"
         && notificationContext.requirementStatus === "Ready for Finishing",
-      postQcWorkReady: notificationContext.previousRequirementStatus !== "Ready for Manufacturing"
+      postQcWorkReady: parsed.data.result === "passed" && notificationContext.previousRequirementStatus !== "Ready for Manufacturing"
         && notificationContext.requirementStatus === "Ready for Manufacturing",
       becameComplete: notificationContext.previousRequirementStatus !== "Complete"
         && notificationContext.requirementStatus === "Complete",
