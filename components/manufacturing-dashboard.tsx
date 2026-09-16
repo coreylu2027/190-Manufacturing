@@ -92,6 +92,7 @@ import {
 } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { mergeVisibleSelection, settleSequentially } from "@/lib/bulk-selection";
+import { nextWorkflowAction } from "@/lib/manufacturing-workflow";
 import { isShopName } from "@/lib/profile-name";
 import { createClient } from "@/lib/supabase/client";
 import { canUseOnRobotLocation } from "@/lib/storage-locations";
@@ -855,6 +856,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to update operation"),
     onSuccess: (data, variables) => {
+      toast.dismiss(`next-action-${variables.id}`);
       if (data.updated?.status) {
         queryClient.setQueryData<OperationsResponse>(["operations"], (current) => current ? {
           ...current,
@@ -887,6 +889,29 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
       }
       setQuantityDialog(null);
       setCamCompletionOpen(false);
+      if (variables.patch.action === "complete") {
+        const current = queryClient.getQueryData<OperationsResponse>(["operations"]);
+        const completed = current?.operations.find((operation) => operation.id === variables.id);
+        if (completed && (completed.requirementId !== null || completed.requirementKey)) {
+          const route = current!.operations.filter((operation) => completed.requirementId !== null
+            ? operation.requirementId === completed.requirementId
+            : operation.requirementKey === completed.requirementKey);
+          const next = nextWorkflowAction(route.map((operation) => ({ ...operation, active: operation.activeInRouting && operation.activeInBom })), {
+            qcPassed: completed.effectiveQcResult === "passed",
+            finishingRequired: completed.finishingRequired,
+            finishingComplete: completed.finishingComplete,
+          });
+          toast.info(next.operationId === variables.id ? `Remaining work: ${next.label}` : `Next: ${next.label}`, {
+            id: `next-action-${variables.id}`,
+            description: completed.partNumber,
+            duration: 10000,
+            action: next.operationId === undefined ? undefined : {
+              label: "Open",
+              onClick: () => setSelectedId(next.operationId!),
+            },
+          });
+        }
+      }
     },
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ["operations"] }, { cancelRefetch: false });

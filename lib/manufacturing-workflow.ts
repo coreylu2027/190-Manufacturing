@@ -113,6 +113,29 @@ export function requiresPassedQc(machine: string) {
   return (POST_QC_MACHINES as readonly string[]).some((name) => name.toLocaleLowerCase() === machine.trim().toLocaleLowerCase());
 }
 
+/** The next unfinished task in route order, respecting QC and finishing gates. */
+export function nextWorkflowAction(operations: readonly WorkflowOperation[], context: WorkflowContext): {
+  label: string;
+  operationId?: number;
+} {
+  const active = deduplicateOperations(operations.filter((operation) => operation.active));
+  const manufacturing = active.filter((operation) => operation.workType === "Manufacturing")
+    .sort((a, b) => operationIndex(a.operationNumber) - operationIndex(b.operationNumber));
+  const nextOperation = (operation: WorkflowOperation) => {
+    const cam = requiresCam(operation.machine) ? active.find((task) => task.workType === "CAM"
+      && task.operationNumber === operation.operationNumber && task.status !== "Complete") : undefined;
+    const next = cam ?? operation;
+    return { label: `${cam ? "CAM for " : ""}${operation.operationNumber} · ${operation.machine}`, operationId: next.id };
+  };
+  const preQc = manufacturing.find((operation) => !requiresPassedQc(operation.machine) && operation.status !== "Complete");
+  if (preQc) return nextOperation(preQc);
+  if (!context.qcPassed) return { label: "QC" };
+  if (context.finishingRequired && !context.finishingComplete) return { label: "Finishing" };
+  const postQc = manufacturing.find((operation) => requiresPassedQc(operation.machine) && operation.status !== "Complete");
+  if (postQc) return nextOperation(postQc);
+  return { label: "All work complete" };
+}
+
 /**
  * A claim reserves machine work, but releasing every uncompleted claim puts the
  * operation back into an unstarted state. `startedAt` is intentionally not used

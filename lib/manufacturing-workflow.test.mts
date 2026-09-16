@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   deduplicateOperations,
+  nextWorkflowAction,
   planRequirementWorkflow,
   targetMachineHasStarted,
   validateCamAction,
@@ -17,6 +18,41 @@ function operation(overrides: Partial<WorkflowOperation> & Pick<WorkflowOperatio
     ...overrides,
   };
 }
+
+test("completion handoff follows machining, QC, finishing, then inserts", () => {
+  const route = [
+    operation({ id: 1, operationNumber: "OP1", machine: "Bandsaw", status: "Complete" }),
+    operation({ id: 2, operationNumber: "OP2", machine: "Lathe" }),
+    operation({ id: 3, operationNumber: "OP3", machine: "Threaded Insert" }),
+  ];
+  const context = { qcPassed: false, finishingRequired: true, finishingComplete: false };
+  assert.deepEqual(nextWorkflowAction(route, context), { label: "OP2 · Lathe", operationId: 2 });
+  route[1].status = "Complete";
+  assert.deepEqual(nextWorkflowAction(route, context), { label: "QC" });
+  context.qcPassed = true;
+  assert.deepEqual(nextWorkflowAction(route, context), { label: "Finishing" });
+  context.finishingComplete = true;
+  assert.deepEqual(nextWorkflowAction(route, context), { label: "OP3 · Threaded Insert", operationId: 3 });
+  route[2].status = "Complete";
+  assert.deepEqual(nextWorkflowAction(route, context), { label: "All work complete" });
+});
+
+test("handoff keeps partial and parallel stages ahead of downstream work and respects CAM", () => {
+  const route = [
+    operation({ id: 1, operationNumber: "OP1", machine: "Bandsaw", status: "In Progress", completedQuantity: 1 }),
+    operation({ id: 2, operationNumber: "OP2", machine: "Haas CNC" }),
+    operation({ id: 3, operationNumber: "OP2", machine: "Haas CNC", workType: "CAM" }),
+    operation({ id: 4, operationNumber: "OP1", machine: "Lathe", active: false }),
+  ];
+  const context = { qcPassed: false, finishingRequired: false, finishingComplete: true };
+  assert.equal(nextWorkflowAction(route, context).operationId, 1);
+  route[0].status = "Complete";
+  assert.deepEqual(nextWorkflowAction(route, context), { label: "CAM for OP2 · Haas CNC", operationId: 3 });
+  route[2].status = "Complete";
+  assert.equal(nextWorkflowAction(route, context).operationId, 2);
+  route[3].active = true;
+  assert.equal(nextWorkflowAction(route, context).operationId, 4);
+});
 
 test("a non-CNC route becomes ready for manufacturing", () => {
   const plan = planRequirementWorkflow([
