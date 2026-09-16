@@ -28,6 +28,30 @@
   --input: oklch(1 0 0 / 15%); --ring: oklch(0.66 0.15 260);
 }
 
+/* WPI brand colors: crimson #AC2B37 and gray #A9B0B7.
+   Dark mode uses a lighter crimson for readable controls and links. */
+:root[data-color-theme="190"] {
+  --background: #f5f5f6; --foreground: #202124;
+  --card: #ffffff; --card-foreground: #202124;
+  --popover: #ffffff; --popover-foreground: #202124;
+  --primary: #ac2b37; --primary-foreground: #ffffff;
+  --secondary: #e6e8ea; --secondary-foreground: #303438;
+  --muted: #eceeef; --muted-foreground: #5e646b;
+  --accent: #f6e5e7; --accent-foreground: #8c202c;
+  --border: #d3d6da; --input: #a9b0b7; --ring: #ac2b37;
+}
+
+:root[data-color-theme="190"].dark {
+  --background: #17181a; --foreground: #f4f4f5;
+  --card: #202124; --card-foreground: #f4f4f5;
+  --popover: #202124; --popover-foreground: #f4f4f5;
+  --primary: #f07b87; --primary-foreground: #251013;
+  --secondary: #303236; --secondary-foreground: #f4f4f5;
+  --muted: #2b2d31; --muted-foreground: #a9b0b7;
+  --accent: #48262d; --accent-foreground: #ffb7bf;
+  --border: #3e4147; --input: #50545b; --ring: #f07b87;
+}
+
 @theme inline {
   --color-background: var(--background); --color-foreground: var(--foreground);
   --color-card: var(--card); --color-card-foreground: var(--card-foreground);

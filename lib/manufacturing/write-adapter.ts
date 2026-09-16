@@ -3,7 +3,7 @@ import { deduplicateOperations, requiresPassedQc } from "../manufacturing-workfl
 import { createSupabaseManufacturingAdapter, supabaseApiHeaders, type AdapterConfig } from "./supabase-adapter.ts";
 import type { NormalizedRow } from "./model.ts";
 import type { FabricationAction, OperationPatch, OperationQuantityAction, QualityResult } from "../types.ts";
-import { ROBOT_LOCATION, canUseOnRobotLocation, isStorageLocation, type StorageLocation } from "../storage-locations.ts";
+import { ROBOT_LOCATION, canUseOnRobotLocation, isStorageLocation, isPrintingOperation, type StorageLocation } from "../storage-locations.ts";
 
 import { notificationPartContext as resolvePartContext } from "./identity.ts";
 
@@ -67,6 +67,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     action: string,
     build: (plan: Plan, state: WriteState) => Promise<T>,
     qc: object | ((state: WriteState, result: T) => object | null) | null = null,
+    commitRpc = "manufacturing_commit_with_qc_quantities",
   ) {
     if (!UUID_PATTERN.test(actor.id) || !actor.name.trim()) throw new ManufacturingWriteError("An authenticated manufacturing actor is required", 401);
     const state = await rpc<WriteState>("manufacturing_write_state");
@@ -83,8 +84,8 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       p_expected: state.token, p_changes: plan.changes(), p_qc: qualityPayload, p_result: result ?? null };
     // A transport failure can occur after commit. Repeat the identical request ID;
     // the database returns the recorded result instead of applying it twice.
-    try { return await rpc<T>("manufacturing_commit_with_qc_quantities", body); }
-    catch (error) { if (error instanceof ManufacturingWriteError) throw error; return rpc<T>("manufacturing_commit_with_qc_quantities", body); }
+    try { return await rpc<T>(commitRpc, body); }
+    catch (error) { if (error instanceof ManufacturingWriteError) throw error; return rpc<T>(commitRpc, body); }
   }
   function operation(state: WriteState, id: number) {
     const row = state.rows.operations.find(row => row.id === id);
@@ -174,14 +175,30 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     async retractedReviewIds() {
       return (await rpc<WriteState>("manufacturing_write_state")).retractions.map(row => row.review_id);
     },
-    applyQuantityAction(id: number, action: OperationQuantityAction, quantity: number, actor: Actor, handoff?: { programPath?: string; notes?: string }) {
+    applyQuantityAction(id: number, action: OperationQuantityAction, quantity: number, actor: Actor, handoff?: { programPath?: string; notes?: string; location?: StorageLocation; completeAllClaims?: boolean }) {
       return transact(actor, action, async (plan, state) => {
         const row = operation(state, id);
+        const printing = isPrintingOperation({ machine: String(row.machine ?? ""), workType: String(row.work_type ?? "Manufacturing") });
+        if (handoff?.completeAllClaims && (action !== "complete" || !printing)) {
+          throw new ManufacturingWriteError("Only 3D printing claims can be completed on behalf of other users", 400);
+        }
+        if (handoff?.location !== undefined) {
+          if (!isStorageLocation(handoff.location)) throw new ManufacturingWriteError("Invalid storage location", 400);
+          if (row.work_type === "CAM" || !(action === "complete" || action === "claim" && printing)) {
+            throw new ManufacturingWriteError("Set a location when claiming printed parts or completing manufacturing work", 400);
+          }
+          if (handoff.location === ROBOT_LOCATION) throw new ManufacturingWriteError("Move parts onto the robot separately after QC and finishing", 409);
+        }
         if (requiresPassedQc(String(row.machine ?? "")) && ["claim", "complete"].includes(action)) {
           assertEffectivePassedReview(state, Number(row.requirement_id), "Threaded inserts require a current passed QC review");
         }
-        return plan.applyQuantityAction(id, action, quantity, actor, handoff);
-      });
+        const result = await plan.applyQuantityAction(id, action, quantity, actor, handoff);
+        return { ...result, ...(handoff?.location === undefined ? {} : {
+          storageLocation: handoff.location,
+          locationUpdatedBy: actor.name,
+          locationUpdatedAt: new Date().toISOString(),
+        }) };
+      }, null, handoff?.location === undefined ? "manufacturing_commit_with_qc_quantities" : "manufacturing_commit_with_operation_location");
     },
     stealOperationClaim(id: number, actor: Actor) {
       return transact(actor, "steal", async (plan, state) => {

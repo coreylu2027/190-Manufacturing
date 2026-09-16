@@ -362,7 +362,7 @@ async function applyQuantityAction(
   action: OperationQuantityAction,
   quantity: number,
   actor: { id: string; name: string },
-  camHandoff?: { programPath?: string; notes?: string },
+  camHandoff?: { programPath?: string; notes?: string; completeAllClaims?: boolean },
 ) {
   if (!Number.isInteger(quantity) || quantity < 1) throw new Error("Quantity must be a positive whole number");
   
@@ -428,9 +428,17 @@ async function applyQuantityAction(
     if (quantity > actorAllocation.claimed) throw new Error(`You only have ${actorAllocation.claimed} part(s) claimed`);
     actorAllocation.claimed -= quantity;
   } else if (action === "complete") {
-    if (quantity > actorAllocation.claimed) throw new Error(`You only have ${actorAllocation.claimed} claimed part(s) to complete`);
-    actorAllocation.claimed -= quantity;
-    actorAllocation.completed += quantity;
+    if (camHandoff?.completeAllClaims) {
+      if (quantity !== current.claimedQuantity) throw new Error("The print claims changed. Refresh before completing them.");
+      for (const allocation of allocations) {
+        allocation.completed += allocation.claimed;
+        allocation.claimed = 0;
+      }
+    } else {
+      if (quantity > actorAllocation.claimed) throw new Error(`You only have ${actorAllocation.claimed} claimed part(s) to complete`);
+      actorAllocation.claimed -= quantity;
+      actorAllocation.completed += quantity;
+    }
   } else {
     if (qcOutcome === "Passed" && !postQcOperation) throw new Error("Undo the passed QC review before reopening completed work");
     if (quantity > actorAllocation.completed) throw new Error(`You only completed ${actorAllocation.completed} part(s)`);

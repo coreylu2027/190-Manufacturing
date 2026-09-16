@@ -32,6 +32,15 @@ matches the application role.
 
 ## Verification
 
+Printer locations and combined claim/completion plus location updates require
+`supabase/migrations/20260916162511_printer_locations.sql`, followed by
+`supabase/production/20260916_operation_locations.sql` after the existing
+QC quantity installation. Apply both before deploying the application changes.
+No existing locations or quantities are rewritten. Combined writes use the
+same retry fingerprint and snapshot protection as other manufacturing actions;
+their location audit is stored as `part_locations` alongside workflow history.
+The location remains shared by all quantities of a production requirement.
+
 The TypeScript adapter suite is part of:
 
 ```powershell
@@ -46,6 +55,7 @@ and grants:
 ```powershell
 psql -d manufacturing_write_test -f scripts/manufacturing-migration/write-test-bootstrap.sql
 psql -d manufacturing_write_test -f scripts/manufacturing-migration/write-integration-test.sql
+psql -d manufacturing_write_test -f scripts/manufacturing-migration/operation-location-integration-test.sql
 ```
 
 The integration test wraps all fixture writes in a rollback. The bootstrap file

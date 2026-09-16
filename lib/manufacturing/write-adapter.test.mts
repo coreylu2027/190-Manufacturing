@@ -284,6 +284,7 @@ function harness(state: WriteState, commitResponse?: (body: Record<string, unkno
         return Response.json(state);
       }
       assert.ok(String(input).endsWith("/manufacturing_commit_with_qc_quantities")
+        || String(input).endsWith("/manufacturing_commit_with_operation_location")
         || String(input).endsWith("/manufacturing_update_requirement_notes"));
       assert.equal(init?.method, "POST");
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -325,6 +326,68 @@ test("quantity claims are planned and sent as one compare-and-swap transaction",
   assert.equal(operation?.claimed_quantity, 1);
   assert.equal(operation?.completed_quantity, 0);
   assert.match(String(operation?.quantity_ledger), /"claimed":1/);
+});
+
+test("print claims save their printer in the same transaction and omission leaves location alone", async () => {
+  const state = fixture({ operation: { Machine: { value: "Bambu 3D Printer" } } });
+  const { adapter, commits } = harness(state);
+  const result = await adapter.applyQuantityAction(10, "claim", 1, ACTOR, { location: "Bambu X1C #2" });
+  assert.equal(result.storageLocation, "Bambu X1C #2");
+  assert.equal(result.locationUpdatedBy, ACTOR.name);
+  assert.equal(result.claimedQuantity, 1);
+  assert.equal(commits.length, 1);
+  assert.equal(commits[0].p_qc, null);
+  const unchanged = await adapter.applyQuantityAction(10, "claim", 1, ACTOR);
+  assert.equal(Object.hasOwn(unchanged, "storageLocation"), false);
+});
+
+test("another user can complete all print claims and move the part without stealing credit or bypassing QC", async () => {
+  const allocations = [
+    { userId: "other-1", name: "Other A.", claimed: 1, completed: 0 },
+    { userId: "other-2", name: "Other B.", claimed: 1, completed: 0 },
+  ];
+  const state = fixture({ operation: {
+    Machine: { value: "Bambu 3D Printer" }, Status: { value: "In Progress" },
+    "Claimed Quantity": 2, "Quantity Ledger": JSON.stringify(allocations),
+  } });
+  const { adapter, commits } = harness(state);
+  const result = await adapter.applyQuantityAction(10, "complete", 2, ACTOR, { completeAllClaims: true, location: "Clarke 1" });
+  assert.equal(result.status, "Complete");
+  assert.equal(result.claimedQuantity, 0);
+  assert.equal(result.storageLocation, "Clarke 1");
+  assert.equal(result.notificationContext.requirementStatus, "Ready for QC");
+  assert.deepEqual(result.allocations, allocations.map((a) => ({ ...a, claimed: 0, completed: 1 })));
+  assert.equal(commits[0].p_actor, ACTOR.id);
+  assert.equal(commits.length, 1);
+  await assert.rejects(adapter.applyQuantityAction(10, "complete", 1, ACTOR, { completeAllClaims: true }), /claims changed/);
+  assert.equal(commits.length, 1);
+});
+
+test("completion location is optional for ordinary manufacturing and forbidden on release or CAM", async () => {
+  const state = fixture({ operation: {
+    Status: { value: "In Progress" }, "Claimed Quantity": 2,
+    "Quantity Ledger": JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 2, completed: 0 }]),
+  } });
+  const { adapter, commits } = harness(state);
+  const result = await adapter.applyQuantityAction(10, "complete", 2, ACTOR, { location: "Shelf 2" });
+  assert.equal(result.storageLocation, "Shelf 2");
+  await assert.rejects(adapter.applyQuantityAction(10, "complete", 2, ACTOR, { completeAllClaims: true }), /Only 3D printing/);
+  await assert.rejects(adapter.applyQuantityAction(10, "release", 2, ACTOR, { location: "Shelf 2" }), /Set a location/);
+  await assert.rejects(adapter.applyQuantityAction(10, "complete", 2, ACTOR, { location: "On Robot" }), /after QC/);
+  assert.equal(commits.length, 1);
+  const cam = harness(fixture({ operation: { "Work Type": { value: "CAM" } } }));
+  await assert.rejects(cam.adapter.applyQuantityAction(10, "claim", 1, ACTOR, { location: "Bambu H2D" }), /Set a location/);
+  assert.equal(cam.commits.length, 0);
+});
+
+test("print completion and location retry with the identical idempotency payload", async () => {
+  const retry = harness(fixture({ operation: { Machine: { value: "Bambu 3D Printer" } } }), (body, attempt) => {
+    if (attempt === 1) throw new TypeError("connection reset after commit");
+    return Response.json(body.p_result);
+  });
+  await retry.adapter.applyQuantityAction(10, "claim", 1, ACTOR, { location: "Bambu X1C Pit" });
+  assert.equal(retry.commits.length, 2);
+  assert.deepEqual(retry.commits[0], retry.commits[1]);
 });
 
 test("approved users can update a requirement production note independently of QC", async () => {

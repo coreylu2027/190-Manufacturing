@@ -31,7 +31,7 @@ export async function getManufacturingSnapshot() {
   return reader().readSnapshot();
 }
 
-export async function applyQuantityAction(id: number, action: OperationQuantityAction, quantity: number, actor: Actor, handoff?: { programPath?: string; notes?: string }) {
+export async function applyQuantityAction(id: number, action: OperationQuantityAction, quantity: number, actor: Actor, handoff?: { programPath?: string; notes?: string; location?: StorageLocation; completeAllClaims?: boolean }) {
   return writer().applyQuantityAction(id, action, quantity, actor, handoff);
 }
 

@@ -11,11 +11,15 @@ export const SHOP_STORAGE_LOCATIONS = [
 ] as const;
 
 export const ROBOT_LOCATION = "On Robot" as const;
-export const STORAGE_LOCATIONS = [...SHOP_STORAGE_LOCATIONS, ROBOT_LOCATION] as const;
+export const PRINTER_LOCATIONS = [
+  "Bambu X1C #1", "Bambu X1C #2", "Bambu X1C #3", "Bambu H2D", "Bambu X1C Pit",
+] as const;
+export const STORAGE_LOCATIONS = [...SHOP_STORAGE_LOCATIONS, ...PRINTER_LOCATIONS, ROBOT_LOCATION] as const;
 
 export type StorageLocation = (typeof STORAGE_LOCATIONS)[number];
 
 export const STORAGE_LOCATION_GROUPS = [
+  { name: "3D printers", locations: PRINTER_LOCATIONS },
   { name: "Clarke", locations: SHOP_STORAGE_LOCATIONS.slice(0, 8) },
   { name: "Kwolek", locations: SHOP_STORAGE_LOCATIONS.slice(8, 24) },
   { name: "Hopper", locations: SHOP_STORAGE_LOCATIONS.slice(24, 32) },
@@ -31,4 +35,8 @@ export function isStorageLocation(value: unknown): value is StorageLocation {
 
 export function canUseOnRobotLocation(qcPassed: boolean, finishingComplete: boolean) {
   return qcPassed && finishingComplete;
+}
+
+export function isPrintingOperation(operation: { machine: string; workType: string }) {
+  return operation.workType === "Manufacturing" && /\b3d\s*print(?:er|ing)?\b/i.test(operation.machine);
 }

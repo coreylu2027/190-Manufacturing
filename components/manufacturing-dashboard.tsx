@@ -14,6 +14,7 @@ import Link from "next/link";
 import {
   ArrowUpRight,
   Check,
+  ChevronDown,
   ChevronRight,
   CircleDot,
   ClipboardCheck,
@@ -53,7 +54,7 @@ import { ManufacturingFileLink } from "@/components/manufacturing-file-link";
 import { NotificationInbox } from "@/components/notification-inbox";
 import { ProductionRequirementNotes } from "@/components/production-requirement-notes";
 import { QualityControlDashboard } from "@/components/quality-control-dashboard";
-import { StorageLocationEditor } from "@/components/storage-location-editor";
+import { StorageLocationEditor, StorageLocationSelect } from "@/components/storage-location-editor";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -95,7 +96,7 @@ import { mergeVisibleSelection, settleSequentially } from "@/lib/bulk-selection"
 import { nextWorkflowAction } from "@/lib/manufacturing-workflow";
 import { isShopName } from "@/lib/profile-name";
 import { createClient } from "@/lib/supabase/client";
-import { canUseOnRobotLocation } from "@/lib/storage-locations";
+import { canUseOnRobotLocation, isPrintingOperation, PRINTER_LOCATIONS, STORAGE_LOCATIONS, type StorageLocation } from "@/lib/storage-locations";
 import { cn } from "@/lib/utils";
 import { PreferencesPage } from "@/components/preferences-page";
 import { WORKSPACE_ROUTES, type WorkspaceView } from "@/lib/workspace-routes";
@@ -177,14 +178,14 @@ interface ProductionRequirement {
 }
 
 const gridTheme = themeQuartz.withParams({
-  accentColor: "#3159c6",
-  backgroundColor: "#ffffff",
-  borderColor: "#dce2ec",
-  foregroundColor: "#172033",
-  headerBackgroundColor: "#f7f9fc",
-  headerTextColor: "#697386",
-  rowHoverColor: "#f4f7fb",
-  selectedRowBackgroundColor: "#eaf0ff",
+  accentColor: "var(--primary)",
+  backgroundColor: "var(--card)",
+  borderColor: "var(--border)",
+  foregroundColor: "var(--foreground)",
+  headerBackgroundColor: "var(--muted)",
+  headerTextColor: "var(--muted-foreground)",
+  rowHoverColor: "var(--muted)",
+  selectedRowBackgroundColor: "var(--accent)",
   fontFamily: "var(--font-geist-sans), ui-sans-serif",
   fontSize: 13,
   headerFontSize: 11,
@@ -214,11 +215,12 @@ function StatusCell({ value }: { value: OperationStatus }) {
 function ActionCell({ data, onOpen, user }: { data?: ManufacturingOperation; onOpen: (operation: ManufacturingOperation) => void; user: OperationsResponse["user"] }) {
   if (!data) return null;
   const claimable = ["Ready", "In Progress"].includes(data.status) && data.availableQuantity > 0;
+  const printable = isPrintingOperation(data) && data.claimedQuantity > 0;
   const stealable = isOperationStealable(data, user);
   return (
     <div className="flex h-full items-center justify-end">
-      <Button size="sm" variant={claimable ? "default" : stealable ? "destructive" : "ghost"} onClick={() => onOpen(data)}>
-        {claimable ? "Claim" : stealable ? "Steal" : "Open"}<ChevronRight />
+      <Button size="sm" variant={claimable || printable ? "default" : stealable ? "destructive" : "ghost"} onClick={() => onOpen(data)}>
+        {claimable ? "Claim" : printable ? "Open" : stealable ? "Steal" : "Open"}<ChevronRight />
       </Button>
     </div>
   );
@@ -316,6 +318,7 @@ function bulkActionPlan(operation: ManufacturingOperation, user: OperationsRespo
   const claimable = isOperationClaimable(operation);
   if (view === "available") return claimable ? { action: "claim" as const, quantity: operation.availableQuantity } : null;
   if (view === "mine") return claimedQuantity > 0 ? { action: "complete" as const, quantity: claimedQuantity } : null;
+  if (isPrintingOperation(operation) && operation.claimedQuantity > 0) return { action: "complete" as const, quantity: operation.claimedQuantity };
   if (operation.status === "Ready" && claimable) return { action: "claim" as const, quantity: operation.availableQuantity };
   if (claimedQuantity > 0) return { action: "complete" as const, quantity: claimedQuantity };
   return claimable ? { action: "claim" as const, quantity: operation.availableQuantity } : null;
@@ -740,14 +743,19 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
   const [view, setView] = useState<QueueView>("available");
   const [workType, setWorkType] = useState<WorkTypeFilter>("all");
   const [machine, setMachine] = useState("all");
+  const [locationFilter, setLocationFilter] = useState("all");
   const [sourceDocument, setSourceDocument] = useState("all");
   const [search, setSearch] = useState("");
   const [bulkSelectedIds, setBulkSelectedIds] = useState<number[]>([]);
   const [bulkActionDialogOpen, setBulkActionDialogOpen] = useState(false);
   const [bulkCamProgramPath, setBulkCamProgramPath] = useState("");
   const [bulkCamNotes, setBulkCamNotes] = useState("");
+  const [bulkLocation, setBulkLocation] = useState<StorageLocation | null>(null);
+  const [bulkLocationDialogOpen, setBulkLocationDialogOpen] = useState(false);
+  const [bulkMoveLocation, setBulkMoveLocation] = useState<StorageLocation | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
-  const [quantityDialog, setQuantityDialog] = useState<{ action: OperationQuantityAction; max: number } | null>(null);
+  const [quantityDialog, setQuantityDialog] = useState<{ action: OperationQuantityAction; max: number; completeAllClaims?: boolean } | null>(null);
+  const [quantityLocation, setQuantityLocation] = useState<StorageLocation | null>(null);
   const [quantityDraft, setQuantityDraft] = useState("1");
   const [camCompletionOpen, setCamCompletionOpen] = useState(false);
   const [camHandoffEditOpen, setCamHandoffEditOpen] = useState(false);
@@ -875,7 +883,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
         const quantityPatch = variables.patch;
         const copy = quantityActionCopy[quantityPatch.action];
         const unitLabel = variables.workType === "CAM" ? "CAM task" : `${quantityPatch.quantity} ${quantityPatch.quantity === 1 ? "part" : "parts"}`;
-        toast.success(`${copy.success}: ${unitLabel}`, variables.suppressUndo || variables.workType === "CAM" ? undefined : {
+        toast.success(`${copy.success}: ${unitLabel}`, variables.suppressUndo || variables.workType === "CAM" || quantityPatch.completeAllClaims ? undefined : {
           action: {
             label: "Undo",
             onClick: () => mutation.mutate({
@@ -913,9 +921,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
         }
       }
     },
-    onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ["operations"] }, { cancelRefetch: false });
-    },
+    onSettled: refreshManufacturingData,
   });
 
   const bulkActionMutation = useMutation({
@@ -924,11 +930,13 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
       items,
       programPath,
       notes,
+      location,
     }: {
       action: BulkAction;
-      items: { id: number; quantity: number; workType: OperationWorkType }[];
+      items: { id: number; quantity: number; workType: OperationWorkType; printing: boolean; completeAllClaims: boolean }[];
       programPath: string;
       notes: string;
+      location: StorageLocation | null;
     }) => {
       const results = await settleSequentially(items, async (item) => {
         const response = await fetch(`/api/operations/${item.id}`, {
@@ -937,6 +945,8 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
           body: JSON.stringify({
             action,
             quantity: item.quantity,
+            ...(item.completeAllClaims ? { completeAllClaims: true } : {}),
+            ...(location && item.workType === "Manufacturing" && (action === "complete" || item.printing) ? { location } : {}),
             ...(action === "complete" && item.workType === "CAM" ? {
               ...(programPath ? { programPath } : {}),
               notes,
@@ -968,13 +978,45 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
       if (failed > 0) toast.warning(`${actionLabel} ${workUnits} ${workUnits === 1 ? "work unit" : "work units"} across ${succeeded.length} operations; ${failed} failed.`);
       else toast.success(`${actionLabel} ${workUnits} ${workUnits === 1 ? "work unit" : "work units"} across ${succeeded.length} operations.`);
       setBulkActionDialogOpen(false);
-      setBulkSelectedIds([]);
-      operationsGridRef.current?.api.deselectAll();
+      setBulkSelectedIds((ids) => ids.filter((id) => !updates.has(id)));
     },
     onError: (error, variables) => toast.error(error instanceof Error ? error.message : `Unable to ${variables.action} selected operations`),
-    onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ["operations"] }, { cancelRefetch: false });
+    onSettled: refreshManufacturingData,
+  });
+
+  const bulkLocationMutation = useMutation({
+    mutationFn: async ({ selectedOperations, location }: { selectedOperations: ManufacturingOperation[]; location: StorageLocation }) => {
+      const requirementIds = [...new Set(selectedOperations.flatMap((operation) => operation.requirementId === null ? [] : [operation.requirementId]))];
+      const results = await settleSequentially(requirementIds, async (requirementId) => {
+        const response = await fetch(`/api/requirements/${requirementId}/location`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ location }),
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(body.error ?? "Unable to set part location");
+        return { requirementId, updated: body as Pick<ManufacturingOperation, "storageLocation" | "locationUpdatedBy" | "locationUpdatedAt"> };
+      });
+      const succeeded = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+      const failures = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
+      if (succeeded.length === 0) throw new Error(failures[0] instanceof Error ? failures[0].message : "No part locations were updated");
+      return { succeeded, failed: failures.length, selectedOperations };
     },
+    onSuccess: ({ succeeded, failed, selectedOperations }) => {
+      const updates = new Map(succeeded.map(({ requirementId, updated }) => [requirementId, updated]));
+      queryClient.setQueryData<OperationsResponse>(["operations"], (current) => current ? {
+        ...current,
+        operations: current.operations.map((operation) => operation.requirementId !== null && updates.has(operation.requirementId)
+          ? { ...operation, ...updates.get(operation.requirementId) } : operation),
+      } : current);
+      const completedIds = new Set(selectedOperations.filter((operation) => operation.requirementId !== null && updates.has(operation.requirementId)).map((operation) => operation.id));
+      setBulkSelectedIds((ids) => ids.filter((id) => !completedIds.has(id)));
+      if (failed) toast.warning(`Updated ${succeeded.length} part locations; ${failed} failed and remain selected.`);
+      else toast.success(`Location updated for ${succeeded.length} ${succeeded.length === 1 ? "part requirement" : "part requirements"}`);
+      setBulkLocationDialogOpen(false);
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to set part locations"),
+    onSettled: refreshManufacturingData,
   });
 
   const camHandoffMutation = useMutation({
@@ -1036,6 +1078,8 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
     return operations.filter((operation) => {
       if (workType !== "all" && operation.workType !== workType) return false;
       if (machine !== "all" && operation.machine !== machine) return false;
+      if (locationFilter === "missing" && operation.storageLocation !== null) return false;
+      if (locationFilter !== "all" && locationFilter !== "missing" && operation.storageLocation !== locationFilter) return false;
       if (sourceDocument === "missing" && operation.documentName) return false;
       if (sourceDocument !== "all" && sourceDocument !== "missing" && operation.documentName !== sourceDocument) return false;
       const allocation = allocationForUser(operation, query.data?.user ?? null);
@@ -1045,13 +1089,17 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
       if (term && ![operation.partNumber, operation.revision, operation.partName, operation.documentName, operation.material, operation.machine, operation.operationNumber, operation.workType, operation.camProgramPath, operation.storageLocation, operation.qualityNotes, operation.lastQualityFailure?.notes].join(" ").toLowerCase().includes(term)) return false;
       return true;
     });
-  }, [machine, operations, query.data?.user, search, sourceDocument, view, workType]);
+  }, [machine, locationFilter, operations, query.data?.user, search, sourceDocument, view, workType]);
 
   const bulkItems = useMemo(() => operations.flatMap((operation) => {
     if (!bulkSelectedIds.includes(operation.id)) return [];
     const plan = bulkActionPlan(operation, query.data?.user ?? null, view);
     return plan ? [{ operation, ...plan }] : [];
   }), [bulkSelectedIds, operations, query.data?.user, view]);
+  const selectedBulkOperations = operations.filter((operation) => bulkSelectedIds.includes(operation.id));
+  const selectedLocationOperations = selectedBulkOperations.filter((operation) => operation.requirementId !== null);
+  const selectedLocationRequirementCount = new Set(selectedLocationOperations.map((operation) => operation.requirementId)).size;
+  const hasLocationOnlySelection = selectedBulkOperations.length !== bulkItems.length;
   const selectedBulkActions = new Set(bulkItems.map((item) => item.action));
   const bulkAction = selectedBulkActions.size === 1 ? [...selectedBulkActions][0] : null;
   const hasMixedBulkActions = selectedBulkActions.size > 1;
@@ -1059,6 +1107,12 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
   const bulkCamCount = bulkAction === "complete"
     ? bulkItems.filter(({ operation }) => operation.workType === "CAM").length
     : 0;
+  const bulkLocationCount = bulkItems.filter(({ operation }) => bulkAction === "complete"
+    ? operation.workType === "Manufacturing" : isPrintingOperation(operation)).length;
+  const bulkSharedPrintCount = view === "all" && bulkAction === "complete"
+    ? bulkItems.filter(({ operation }) => isPrintingOperation(operation)).length : 0;
+  const visibleOperationIds = new Set(filtered.map((operation) => operation.id));
+  const hiddenBulkCount = bulkItems.filter(({ operation }) => !visibleOperationIds.has(operation.id)).length;
   const bulkButtonLabel = hasMixedBulkActions
     ? "Mixed selection"
     : bulkAction === "claim" || (!bulkAction && view === "available")
@@ -1091,11 +1145,11 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
   }), [operations]);
 
   const openOperation = (operation: ManufacturingOperation) => setSelectedId(operation.id);
-  const runQuantityAction = (action: OperationQuantityAction, quantity: number) => {
+  const runQuantityAction = (action: OperationQuantityAction, quantity: number, location?: StorageLocation, completeAllClaims?: boolean) => {
     if (!selected) return;
-    mutation.mutate({ id: selected.id, patch: { action, quantity }, workType: selected.workType });
+    mutation.mutate({ id: selected.id, patch: { action, quantity, location, completeAllClaims }, workType: selected.workType });
   };
-  const requestQuantityAction = (action: OperationQuantityAction, max: number) => {
+  const requestQuantityAction = (action: OperationQuantityAction, max: number, completeAllClaims = false) => {
     if (!isShopName(userName)) {
       openProfile();
       toast.info("Set your first name and last initial before recording work");
@@ -1107,9 +1161,11 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
       setCamCompletionOpen(true);
       return;
     }
-    if (max <= 1) return runQuantityAction(action, 1);
+    setQuantityLocation(null);
+    const canSetLocation = selected?.workType === "Manufacturing" && (action === "complete" || action === "claim" && isPrintingOperation(selected));
+    if (max <= 1 && !canSetLocation) return runQuantityAction(action, 1);
     setQuantityDraft(String(max));
-    setQuantityDialog({ action, max });
+    setQuantityDialog({ action, max, completeAllClaims });
   };
   const completeCam = () => {
     if (!selected || selected.workType !== "CAM") return;
@@ -1168,6 +1224,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
     }
     setBulkCamProgramPath("");
     setBulkCamNotes("");
+    setBulkLocation(null);
     setBulkActionDialogOpen(true);
   };
   const changeQueueView = (nextView: QueueView) => {
@@ -1206,7 +1263,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
     hideDisabledCheckboxes: false,
     enableClickSelection: false,
     isRowSelectable: ({ data }: { data?: ManufacturingOperation }) => Boolean(
-      data && bulkActionPlan(data, query.data?.user ?? null, view),
+      data && query.data?.user?.approved && (data.requirementId !== null || bulkActionPlan(data, query.data?.user ?? null, view)),
     ),
   }), [query.data?.user, view]);
 
@@ -1354,7 +1411,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
 
         <div className="overflow-hidden rounded-2xl border bg-card shadow-[0_14px_42px_rgba(15,23,42,.055)]">
           <div className="border-b bg-muted/25 p-3 md:p-4">
-            <div className="flex flex-col gap-3 xl:flex-row xl:items-center">
+            <div className="flex flex-col gap-3 xl:flex-row xl:flex-wrap xl:items-center">
               <div className="flex w-full overflow-x-auto rounded-lg bg-muted p-1 xl:w-auto">
                 {([{ id: "available", label: "Available" }, { id: "mine", label: "My work" }, { id: "all", label: "All operations" }] as const).map((item) => (
                   <Button key={item.id} size="sm" variant="ghost" onClick={() => changeQueueView(item.id)} className={cn("min-w-fit", view === item.id && "bg-card text-foreground shadow-sm hover:bg-card")}>
@@ -1378,11 +1435,34 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                 <SelectTrigger className="h-9 w-full bg-card xl:w-56"><FileText className="text-muted-foreground" /><SelectValue placeholder="All source documents" /></SelectTrigger>
                 <SelectContent><SelectItem value="all">All source documents</SelectItem>{sourceDocuments.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}<SelectItem value="missing">Not synced</SelectItem></SelectContent>
               </Select>
+              <Select value={locationFilter} onValueChange={(value) => {
+                setLocationFilter(value ?? "all");
+                if ((PRINTER_LOCATIONS as readonly string[]).includes(value ?? "")) {
+                  setView("all");
+                  setWorkType("Manufacturing");
+                }
+              }}>
+                <SelectTrigger aria-label="Filter by part location" className="h-9 w-full bg-card xl:w-52"><SelectValue>{locationFilter === "all" ? "All locations" : locationFilter === "missing" ? "Not recorded" : locationFilter}</SelectValue></SelectTrigger>
+                <SelectContent><SelectItem value="all">All locations</SelectItem><SelectItem value="missing">Not recorded</SelectItem>{[...PRINTER_LOCATIONS, ...STORAGE_LOCATIONS.filter((location) => !(PRINTER_LOCATIONS as readonly string[]).includes(location))].map((location) => <SelectItem key={location} value={location}>{location}</SelectItem>)}</SelectContent>
+              </Select>
               <div className="flex items-center justify-between gap-3 xl:justify-end">
                 <div className="flex items-center gap-2 whitespace-nowrap text-xs text-muted-foreground"><SlidersHorizontal className="size-3.5" /> {filtered.length} shown</div>
-                <Button size="sm" onClick={requestBulkAction} disabled={bulkItems.length === 0 || !bulkAction || bulkActionMutation.isPending} title={hasMixedBulkActions ? "Select only claimable work or only work assigned to you" : undefined}>
+                <div className="flex items-center gap-1">
+                <Button size="sm" onClick={requestBulkAction} disabled={bulkItems.length === 0 || !bulkAction || hasLocationOnlySelection || bulkActionMutation.isPending || bulkLocationMutation.isPending} title={hasLocationOnlySelection ? "Some selected operations can only have their location updated" : hasMixedBulkActions ? "Select only claimable work or only work assigned to you" : undefined}>
                   {bulkActionMutation.isPending ? <LoaderCircle className="animate-spin" /> : <ListChecks />} {bulkButtonLabel}{bulkItems.length > 0 ? ` (${bulkItems.length})` : ""}
                 </Button>
+                <DropdownMenu>
+                  <DropdownMenuTrigger render={<Button size="sm" variant="outline" className="w-8 px-0" aria-label="More bulk actions" disabled={bulkActionMutation.isPending || bulkLocationMutation.isPending} />}>
+                    <ChevronDown className="size-4" />
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-52">
+                    <DropdownMenuItem disabled={selectedLocationRequirementCount === 0 || !query.data?.user?.approved} onClick={() => {
+                      setBulkMoveLocation(null);
+                      setBulkLocationDialogOpen(true);
+                    }}><MapPin /> Bulk set location{selectedLocationRequirementCount > 0 ? ` (${selectedLocationRequirementCount})` : ""}</DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                </div>
               </div>
             </div>
           </div>
@@ -1392,7 +1472,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
           ) : query.isError && !query.data ? (
             <div className="grid min-h-80 place-items-center p-6 text-center"><div><XCircle className="mx-auto mb-3 size-9 text-destructive" /><h2 className="font-semibold">Couldn’t load the queue</h2><p className="mt-1 max-w-md text-sm text-muted-foreground">{query.error.message}</p><Button className="mt-4" onClick={() => query.refetch()}>Try again</Button></div></div>
           ) : filtered.length === 0 ? (
-            <div className="grid min-h-80 place-items-center p-6 text-center"><div><PackageCheck className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h2 className="font-semibold">No operations match</h2><p className="mt-1 text-sm text-muted-foreground">Try another work type, machine, or source document, or clear the search.</p><Button variant="outline" className="mt-4" onClick={() => { setWorkType("all"); setMachine("all"); setSourceDocument("all"); setSearch(""); setView("all"); }}>Clear filters</Button></div></div>
+            <div className="grid min-h-80 place-items-center p-6 text-center"><div><PackageCheck className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h2 className="font-semibold">No operations match</h2><p className="mt-1 text-sm text-muted-foreground">Try another work type, machine, location, or source document, or clear the search.</p><Button variant="outline" className="mt-4" onClick={() => { setWorkType("all"); setMachine("all"); setLocationFilter("all"); setSourceDocument("all"); setSearch(""); setView("all"); }}>Clear filters</Button></div></div>
           ) : (
             <>
               <div className="hidden h-[min(59vh,680px)] min-h-[430px] md:block">
@@ -1431,13 +1511,14 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                       <Checkbox
                         className="mt-1"
                         checked={checked}
-                        disabled={!plan}
-                        aria-label={`Select ${operation.partNumber} ${operationLabel(operation)} to ${plan?.action === "claim" ? "claim" : "mark complete"}`}
+                        disabled={!query.data?.user?.approved || operation.requirementId === null && !plan}
+                        aria-label={`Select ${operation.partNumber} ${operationLabel(operation)}`}
                         onCheckedChange={(nextChecked) => setBulkSelectedIds((current) => nextChecked ? [...new Set([...current, operation.id])] : current.filter((id) => id !== operation.id))}
                       />
                       <button onClick={() => openOperation(operation)} className="min-w-0 flex-1 text-left">
                         <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary">{operation.partNumber}</p><h3 className="mt-1 font-semibold">{operation.partName}</h3></div><StatusBadge status={operation.status} /></div>
                         <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground"><span>Rev {operation.revision ?? "—"}</span><span>{operationLabel(operation)}</span><Badge variant="outline">{operation.workType}</Badge><span className="flex items-center gap-1"><Wrench className="size-3" />{operation.machine}</span><span>{operation.completedQuantity}/{operation.taskQuantity} done</span><span>{operation.availableQuantity} available</span></div>
+                        <p className="mt-2 text-xs text-muted-foreground">Location: {operation.storageLocation ?? "Not recorded"}</p>
                       </button>
                     </article>
                   );
@@ -1587,6 +1668,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                 {["Ready", "In Progress"].includes(selected.status) && selected.availableQuantity > 0 && <Button size="lg" className="h-11" onClick={() => requestQuantityAction("claim", selected.availableQuantity)} disabled={mutation.isPending}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <CircleDot />} {selected.workType === "CAM" ? "Claim CAM task" : `Claim ${selected.availableQuantity === 1 ? "part" : "parts"}`}</Button>}
                 {isOperationStealable(selected, query.data?.user ?? null) && <Button size="lg" variant="destructive" className="h-11" onClick={requestSteal} disabled={mutation.isPending}><TriangleAlert /> Steal {selected.workType === "CAM" ? "CAM task" : "production requirement"}</Button>}
                 {selectedAllocation.claimed > 0 && <Button size="lg" className="h-11 bg-emerald-600 hover:bg-emerald-700" onClick={() => requestQuantityAction("complete", selectedAllocation.claimed)} disabled={mutation.isPending}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <Check />} Mark complete</Button>}
+                {isPrintingOperation(selected) && selectedOtherClaimants.length > 0 && <Button size="lg" className="h-11 bg-emerald-600 hover:bg-emerald-700" onClick={() => requestQuantityAction("complete", selected.claimedQuantity, true)} disabled={mutation.isPending}><Check /> Complete all claimed prints</Button>}
                 {selectedAllocation.claimed > 0 && <Button variant="outline" onClick={() => requestQuantityAction("release", selectedAllocation.claimed)} disabled={mutation.isPending}><RotateCcw /> Release claim</Button>}
                 {selectedAllocation.completed > 0 && <Button variant="outline" onClick={() => requestQuantityAction("undo_complete", selectedAllocation.completed)} disabled={mutation.isPending}><RotateCcw /> Undo completion</Button>}
                 {selected.status === "Complete" && <div className="flex items-center justify-center gap-2 rounded-xl bg-emerald-50 p-3 text-sm font-semibold text-emerald-800"><Check className="size-4" /> {selected.workType === "CAM" ? "CAM completed" : `${selected.completedQuantity} of ${selected.taskQuantity} completed`} by {selected.machinist || "machinist"}</div>}
@@ -1607,13 +1689,20 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
               toast.error(`Enter a whole number from 1 to ${quantityDialog.max}`);
               return;
             }
-            runQuantityAction(quantityDialog.action, quantity);
+            runQuantityAction(quantityDialog.action, quantity, quantityLocation ?? undefined, quantityDialog.completeAllClaims);
           }}>
             <DialogHeader>
               <DialogTitle>{quantityDialog ? quantityActionCopy[quantityDialog.action].title : "Update quantity"}</DialogTitle>
-              <DialogDescription>Choose a whole number from 1 to {quantityDialog?.max ?? 1}. You can reverse this action afterward.</DialogDescription>
+              <DialogDescription>{quantityDialog?.completeAllClaims ? "Complete all claimed prints for this operation, including other users’ claims. Original work credit is preserved." : `Choose a whole number from 1 to ${quantityDialog?.max ?? 1}.`}</DialogDescription>
             </DialogHeader>
-            <div className="my-5"><label className="mb-1.5 block text-xs font-semibold" htmlFor="action-quantity">Number of parts</label><Input id="action-quantity" type="number" inputMode="numeric" min={1} max={quantityDialog?.max ?? 1} step={1} value={quantityDraft} onChange={(event) => setQuantityDraft(event.target.value)} autoFocus /></div>
+            <div className="my-5"><label className="mb-1.5 block text-xs font-semibold" htmlFor="action-quantity">Number of parts</label><Input id="action-quantity" type="number" inputMode="numeric" min={1} max={quantityDialog?.max ?? 1} step={1} value={quantityDraft} disabled={quantityDialog?.completeAllClaims || mutation.isPending} onChange={(event) => setQuantityDraft(event.target.value)} autoFocus /></div>
+            {selected?.workType === "Manufacturing" && (quantityDialog?.action === "complete" || quantityDialog?.action === "claim" && isPrintingOperation(selected)) && (
+              <div className="mb-5 space-y-2">
+                <p className="text-xs font-semibold">{quantityDialog.action === "claim" ? "Printer / part location" : "Move parts to"} <span className="font-normal text-muted-foreground">(optional)</span></p>
+                <StorageLocationSelect value={quantityLocation} onChange={setQuantityLocation} emptyLabel="Keep current location" disabled={mutation.isPending} />
+                <p className="text-xs text-muted-foreground">Current: {selected.storageLocation ?? "Not recorded"}. Location applies to all quantities of this part requirement.</p>
+              </div>
+            )}
             <DialogFooter><Button type="button" variant="outline" onClick={() => setQuantityDialog(null)}>Cancel</Button><Button type="submit" disabled={mutation.isPending}>{mutation.isPending && <LoaderCircle className="animate-spin" />}{quantityDialog ? quantityActionCopy[quantityDialog.action].button : "Save"}</Button></DialogFooter>
           </form>
         </DialogContent>
@@ -1694,6 +1783,30 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
         </DialogContent>
       </Dialog>
 
+      <Dialog open={bulkLocationDialogOpen} onOpenChange={(open) => { if (!bulkLocationMutation.isPending) setBulkLocationDialogOpen(open); }}>
+        <DialogContent>
+          <form onSubmit={(event) => {
+            event.preventDefault();
+            if (!bulkMoveLocation || selectedLocationOperations.length === 0 || bulkLocationMutation.isPending) return;
+            bulkLocationMutation.mutate({ selectedOperations: selectedLocationOperations, location: bulkMoveLocation });
+          }}>
+            <DialogHeader>
+              <DialogTitle>Bulk set location</DialogTitle>
+              <DialogDescription>Set one location for {selectedLocationRequirementCount} part {selectedLocationRequirementCount === 1 ? "requirement" : "requirements"} across {selectedLocationOperations.length} selected operations. Claim and completion status will stay the same.</DialogDescription>
+            </DialogHeader>
+            <div className="my-5 space-y-3">
+              <StorageLocationSelect value={bulkMoveLocation} onChange={setBulkMoveLocation} emptyLabel="Choose a location" disabled={bulkLocationMutation.isPending} allowOnRobot={selectedLocationOperations.length > 0 && selectedLocationOperations.every((operation) => canUseOnRobotLocation(operation.effectiveQcResult === "passed", operation.finishingComplete))} />
+              <p className="text-xs text-muted-foreground">Location applies to all quantities and operations of each selected part requirement.</p>
+              {selectedLocationOperations.some((operation) => !visibleOperationIds.has(operation.id)) && <p className="text-xs text-amber-700">Includes selected operations hidden by the current filters.</p>}
+            </div>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setBulkLocationDialogOpen(false)} disabled={bulkLocationMutation.isPending}>Cancel</Button>
+              <Button type="submit" disabled={!bulkMoveLocation || selectedLocationOperations.length === 0 || bulkLocationMutation.isPending}>{bulkLocationMutation.isPending ? <LoaderCircle className="animate-spin" /> : <MapPin />} Set location</Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={bulkActionDialogOpen} onOpenChange={setBulkActionDialogOpen}>
         <DialogContent>
           <form onSubmit={(event) => {
@@ -1705,9 +1818,12 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                 id: operation.id,
                 quantity,
                 workType: operation.workType,
+                printing: isPrintingOperation(operation),
+                completeAllClaims: bulkAction === "complete" && view === "all" && isPrintingOperation(operation),
               })),
               programPath: bulkCamProgramPath.trim(),
               notes: bulkCamNotes.trim(),
+              location: bulkLocation,
             });
           }}>
             <DialogHeader>
@@ -1715,13 +1831,21 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
               <DialogTitle>{bulkAction === "claim" ? "Claim" : "Complete"} {bulkItems.length} operations?</DialogTitle>
               <DialogDescription>{bulkAction === "claim"
                 ? "This claims every currently available work unit on the selected operations."
-                : "This marks all work you currently have claimed on the selected operations as complete."}</DialogDescription>
+                : bulkSharedPrintCount > 0 ? "This completes the selected work, including all users’ claims on selected 3D printing operations. Original work credit is preserved." : "This marks all work you currently have claimed on the selected operations as complete."}</DialogDescription>
             </DialogHeader>
             <div className="my-5 space-y-4">
               <div className="rounded-xl border bg-muted/30 p-3 text-sm">
                 <p className="font-semibold">{bulkWorkUnits} {bulkWorkUnits === 1 ? "work unit" : "work units"} total</p>
                 <p className="mt-1 text-muted-foreground">Across {bulkItems.length} selected {bulkItems.length === 1 ? "operation" : "operations"}.</p>
+                {hiddenBulkCount > 0 && <p className="mt-1 text-amber-700">Includes {hiddenBulkCount} selected operations hidden by the current filters.</p>}
               </div>
+              {bulkLocationCount > 0 && (
+                <div className="space-y-2">
+                  <p className="text-xs font-semibold">{bulkAction === "claim" ? "Printer / part location" : "Move completed parts to"} <span className="font-normal text-muted-foreground">(optional)</span></p>
+                  <StorageLocationSelect value={bulkLocation} onChange={setBulkLocation} emptyLabel="Keep current locations" disabled={bulkActionMutation.isPending} />
+                  <p className="text-xs text-muted-foreground">Applies to {bulkLocationCount} selected {bulkAction === "claim" ? "3D printing" : "manufacturing"} operations. Location is shared by all quantities of each part requirement.</p>
+                </div>
+              )}
               {bulkCamCount > 0 && (
                 <div className="space-y-4 rounded-xl border p-4">
                   <div>

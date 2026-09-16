@@ -154,6 +154,8 @@ export interface OperationQuantityPatch {
   quantity: number;
   programPath?: string;
   notes?: string;
+  location?: StorageLocation;
+  completeAllClaims?: boolean;
 }
 
 export interface OperationStealPatch {
