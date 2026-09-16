@@ -741,6 +741,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
   const queryClient = useQueryClient();
   const operationsGridRef = useRef<AgGridReact<ManufacturingOperation>>(null);
   const [view, setView] = useState<QueueView>("available");
+  const [showCompletedWork, setShowCompletedWork] = useState(false);
   const [workType, setWorkType] = useState<WorkTypeFilter>("all");
   const [machine, setMachine] = useState("all");
   const [locationFilter, setLocationFilter] = useState("all");
@@ -1085,11 +1086,11 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
       const allocation = allocationForUser(operation, query.data?.user ?? null);
       const claimable = isOperationClaimable(operation);
       if (view === "available" && !claimable && !isOperationStealable(operation, query.data?.user ?? null)) return false;
-      if (view === "mine" && allocation.claimed === 0) return false;
+      if (view === "mine" && allocation.claimed === 0 && !(showCompletedWork && allocation.completed > 0)) return false;
       if (term && ![operation.partNumber, operation.revision, operation.partName, operation.documentName, operation.material, operation.machine, operation.operationNumber, operation.workType, operation.camProgramPath, operation.storageLocation, operation.qualityNotes, operation.lastQualityFailure?.notes].join(" ").toLowerCase().includes(term)) return false;
       return true;
     });
-  }, [machine, locationFilter, operations, query.data?.user, search, sourceDocument, view, workType]);
+  }, [machine, locationFilter, operations, query.data?.user, search, sourceDocument, view, workType, showCompletedWork]);
 
   const bulkItems = useMemo(() => operations.flatMap((operation) => {
     if (!bulkSelectedIds.includes(operation.id)) return [];
@@ -1411,15 +1412,32 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
 
         <div className="overflow-hidden rounded-2xl border bg-card shadow-[0_14px_42px_rgba(15,23,42,.055)]">
           <div className="border-b bg-muted/25 p-3 md:p-4">
-            <div className="flex flex-col gap-3 xl:flex-row xl:flex-wrap xl:items-center">
-              <div className="flex w-full overflow-x-auto rounded-lg bg-muted p-1 xl:w-auto">
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex w-full overflow-x-auto rounded-lg bg-muted p-1 sm:w-auto">
                 {([{ id: "available", label: "Available" }, { id: "mine", label: "My work" }, { id: "all", label: "All operations" }] as const).map((item) => (
                   <Button key={item.id} size="sm" variant="ghost" onClick={() => changeQueueView(item.id)} className={cn("min-w-fit", view === item.id && "bg-card text-foreground shadow-sm hover:bg-card")}>
                     {item.label}{item.id === "available" && <span className="ml-1 rounded bg-emerald-100 px-1.5 text-[10px] font-bold text-emerald-800">{stats.ready}</span>}
                   </Button>
                 ))}
               </div>
-              <div className="relative min-w-0 flex-1">
+              {view === "mine" && (
+                <label className="flex min-h-9 cursor-pointer items-center gap-2 text-xs font-medium" htmlFor="show-completed-work">
+                  <button
+                    id="show-completed-work"
+                    type="button"
+                    role="switch"
+                    aria-checked={showCompletedWork}
+                    aria-label="Show completed work"
+                    onClick={() => setShowCompletedWork((current) => !current)}
+                    className={cn("inline-flex h-5 w-9 shrink-0 items-center rounded-full p-0.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2", showCompletedWork ? "bg-primary" : "bg-muted-foreground/35")}
+                  >
+                    <span aria-hidden="true" className={cn("size-4 rounded-full bg-white shadow-sm transition-transform", showCompletedWork ? "translate-x-4" : "translate-x-0")} />
+                  </button>
+                  Show completed work
+                </label>
+              )}
+              <div className="order-2 grid w-full basis-full grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(15rem,1fr)_12rem_14rem_14rem_13rem]">
+              <div className="relative min-w-0 sm:col-span-2 xl:col-span-1">
                 <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
                 <Input value={search} onChange={(event) => setSearch(event.target.value)} className="h-9 bg-card pl-9" placeholder="Search part, revision, assembly, operation…" />
               </div>
@@ -1442,10 +1460,11 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                   setWorkType("Manufacturing");
                 }
               }}>
-                <SelectTrigger aria-label="Filter by part location" className="h-9 w-full bg-card xl:w-52"><SelectValue>{locationFilter === "all" ? "All locations" : locationFilter === "missing" ? "Not recorded" : locationFilter}</SelectValue></SelectTrigger>
+                <SelectTrigger aria-label="Filter by part location" className="h-9 w-full bg-card xl:w-52"><MapPin className="text-muted-foreground" /><SelectValue>{locationFilter === "all" ? "All locations" : locationFilter === "missing" ? "Not recorded" : locationFilter}</SelectValue></SelectTrigger>
                 <SelectContent><SelectItem value="all">All locations</SelectItem><SelectItem value="missing">Not recorded</SelectItem>{[...PRINTER_LOCATIONS, ...STORAGE_LOCATIONS.filter((location) => !(PRINTER_LOCATIONS as readonly string[]).includes(location))].map((location) => <SelectItem key={location} value={location}>{location}</SelectItem>)}</SelectContent>
               </Select>
-              <div className="flex items-center justify-between gap-3 xl:justify-end">
+              </div>
+              <div className="order-1 flex w-full items-center justify-between gap-3 sm:ml-auto sm:w-auto">
                 <div className="flex items-center gap-2 whitespace-nowrap text-xs text-muted-foreground"><SlidersHorizontal className="size-3.5" /> {filtered.length} shown</div>
                 <div className="flex items-center gap-1">
                 <Button size="sm" onClick={requestBulkAction} disabled={bulkItems.length === 0 || !bulkAction || hasLocationOnlySelection || bulkActionMutation.isPending || bulkLocationMutation.isPending} title={hasLocationOnlySelection ? "Some selected operations can only have their location updated" : hasMixedBulkActions ? "Select only claimable work or only work assigned to you" : undefined}>
