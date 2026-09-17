@@ -1,3 +1,4 @@
+import { requirementIdentity } from "./identity.ts";
 // Pure projections from normalized manufacturing rows and the Supabase attachment catalog.
 import { deduplicateOperations, requiresPassedQc } from "../manufacturing-workflow.ts";
 import type { ManufacturingOperation, FabricationJob, OperationWorkType, OperationStatus, OperationAllocation } from "../types.ts";
@@ -24,12 +25,6 @@ function linkedId(value: unknown): number | null {
     : null;
 }
 
-function linkedValue(value: unknown): string {
-  return Array.isArray(value) && value[0] && typeof value[0] === "object" && "value" in value[0]
-    ? String((value[0] as { value: unknown }).value ?? "")
-    : "";
-}
-
 function attachmentIndex(attachments: ManufacturingAttachment[]) {
   const index = new Map<string, ManufacturingAttachment>();
   for (const attachment of [...attachments].sort((a, b) => a.position - b.position)) {
@@ -50,44 +45,16 @@ function textValue(value: unknown): string {
 function sourceDocumentName(requirement: SourceRow | undefined): string | null {
   if (!requirement) return null;
   return textValue(requirement["Source Document"])
-    || textValue(requirement["Onshape Document"])
     || null;
 }
 
 function revisionName(requirement: SourceRow | undefined, part: SourceRow | undefined): string | null {
-  for (const value of [requirement?.["Required Part Revision"], part?.Revision, requirement?.Revision]) {
+  for (const value of [requirement?.["Required Part Revision"], part?.Revision]) {
     if (typeof value === "number") return String(value);
     const revision = textValue(value) || selectValue(value);
     if (revision) return revision;
   }
   return null;
-}
-
-function parseRequirement(display: string) {
-  const match = display.match(/^(.+?)\s+—\s+(.+?)\s+\[([^\]]+)]$/);
-  return {
-    partNumber: match?.[1] ?? display.split(" ")[0] ?? "Unknown",
-    partName: match?.[2] ?? display,
-    assemblyNumber: match?.[3] ?? "Unassigned",
-  };
-}
-
-// Baserow lookup labels in source_row are migration history, not live joins.
-// Native Supabase rows have no such labels at all.
-function requirementIdentity(
-  requirement: SourceRow | undefined,
-  part: SourceRow | undefined,
-  assembly: SourceRow | undefined,
-  legacyDisplay: string,
-) {
-  const legacy = parseRequirement(legacyDisplay);
-  const partNumber = part ? textValue(part["Part Number"]) : linkedValue(requirement?.Part) || legacy.partNumber;
-  return {
-    partNumber,
-    partName: part ? textValue(part.Name) || partNumber : legacy.partName,
-    assemblyNumber: assembly ? textValue(assembly["Assembly Number"])
-      : linkedValue(requirement?.Assembly) || legacy.assemblyNumber,
-  };
 }
 
 function parseQuantityLedger(value: unknown): OperationAllocation[] {
@@ -161,7 +128,7 @@ export function projectOperations(operationRows: SourceRow[], requirementRows: S
     const partId = linkedId(requirement?.Part);
     const part = partId ? parts.get(partId) : undefined;
     const parsed = requirementIdentity(requirement, part,
-      assemblies.get(linkedId(requirement?.Assembly) ?? -1), linkedValue(row["Production Requirement"]));
+      assemblies.get(linkedId(requirement?.Assembly) ?? -1));
     const operationNumber = selectValue(row["Operation Number"], "OP1") as ManufacturingOperation["operationNumber"];
     const machine = selectValue(row.Machine, "Unassigned");
     const rawStoredStatus = selectValue(row.Status, "Planned");
@@ -224,7 +191,7 @@ export function projectOperations(operationRows: SourceRow[], requirementRows: S
       camProgramPath: textValue(row["CAM Program Path"]) || null,
       camNotes: textValue(row["CAM Notes"]),
       camDependency: null,
-      drawingUrl: part ? textValue(part["Onshape Drawing"]) || null : linkedValue(requirement?.Drawing) || null,
+      drawingUrl: part ? textValue(part["Onshape Drawing"]) || null : null,
       hasDrawingPdf: Boolean(drawingPdf),
       drawingPdfName: drawingPdf?.originalName ?? null,
       hasStepFile: Boolean(stepFile),
@@ -287,7 +254,7 @@ export function projectFinishing(
 
     const part = parts.get(linkedId(requirement.Part) ?? -1);
     const parsed = requirementIdentity(requirement, part,
-      assemblies.get(linkedId(requirement.Assembly) ?? -1), linkedValue(row["Production Requirement"]));
+      assemblies.get(linkedId(requirement.Assembly) ?? -1));
     const machinist = String(row.Machinist ?? "").trim();
     const requirementStatus = selectValue(requirement.Status, "Needs Triage");
     const finishingCompleteBeforePostQcWork = requirementsWithPostQcWork.has(requirementId)
@@ -311,7 +278,7 @@ export function projectFinishing(
       machinist,
       active: Boolean(row.Active),
       lastSyncedAt: row["Last Synced At"] ? String(row["Last Synced At"]) : null,
-      drawingUrl: part ? textValue(part["Onshape Drawing"]) || null : linkedValue(requirement.Drawing) || null,
+      drawingUrl: part ? textValue(part["Onshape Drawing"]) || null : null,
       hasDrawingPdf: Boolean(drawingPdf),
       drawingPdfName: drawingPdf?.originalName ?? null,
       hasStepFile: Boolean(stepFile),

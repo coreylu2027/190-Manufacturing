@@ -1,0 +1,115 @@
+name: Release merged pull requests
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - closed
+
+permissions:
+  contents: write
+  pull-requests: read
+
+# Releases must be serialized so two PRs merged close together cannot calculate
+# the same next patch version.
+concurrency:
+  group: main-releases
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out main and release tags
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Calculate the next v2 patch version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch --force --tags
+          previous_tag="$(git tag --merged HEAD --list 'v2.*' --sort=-version:refname | head -n 1)"
+
+          if [[ -z "$previous_tag" ]]; then
+            next_tag="v2.0.0"
+          elif [[ "$previous_tag" =~ ^v2\.([0-9]+)\.([0-9]+)$ ]]; then
+            next_tag="v2.${BASH_REMATCH[1]}.$((BASH_REMATCH[2] + 1))"
+          else
+            echo "Latest v2 tag '$previous_tag' does not use v2.x.x." >&2
+            exit 1
+          fi
+
+          if git rev-parse --verify --quiet "refs/tags/$next_tag"; then
+            echo "Refusing to overwrite existing tag $next_tag." >&2
+            exit 1
+          fi
+
+          {
+            echo "previous_tag=$previous_tag"
+            echo "next_tag=$next_tag"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Write commit-level changelog
+        env:
+          PREVIOUS_TAG: ${{ steps.version.outputs.previous_tag }}
+          RELEASE_TAG: ${{ steps.version.outputs.next_tag }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          range="HEAD"
+          if [[ -n "$PREVIOUS_TAG" ]]; then
+            range="$PREVIOUS_TAG..HEAD"
+          fi
+
+          {
+            echo "# $RELEASE_TAG"
+            echo
+            echo "Release for pull request #$PR_NUMBER. This changelog is derived from the commits included since the previous v2 release."
+            echo
+            echo "## Commit details"
+            echo
+          } > RELEASE_NOTES.md
+
+          commit_count=0
+          while IFS= read -r -d $'\x1e' entry; do
+            sha="${entry%%$'\x1f'*}"
+            remainder="${entry#*$'\x1f'}"
+            subject="${remainder%%$'\x1f'*}"
+            body="${remainder#*$'\x1f'}"
+
+            printf -- '- %s ([`%s`](https://github.com/%s/commit/%s))\n' \
+              "$subject" "${sha:0:7}" "$REPOSITORY" "$sha" >> RELEASE_NOTES.md
+            if [[ -n "$body" ]]; then
+              printf '%s\n' "$body" | sed 's/^/  /' >> RELEASE_NOTES.md
+            fi
+            printf '\n' >> RELEASE_NOTES.md
+            ((commit_count += 1))
+          done < <(git log --reverse --format='%H%x1f%s%x1f%b%x1e' "$range")
+
+          if [[ "$commit_count" -eq 0 ]]; then
+            echo "- No commits found since the prior v2 release." >> RELEASE_NOTES.md
+          fi
+
+      - name: Create the tag and GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.next_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" \
+            --target "$GITHUB_SHA" \
+            --title "$RELEASE_TAG" \
+            --notes-file RELEASE_NOTES.md

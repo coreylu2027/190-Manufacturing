@@ -1,4 +1,4 @@
-import { ENTITIES, denormalizeRow, type ManufacturingAttachment, type NormalizedRow, type RawRow } from "./model.ts";
+import { ENTITIES, runtimeRow, type ManufacturingAttachment, type NormalizedRow, type RawRow } from "./model.ts";
 import { projectOperations, projectFinishing } from "./projections.ts";
 export interface AdapterConfig { url: string; serviceKey: string; fetch?: typeof fetch }
 export type ManufacturingRows = Record<string, RawRow[]>;
@@ -87,7 +87,7 @@ export function createSupabaseManufacturingAdapter(config: AdapterConfig) {
     for (let index = 0; index < entities.length; index += READ_CONCURRENCY) {
       const batch = await Promise.all(entities.slice(index, index + READ_CONCURRENCY).map(async entity => [entity.name,
         (await readEntity(entity.name)).map(row => {
-          const raw = denormalizeRow(entity, row);
+          const raw = runtimeRow(entity, row);
           return entity.name === "requirements" ? {
             ...raw,
             "Part Location": row.part_location ?? null,

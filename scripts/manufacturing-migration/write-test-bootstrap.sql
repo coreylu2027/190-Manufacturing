@@ -80,6 +80,8 @@ insert into manufacturing.operation_allocations (
   (-193, 0, 'legacy', 'Legacy', 0, 1, '{}');
 
 \ir ../../supabase/production/20260909_qc_rejected_quantities.sql
+\ir ../../supabase/migrations/20260916162511_printer_locations.sql
+\ir ../../supabase/production/20260916_operation_locations.sql
 
 do $$
 begin

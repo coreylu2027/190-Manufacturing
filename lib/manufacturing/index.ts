@@ -31,7 +31,7 @@ export async function getManufacturingSnapshot() {
   return reader().readSnapshot();
 }
 
-export async function applyQuantityAction(id: number, action: OperationQuantityAction, quantity: number, actor: Actor, handoff?: { programPath?: string; notes?: string }) {
+export async function applyQuantityAction(id: number, action: OperationQuantityAction, quantity: number, actor: Actor, handoff?: { programPath?: string; notes?: string; location?: StorageLocation; completeAllClaims?: boolean }) {
   return writer().applyQuantityAction(id, action, quantity, actor, handoff);
 }
 
@@ -82,8 +82,8 @@ export async function previewForceQuality(requirementId: number) {
   return writer().previewForceQuality(requirementId);
 }
 
-export async function forceQualityReview(requirementId: number, notes: string, token: string, actor: Actor) {
-  return writer().forceQualityReview(requirementId, notes, token, actor);
+export async function forceQualityReview(requirementId: number, notes: string, token: string, actor: Actor, result: "passed" | "failed" = "passed") {
+  return writer().forceQualityReview(requirementId, notes, token, actor, result);
 }
 
 export const updateQualityLocation = updatePartLocation;

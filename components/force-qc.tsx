@@ -46,16 +46,16 @@ export function ForceQcButton({ requirementId, label, storageLocation, locationU
     } catch (error) { setError(error instanceof Error ? error.message : "Unable to preview Force QC"); }
     finally { setBusy(false); }
   }
-  async function submit() {
+  async function submit(result: "passed" | "failed") {
     if (!preview) return;
     setBusy(true); setError("");
     try {
       const response = await fetch(`/api/admin/qc/${requirementId}/force`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ notes, token: preview.token }),
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ notes, token: preview.token, result }),
       });
       const body = await response.json();
       if (!response.ok) { if (response.status === 409) setStale(true); throw new Error(body.error ?? "Unable to force QC"); }
-      toast.success(`QC passed · ${preview.nextDestination}`);
+      toast.success(result === "passed" ? `QC passed · ${preview.nextDestination}` : "QC failed · Returned to manufacturing");
       setOpen(false);
       for (const key of ["production", "operations", "qc", "admin", "fabrication"]) void client.invalidateQueries({ queryKey: [key] });
     } catch (error) { setError(error instanceof Error ? error.message : "Unable to force QC"); }
@@ -72,7 +72,7 @@ export function ForceQcButton({ requirementId, label, storageLocation, locationU
     </Button>
     <Dialog open={open} onOpenChange={value => { if (!busy) setOpen(value); }}>
       <DialogContent forceBackdrop className="max-h-[90vh] overflow-y-auto sm:max-w-xl">
-        <DialogHeader><DialogTitle>Force QC · {label}</DialogTitle><DialogDescription>Complete unfinished prerequisites and pass QC for the entire production requirement.</DialogDescription></DialogHeader>
+        <DialogHeader><DialogTitle>Force QC · {label}</DialogTitle><DialogDescription>Complete unfinished prerequisites and pass or fail QC for the entire production requirement.</DialogDescription></DialogHeader>
         {busy && !preview && <p role="status">Loading affected work…</p>}
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
         <StorageLocationEditor
@@ -83,13 +83,13 @@ export function ForceQcButton({ requirementId, label, storageLocation, locationU
           canEdit
         />
         {preview && <>
-          <p className="text-sm"><ExpandableText text={preview.productionKey} /> · Qty {preview.quantity} · Next: <strong>{preview.nextDestination}</strong></p>
+          <p className="text-sm"><ExpandableText text={preview.productionKey} /> · Qty {preview.quantity} · On pass: <strong>{preview.nextDestination}</strong> · On fail: <strong>Return to manufacturing</strong></p>
           <ul className="space-y-2 text-sm">{preview.operations.map(op => <li key={op.id}>{op.operationNumber} · {op.workType} · {op.machine || "CAM"}: {op.previousStatus} → Complete ({op.quantity} {op.workType === "CAM" ? "task(s)" : "part(s)"})</li>)}</ul>
-          <p className="text-xs text-muted-foreground">Outstanding claims on this work will be cleared. Newly completed quantities will be credited to you; existing completed-work credit is preserved.</p>
+          <p className="text-xs text-muted-foreground">Outstanding claims on this work will be cleared. Passing credits newly completed quantities to you and preserves existing completed-work credit. Failing rejects the entire batch and resets pre-QC manufacturing quantities for rework.</p>
           <label className="text-sm font-medium">Inspection notes<textarea value={notes} onChange={event => setNotes(event.target.value)} className="mt-2 min-h-40 w-full rounded-md border bg-background p-3 font-normal" disabled={busy} /></label>
           <p className="text-xs text-muted-foreground">{notes.trim().length}/2000 characters. The prefilled note is fully editable.</p>
         </>}
-        <DialogFooter>
+        <DialogFooter className="sm:flex-wrap">
           <Button variant="outline" disabled={busy} onClick={() => setOpen(false)}>Cancel</Button>
           {(stale || !preview && !busy) && <Button variant="outline" disabled={busy} onClick={() => void load(true)}>Refresh preview</Button>}
           <Button
@@ -97,7 +97,16 @@ export function ForceQcButton({ requirementId, label, storageLocation, locationU
             variant="destructive"
             className="h-11"
             disabled={busy || !preview || stale || notes.trim().length > 2000}
-            onClick={() => void submit()}
+            onClick={() => void submit("failed")}
+          >
+            <AlertTriangle /> {busy && preview ? "Saving…" : "Force complete & fail QC"}
+          </Button>
+          <Button
+            size="lg"
+            variant="destructive"
+            className="h-11"
+            disabled={busy || !preview || stale || notes.trim().length > 2000}
+            onClick={() => void submit("passed")}
           >
             <AlertTriangle /> {busy && preview ? "Saving…" : "Force complete & pass QC"}
           </Button>
@@ -134,7 +143,7 @@ export function ForceQcPicker() {
       <DialogContent className="flex h-[min(42rem,calc(100dvh-2rem))] flex-col sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>Force QC for unfinished parts</DialogTitle>
-          <DialogDescription>Select a production requirement whose prerequisite work should be force-completed before QC passes.</DialogDescription>
+          <DialogDescription>Select a production requirement whose prerequisite work should be force-completed before passing or failing QC.</DialogDescription>
         </DialogHeader>
         <label className="text-sm font-medium">
           Find a part
@@ -149,7 +158,7 @@ export function ForceQcPicker() {
           {candidates.map(([id, operations]) => <div key={id} className="flex items-center justify-between gap-3 rounded-lg border p-3"><div className="min-w-0 text-sm"><p className="truncate font-semibold">{operations[0].partNumber} · {operations[0].partName}</p><p className="text-xs text-muted-foreground"><ExpandableText text={operations[0].requirementKey ?? "Not synced"} maxLength={80} /> · Qty {operations[0].quantity}</p></div><ForceQcButton requirementId={id} label={operations[0].partNumber} storageLocation={operations[0].storageLocation} locationUpdatedBy={operations[0].locationUpdatedBy} locationUpdatedAt={operations[0].locationUpdatedAt} /></div>)}
           {!query.isLoading && !query.isError && !candidates.length && <p className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">No matching unfinished parts.</p>}
         </div>
-        <DialogFooter><Button variant="outline" onClick={() => setOpen(false)}>Close</Button></DialogFooter>
+        <DialogFooter className="sm:flex-wrap"><Button variant="outline" onClick={() => setOpen(false)}>Close</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   </>;

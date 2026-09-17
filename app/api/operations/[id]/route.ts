@@ -8,6 +8,7 @@ import { isShopName } from "@/lib/profile-name";
 import { scheduleSlackManufacturingEvent } from "@/lib/slack-notifications";
 import { OPERATION_STATUSES } from "@/lib/types";
 import { ManufacturingWriteError } from "@/lib/manufacturing/write-adapter";
+import { storageLocationSchema } from "@/lib/storage-locations";
 
 const patchSchema = z.object({
   status: z.enum(OPERATION_STATUSES).optional(),
@@ -19,7 +20,15 @@ const quantityActionSchema = z.object({
   quantity: z.number().int().positive(),
   programPath: z.string().trim().max(1024).optional(),
   notes: z.string().trim().max(5000).optional(),
+  location: storageLocationSchema.optional(),
+  completeAllClaims: z.boolean().optional(),
 }).superRefine((value, context) => {
+  if (value.location !== undefined && !["claim", "complete"].includes(value.action)) {
+    context.addIssue({ code: "custom", message: "Location is only accepted when claiming or completing work" });
+  }
+  if (value.completeAllClaims && value.action !== "complete") {
+    context.addIssue({ code: "custom", message: "Shared print completion requires a completion action" });
+  }
   if (value.action !== "complete" && (value.programPath !== undefined || value.notes !== undefined)) {
     context.addIssue({ code: "custom", message: "CAM handoff details are only accepted when completing work" });
   }
@@ -145,6 +154,8 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
         }, {
           programPath: parsed.data.programPath,
           notes: parsed.data.notes,
+          location: parsed.data.location,
+          completeAllClaims: parsed.data.completeAllClaims,
         });
       const { notificationContext, ...updated } = result;
       const eventType = {
@@ -201,7 +212,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     return NextResponse.json({ updated });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to update operation";
-    const status = error instanceof ManufacturingWriteError ? error.status : message.includes("cannot be reopened") ? 409
+    const status = error instanceof ManufacturingWriteError ? error.status : message.includes("cannot be reopened") || message.includes("print claims changed") ? 409
       : message.includes("single task") ? 400
         : 502;
     return NextResponse.json({ error: message }, { status });

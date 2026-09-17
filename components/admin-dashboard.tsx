@@ -22,14 +22,14 @@ interface AdminUserGridRow extends AdminUserSummary {
 }
 
 const gridTheme = themeQuartz.withParams({
-  accentColor: "#3159c6",
-  backgroundColor: "#ffffff",
-  borderColor: "#dce2ec",
-  foregroundColor: "#172033",
-  headerBackgroundColor: "#f7f9fc",
-  headerTextColor: "#697386",
-  rowHoverColor: "#f4f7fb",
-  selectedRowBackgroundColor: "#eaf0ff",
+  accentColor: "var(--primary)",
+  backgroundColor: "var(--card)",
+  borderColor: "var(--border)",
+  foregroundColor: "var(--foreground)",
+  headerBackgroundColor: "var(--muted)",
+  headerTextColor: "var(--muted-foreground)",
+  rowHoverColor: "var(--muted)",
+  selectedRowBackgroundColor: "var(--accent)",
   fontFamily: "var(--font-geist-sans), ui-sans-serif",
   fontSize: 13,
   headerFontSize: 11,
