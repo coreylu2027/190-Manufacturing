@@ -93,6 +93,7 @@ import {
 } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { mergeVisibleSelection, settleSequentially } from "@/lib/bulk-selection";
+import { safeManufacturingFileName } from "@/lib/manufacturing/file-names";
 import { nextWorkflowAction } from "@/lib/manufacturing-workflow";
 import { isShopName } from "@/lib/profile-name";
 import { createClient } from "@/lib/supabase/client";
@@ -309,6 +310,38 @@ function isOperationStealable(operation: ManufacturingOperation, user: Operation
 
 function isOperationClaimable(operation: ManufacturingOperation) {
   return ["Ready", "In Progress"].includes(operation.status) && operation.availableQuantity > 0;
+}
+
+/** Keeps every file in a bulk download distinct, since parts can share a STEP file name. */
+function uniqueStepFileName(operation: ManufacturingOperation, used: Set<string>) {
+  const name = safeManufacturingFileName(operation.stepName ?? "", `${operation.partNumber}.step`);
+  if (!used.has(name)) {
+    used.add(name);
+    return name;
+  }
+  const dot = name.lastIndexOf(".");
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const extension = dot > 0 ? name.slice(dot) : "";
+  for (let suffix = 2; ; suffix += 1) {
+    const candidate = `${stem} (${suffix})${extension}`;
+    if (!used.has(candidate)) {
+      used.add(candidate);
+      return candidate;
+    }
+  }
+}
+
+function saveBlobAs(blob: Blob, fileName: string) {
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = fileName;
+  anchor.rel = "noreferrer";
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  // Revoking immediately cancels the download in some browsers.
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
 }
 
 type BulkAction = Extract<OperationQuantityAction, "claim" | "complete">;
@@ -754,6 +787,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
   const [bulkLocation, setBulkLocation] = useState<StorageLocation | null>(null);
   const [bulkLocationDialogOpen, setBulkLocationDialogOpen] = useState(false);
   const [bulkMoveLocation, setBulkMoveLocation] = useState<StorageLocation | null>(null);
+  const [bulkReleaseDialogOpen, setBulkReleaseDialogOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [quantityDialog, setQuantityDialog] = useState<{ action: OperationQuantityAction; max: number; completeAllClaims?: boolean } | null>(null);
   const [quantityLocation, setQuantityLocation] = useState<StorageLocation | null>(null);
@@ -1020,6 +1054,64 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
     onSettled: refreshManufacturingData,
   });
 
+  const bulkReleaseMutation = useMutation({
+    mutationFn: async (items: { operation: ManufacturingOperation; quantity: number }[]) => {
+      const results = await settleSequentially(items, async ({ operation, quantity }) => {
+        const response = await fetch(`/api/operations/${operation.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "release", quantity }),
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(body.error ?? `Unable to release ${operation.partNumber}`);
+        return { id: operation.id, quantity, updated: body.updated as Partial<ManufacturingOperation> | undefined };
+      });
+      const succeeded = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+      const failures = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
+      if (succeeded.length === 0) throw new Error(failures[0] instanceof Error ? failures[0].message : "No claims were released");
+      return { succeeded, failed: failures.length };
+    },
+    onSuccess: ({ succeeded, failed }) => {
+      const updates = new Map(succeeded.map(({ id, updated }) => [id, updated]));
+      queryClient.setQueryData<OperationsResponse>(["operations"], (current) => current ? {
+        ...current,
+        operations: current.operations.map((operation) => updates.has(operation.id) ? { ...operation, ...updates.get(operation.id) } : operation),
+      } : current);
+      const workUnits = succeeded.reduce((total, result) => total + result.quantity, 0);
+      if (failed) toast.warning(`Released ${workUnits} ${workUnits === 1 ? "work unit" : "work units"} across ${succeeded.length} operations; ${failed} failed and remain selected.`);
+      else toast.success(`Released ${workUnits} ${workUnits === 1 ? "work unit" : "work units"} across ${succeeded.length} ${succeeded.length === 1 ? "operation" : "operations"}.`);
+      setBulkSelectedIds((ids) => ids.filter((id) => !updates.has(id)));
+      setBulkReleaseDialogOpen(false);
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to release the selected claims"),
+    onSettled: refreshManufacturingData,
+  });
+
+  const bulkStepDownloadMutation = useMutation({
+    mutationFn: async (stepOperations: ManufacturingOperation[]) => {
+      if (stepOperations.length === 0) throw new Error("None of the selected operations have a STEP file");
+      const usedNames = new Set<string>();
+      const results = await settleSequentially(stepOperations, async (operation) => {
+        const response = await fetch(`/api/operations/${operation.id}/files/step`, {
+          credentials: "same-origin",
+          redirect: "follow",
+        });
+        if (!response.ok) throw new Error(`Unable to download the STEP file for ${operation.partNumber}`);
+        saveBlobAs(await response.blob(), uniqueStepFileName(operation, usedNames));
+        return operation.id;
+      });
+      const succeeded = results.filter((result) => result.status === "fulfilled").length;
+      const failures = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
+      if (succeeded === 0) throw new Error(failures[0] instanceof Error ? failures[0].message : "No STEP files were downloaded");
+      return { succeeded, failed: failures.length };
+    },
+    onSuccess: ({ succeeded, failed }) => {
+      if (failed) toast.warning(`Downloaded ${succeeded} STEP ${succeeded === 1 ? "file" : "files"}; ${failed} failed.`);
+      else toast.success(`Downloaded ${succeeded} STEP ${succeeded === 1 ? "file" : "files"}`);
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to download the STEP files"),
+  });
+
   const camHandoffMutation = useMutation({
     mutationFn: async ({ id, patch }: { id: number; patch: CamHandoffPatch }) => {
       const response = await fetch(`/api/operations/${id}`, {
@@ -1100,6 +1192,19 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
   const selectedBulkOperations = operations.filter((operation) => bulkSelectedIds.includes(operation.id));
   const selectedLocationOperations = selectedBulkOperations.filter((operation) => operation.requirementId !== null);
   const selectedLocationRequirementCount = new Set(selectedLocationOperations.map((operation) => operation.requirementId)).size;
+  const selectedReleaseItems = selectedBulkOperations.flatMap((operation) => {
+    const { claimed } = allocationForUser(operation, query.data?.user ?? null);
+    return claimed > 0 ? [{ operation, quantity: claimed }] : [];
+  });
+  const selectedReleaseQuantity = selectedReleaseItems.reduce((total, item) => total + item.quantity, 0);
+  const selectedStepOperations = (() => {
+    const seen = new Set<number>();
+    return selectedBulkOperations.flatMap((operation) => {
+      if (!operation.hasStepFile || operation.requirementId === null || seen.has(operation.requirementId)) return [];
+      seen.add(operation.requirementId);
+      return [operation];
+    });
+  })();
   const hasLocationOnlySelection = selectedBulkOperations.length !== bulkItems.length;
   const selectedBulkActions = new Set(bulkItems.map((item) => item.action));
   const bulkAction = selectedBulkActions.size === 1 ? [...selectedBulkActions][0] : null;
@@ -1467,11 +1572,11 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
               <div className="order-1 flex w-full items-center justify-between gap-3 sm:ml-auto sm:w-auto">
                 <div className="flex items-center gap-2 whitespace-nowrap text-xs text-muted-foreground"><SlidersHorizontal className="size-3.5" /> {filtered.length} shown</div>
                 <div className="flex items-center gap-1">
-                <Button size="sm" onClick={requestBulkAction} disabled={bulkItems.length === 0 || !bulkAction || hasLocationOnlySelection || bulkActionMutation.isPending || bulkLocationMutation.isPending} title={hasLocationOnlySelection ? "Some selected operations can only have their location updated" : hasMixedBulkActions ? "Select only claimable work or only work assigned to you" : undefined}>
+                <Button size="sm" onClick={requestBulkAction} disabled={bulkItems.length === 0 || !bulkAction || hasLocationOnlySelection || bulkActionMutation.isPending || bulkLocationMutation.isPending || bulkReleaseMutation.isPending} title={hasLocationOnlySelection ? "Some selected operations can only have their location updated" : hasMixedBulkActions ? "Select only claimable work or only work assigned to you" : undefined}>
                   {bulkActionMutation.isPending ? <LoaderCircle className="animate-spin" /> : <ListChecks />} {bulkButtonLabel}{bulkItems.length > 0 ? ` (${bulkItems.length})` : ""}
                 </Button>
                 <DropdownMenu>
-                  <DropdownMenuTrigger render={<Button size="sm" variant="outline" className="w-8 px-0" aria-label="More bulk actions" disabled={bulkActionMutation.isPending || bulkLocationMutation.isPending} />}>
+                  <DropdownMenuTrigger render={<Button size="sm" variant="outline" className="w-8 px-0" aria-label="More bulk actions" disabled={bulkActionMutation.isPending || bulkLocationMutation.isPending || bulkReleaseMutation.isPending || bulkStepDownloadMutation.isPending} />}>
                     <ChevronDown className="size-4" />
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end" className="w-52">
@@ -1479,6 +1584,16 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                       setBulkMoveLocation(null);
                       setBulkLocationDialogOpen(true);
                     }}><MapPin /> Bulk set location{selectedLocationRequirementCount > 0 ? ` (${selectedLocationRequirementCount})` : ""}</DropdownMenuItem>
+                    <DropdownMenuItem
+                      disabled={selectedReleaseItems.length === 0 || !query.data?.user?.approved}
+                      onClick={() => setBulkReleaseDialogOpen(true)}
+                    ><RotateCcw /> Bulk release claim{selectedReleaseItems.length > 0 ? ` (${selectedReleaseItems.length})` : ""}</DropdownMenuItem>
+                    <DropdownMenuItem
+                      disabled={selectedStepOperations.length === 0 || !query.data?.user?.approved || bulkStepDownloadMutation.isPending}
+                      onClick={() => bulkStepDownloadMutation.mutate(selectedStepOperations)}
+                    >
+                      {bulkStepDownloadMutation.isPending ? <LoaderCircle className="animate-spin" /> : <Download />} Bulk download STEP{selectedStepOperations.length > 0 ? ` (${selectedStepOperations.length})` : ""}
+                    </DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
                 </div>
@@ -1797,6 +1912,30 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
               disabled={!selected || mutation.isPending}
             >
               {mutation.isPending && <LoaderCircle className="animate-spin" />} Yes, steal requirement
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={bulkReleaseDialogOpen} onOpenChange={(open) => { if (!bulkReleaseMutation.isPending) setBulkReleaseDialogOpen(open); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Release {selectedReleaseQuantity} claimed {selectedReleaseQuantity === 1 ? "part" : "parts"}?</DialogTitle>
+            <DialogDescription>
+              This returns your claim on {selectedReleaseItems.length} selected {selectedReleaseItems.length === 1 ? "operation" : "operations"} to the available queue. Completed work is not affected, and you can claim the parts again.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="my-2 space-y-2">
+            <p className="text-xs text-muted-foreground">Only work you have claimed is released; other machinists&rsquo; claims on the same operations stay untouched.</p>
+            {selectedReleaseItems.some(({ operation }) => !visibleOperationIds.has(operation.id)) && <p className="text-xs text-amber-700">Includes selected operations hidden by the current filters.</p>}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBulkReleaseDialogOpen(false)} disabled={bulkReleaseMutation.isPending}>Cancel</Button>
+            <Button
+              onClick={() => bulkReleaseMutation.mutate(selectedReleaseItems)}
+              disabled={selectedReleaseItems.length === 0 || bulkReleaseMutation.isPending}
+            >
+              {bulkReleaseMutation.isPending ? <LoaderCircle className="animate-spin" /> : <RotateCcw />} Release claims
             </Button>
           </DialogFooter>
         </DialogContent>
