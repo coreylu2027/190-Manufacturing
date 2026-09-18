@@ -611,14 +611,14 @@ function ProductionOverview({
               <SelectContent><SelectItem value="all">All locations</SelectItem>{locations.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}<SelectItem value="unassigned">Not recorded</SelectItem></SelectContent>
             </Select>
             </div>
-            <div className="order-1 flex w-full items-center justify-between gap-3 sm:ml-auto sm:w-auto">
+            <div className="order-1 flex w-full flex-wrap items-center justify-between gap-3 sm:ml-auto sm:w-auto">
               <div className="flex items-center gap-2 whitespace-nowrap text-xs text-muted-foreground"><SlidersHorizontal className="size-3.5" /> {visibleRequirements.length} shown{selectedParts.length > 0 ? ` · ${selectedParts.length} selected` : ""}</div>
+              <Button size="sm" disabled={!selectedParts.length || locationMutation.isPending} onClick={() => { setMoveLocation(null); setLocationDialogOpen(true); }}><MapPin /> Bulk set location{selectedParts.length > 0 ? ` (${selectedParts.length})` : ""}</Button>
               <DropdownMenu>
                 <DropdownMenuTrigger render={<Button size="sm" variant="outline" className="w-8 px-0" aria-label="More bulk actions" disabled={locationMutation.isPending} />}>
                   <ChevronDown className="size-4" />
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="w-52">
-                  <DropdownMenuItem disabled={!selectedParts.length} onClick={() => { setMoveLocation(null); setLocationDialogOpen(true); }}><MapPin /> Bulk set location{selectedParts.length > 0 ? ` (${selectedParts.length})` : ""}</DropdownMenuItem>
                   <DropdownMenuItem disabled={!locationIds.length} onClick={() => setLocationIds([])}>Clear selection</DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
