@@ -397,6 +397,7 @@ function ProductionOverview({
   const [selectedRequirementKey, setSelectedRequirementKey] = useState<string | null>(null);
   const queryClient = useQueryClient();
   const [locationIds, setLocationIds] = useState<number[]>([]);
+  const requirementsGridRef = useRef<AgGridReact<ProductionRequirement>>(null);
   const [locationDialogOpen, setLocationDialogOpen] = useState(false);
   const [moveLocation, setMoveLocation] = useState<StorageLocation | null>(null);
   const requirements = useMemo<ProductionRequirement[]>(() => {
@@ -500,6 +501,20 @@ function ProductionOverview({
   const togglePart = useCallback((id: number, checked: boolean) => {
     setLocationIds((ids) => checked ? [...new Set([...ids, id])] : ids.filter((value) => value !== id));
   }, []);
+  const syncRequirementSelection = useCallback(() => {
+    const api = requirementsGridRef.current?.api;
+    if (!api) return;
+    const selectedIds = new Set(locationIds);
+    const toSelect: Parameters<typeof api.setNodesSelected>[0]["nodes"] = [];
+    const toDeselect: Parameters<typeof api.setNodesSelected>[0]["nodes"] = [];
+    api.forEachNode((node) => {
+      if (!node.data) return;
+      (node.data.requirementId !== null && selectedIds.has(node.data.requirementId) ? toSelect : toDeselect).push(node);
+    });
+    if (toSelect.length) api.setNodesSelected({ nodes: toSelect, newValue: true, source: "api" });
+    if (toDeselect.length) api.setNodesSelected({ nodes: toDeselect, newValue: false, source: "api" });
+  }, [locationIds]);
+  useEffect(() => { syncRequirementSelection(); }, [syncRequirementSelection, visibleRequirements]);
   const locationMutation = useMutation({
     mutationFn: async () => {
       if (!moveLocation || !selectedParts.length) throw new Error("Select parts and a location");
@@ -528,7 +543,6 @@ function ProductionOverview({
     },
   });
   const columnDefs = useMemo<ColDef<ProductionRequirement>[]>(() => [
-    { headerName: "Select", width: 80, pinned: "left", sortable: false, cellRenderer: ({ data }: { data?: ProductionRequirement }) => data?.requirementId != null ? <Checkbox aria-label={`Select ${data.partNumber}`} checked={locationIds.includes(data.requirementId)} disabled={locationMutation.isPending} onCheckedChange={(checked) => togglePart(data.requirementId!, Boolean(checked))} /> : null },
     { field: "partNumber", cellRenderer: PartNumberCell, cellRendererParams: { suppressMouseEventHandling: () => true }, headerName: "PART", minWidth: 155, pinned: "left", cellClass: "font-mono font-semibold" },
     { field: "revision", headerName: "REVISION", width: 104, valueFormatter: ({ value }) => value || "—" },
     { field: "partName", headerName: "DESCRIPTION", minWidth: 230, flex: 1 },
@@ -538,7 +552,16 @@ function ProductionOverview({
     { field: "routingProgress", headerName: "ROUTING PROGRESS", minWidth: 230, cellRenderer: ProductionProgressCell },
     { field: "status", headerName: "STATUS", minWidth: 145, cellRenderer: StatusCell },
     { headerName: "", width: 142, pinned: "right", sortable: false, filter: false, resizable: false, cellRenderer: ProductionActionCell, cellRendererParams: { onOpen: openRequirement } },
-  ], [locationIds, locationMutation.isPending, togglePart]);
+  ], []);
+  const requirementRowSelection = useMemo(() => ({
+    mode: "multiRow" as const,
+    checkboxes: true,
+    headerCheckbox: true,
+    selectAll: "all" as const,
+    hideDisabledCheckboxes: false,
+    enableClickSelection: false,
+    isRowSelectable: ({ data }: { data?: ProductionRequirement }) => data?.requirementId != null,
+  }), []);
 
   return (
     <section className="mx-auto max-w-[1800px] px-4 py-5 md:px-7 md:py-7">
@@ -565,12 +588,13 @@ function ProductionOverview({
 
       <div className="overflow-hidden rounded-2xl border bg-card shadow-[0_14px_42px_rgba(15,23,42,.055)]">
         <div className="border-b bg-muted/25 p-3 md:p-4">
-          <div className="flex flex-col gap-3 xl:flex-row xl:items-center">
-            <div className="min-w-52 xl:mr-auto">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="order-1 min-w-52">
               <h2 className="font-semibold">Routed parts</h2>
               <p className="mt-0.5 text-xs text-muted-foreground">Grouped by source document and part number.</p>
             </div>
-            <div className="relative min-w-0 flex-1 xl:max-w-md">
+            <div className="order-2 grid w-full basis-full grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(15rem,1fr)_12rem_14rem_13rem]">
+            <div className="relative min-w-0">
               <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
               <Input value={search} onChange={(event) => setSearch(event.target.value)} className="h-9 bg-card pl-9" placeholder="Search part, revision, assembly, document…" />
             </div>
@@ -586,16 +610,22 @@ function ProductionOverview({
               <SelectTrigger className="h-9 w-full bg-card xl:w-52"><MapPin className="text-muted-foreground" /><SelectValue placeholder="All locations" /></SelectTrigger>
               <SelectContent><SelectItem value="all">All locations</SelectItem>{locations.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}<SelectItem value="unassigned">Not recorded</SelectItem></SelectContent>
             </Select>
-            <div className="whitespace-nowrap text-xs text-muted-foreground">{visibleRequirements.length} of {requirements.length} shown</div>
+            </div>
+            <div className="order-1 flex w-full items-center justify-between gap-3 sm:ml-auto sm:w-auto">
+              <div className="flex items-center gap-2 whitespace-nowrap text-xs text-muted-foreground"><SlidersHorizontal className="size-3.5" /> {visibleRequirements.length} shown{selectedParts.length > 0 ? ` · ${selectedParts.length} selected` : ""}</div>
+              <DropdownMenu>
+                <DropdownMenuTrigger render={<Button size="sm" variant="outline" className="w-8 px-0" aria-label="More bulk actions" disabled={locationMutation.isPending} />}>
+                  <ChevronDown className="size-4" />
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-52">
+                  <DropdownMenuItem disabled={!selectedParts.length} onClick={() => { setMoveLocation(null); setLocationDialogOpen(true); }}><MapPin /> Bulk set location{selectedParts.length > 0 ? ` (${selectedParts.length})` : ""}</DropdownMenuItem>
+                  <DropdownMenuItem disabled={!locationIds.length} onClick={() => setLocationIds([])}>Clear selection</DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-3 border-b p-3">
-          <label className="flex items-center gap-2 text-sm"><Checkbox disabled={!visibleIds.length || locationMutation.isPending} checked={visibleIds.length > 0 && visibleIds.every((id) => locationIds.includes(id))} onCheckedChange={(checked) => setLocationIds((ids) => mergeVisibleSelection(ids, visibleIds, checked ? visibleIds : []))} />Select visible parts</label>
-          <span className="text-sm text-muted-foreground">{selectedParts.length} selected</span>
-          <Button size="sm" variant="outline" disabled={!selectedParts.length || locationMutation.isPending} onClick={() => { setMoveLocation(null); setLocationDialogOpen(true); }}><MapPin />Change location</Button>
-          {locationIds.length > 0 && <Button size="sm" variant="ghost" disabled={locationMutation.isPending} onClick={() => setLocationIds([])}>Clear selection</Button>}
-        </div>
         {isLoading ? (
           <div className="space-y-3 p-5">{Array.from({ length: 7 }).map((_, index) => <Skeleton key={index} className="h-11 w-full" />)}</div>
         ) : isError ? (
@@ -608,9 +638,19 @@ function ProductionOverview({
           <>
             <div className="hidden h-[min(59vh,680px)] min-h-[430px] md:block">
               <AgGridReact<ProductionRequirement>
+                ref={requirementsGridRef}
                 theme={gridTheme}
                 rowData={visibleRequirements}
                 columnDefs={columnDefs}
+                rowSelection={requirementRowSelection}
+                selectionColumnDef={{ width: 48, pinned: "left", resizable: false }}
+                onGridReady={syncRequirementSelection}
+                onRowDataUpdated={syncRequirementSelection}
+                onSelectionChanged={({ api, source }) => {
+                  if (["api", "rowDataChanged", "gridInitializing", "selectableChanged"].includes(source)) return;
+                  const selectedVisibleIds = api.getSelectedRows().flatMap((part) => part.requirementId === null ? [] : [part.requirementId]);
+                  setLocationIds((current) => mergeVisibleSelection(current, visibleIds, selectedVisibleIds));
+                }}
                 defaultColDef={{ sortable: true, filter: false, resizable: true }}
                 initialState={{ sort: { sortModel: [{ colId: "documentName", sort: "asc" }] } }}
                 getRowId={({ data }) => data.key}
@@ -625,11 +665,13 @@ function ProductionOverview({
               {visibleRequirements.map((requirement) => {
                 const percent = Math.round((requirement.completedOperations / requirement.totalOperations) * 100);
                 return (
-                  <article key={requirement.key} className="p-4">
-                    {requirement.requirementId !== null && <label className="mb-3 flex items-center gap-2 text-xs"><Checkbox aria-label={`Select ${requirement.partNumber}`} checked={locationIds.includes(requirement.requirementId)} disabled={locationMutation.isPending} onCheckedChange={(checked) => togglePart(requirement.requirementId!, Boolean(checked))} />Select part</label>}
+                  <article key={requirement.key} className="flex items-start gap-3 p-4 transition hover:bg-muted/40">
+                    <Checkbox className="mt-1" aria-label={`Select ${requirement.partNumber}`} checked={requirement.requirementId !== null && locationIds.includes(requirement.requirementId)} disabled={requirement.requirementId === null || locationMutation.isPending} onCheckedChange={(checked) => requirement.requirementId !== null && togglePart(requirement.requirementId, Boolean(checked))} />
+                    <div className="min-w-0 flex-1">
                     <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary"><CopyPartNumber partNumber={requirement.partNumber} /></p><h3 className="mt-1 font-semibold">{requirement.partName}</h3><p className="mt-1 font-mono text-[11px] text-muted-foreground">Rev {requirement.revision ?? "—"} · {requirement.documentName ?? "Document not synced"} · Qty {requirement.quantity}</p><p className="mt-1 text-xs text-muted-foreground">Location: {requirement.storageLocation ?? "Not recorded"}</p></div><StatusBadge status={requirement.status} /></div>
                      <div className="mt-3"><div className="mb-1.5 flex justify-between text-xs text-muted-foreground"><span>Mfg {requirement.completedManufacturingOperations}/{requirement.totalManufacturingOperations}{requirement.totalCamTasks > 0 ? ` · CAM ${requirement.completedCamTasks}/${requirement.totalCamTasks}` : ""}</span><span className="font-semibold text-foreground">{percent}%</span></div><div className="h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary" style={{ width: `${percent}%` }} /></div></div>
                      <Button className="mt-3 w-full" variant="outline" onClick={() => setSelectedRequirementKey(requirement.key)}>More details<ChevronRight /></Button>
+                    </div>
                    </article>
                 );
               })}
