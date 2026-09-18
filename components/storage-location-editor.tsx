@@ -26,6 +26,7 @@ export function StorageLocationSelect({
   onChange,
   disabled = false,
   allowOnRobot = false,
+  showUnavailableOnRobot = false,
   className,
   emptyLabel = "Not recorded",
 }: {
@@ -33,6 +34,7 @@ export function StorageLocationSelect({
   onChange: (value: StorageLocation | null) => void;
   disabled?: boolean;
   allowOnRobot?: boolean;
+  showUnavailableOnRobot?: boolean;
   className?: string;
   emptyLabel?: string;
 }) {
@@ -48,7 +50,7 @@ export function StorageLocationSelect({
       </SelectTrigger>
       <SelectContent align="start">
         <SelectItem value={NO_LOCATION}>{emptyLabel}</SelectItem>
-        {allowOnRobot && <SelectItem value={ROBOT_LOCATION}>{ROBOT_LOCATION}</SelectItem>}
+        {(allowOnRobot || showUnavailableOnRobot) && <SelectItem value={ROBOT_LOCATION} disabled={!allowOnRobot}>{ROBOT_LOCATION}</SelectItem>}
         <SelectSeparator />
         {STORAGE_LOCATION_GROUPS.map((group) => (
           <SelectGroup key={group.name}>

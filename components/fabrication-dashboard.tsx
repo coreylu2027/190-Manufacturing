@@ -1,4 +1,5 @@
 "use client";
+import { CopyPartNumber, PartNumberCell } from "@/components/copy-part-number";
 
 import { themeQuartz, type ColDef } from "ag-grid-community";
 import { AgGridReact } from "ag-grid-react";
@@ -217,7 +218,7 @@ export function FabricationDashboard({
 
   const openJob = (job: FabricationJob) => setSelectedId(job.id);
   const columnDefs = useMemo<ColDef<FabricationJob>[]>(() => [
-    { field: "partNumber", headerName: "PART", minWidth: 155, pinned: "left", cellClass: "font-mono font-semibold" },
+    { field: "partNumber", cellRenderer: PartNumberCell, cellRendererParams: { suppressMouseEventHandling: () => true }, headerName: "PART", minWidth: 155, pinned: "left", cellClass: "font-mono font-semibold" },
     { field: "partName", headerName: "DESCRIPTION", minWidth: 230, flex: 1 },
     { field: "documentName", headerName: "SOURCE DOCUMENT", minWidth: 175, valueFormatter: ({ value }) => value || "Not synced" },
     { field: "quantity", headerName: "REQUIRED", width: 105, filter: "agNumberColumnFilter" },
@@ -299,7 +300,7 @@ export function FabricationDashboard({
             <div className="divide-y md:hidden">
               {filtered.map((job) => (
                 <button key={job.id} onClick={() => openJob(job)} className="block w-full p-4 text-left transition hover:bg-muted/40">
-                  <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary">{job.partNumber}</p><h3 className="mt-1 font-semibold">{job.partName}</h3><p className="mt-1 font-mono text-[11px] text-muted-foreground">{job.documentName ?? "Document not synced"}</p></div><StatusBadge status={job.status} /></div>
+                  <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary"><CopyPartNumber partNumber={job.partNumber} /></p><h3 className="mt-1 font-semibold">{job.partName}</h3><p className="mt-1 font-mono text-[11px] text-muted-foreground">{job.documentName ?? "Document not synced"}</p></div><StatusBadge status={job.status} /></div>
                   <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground"><span className="flex items-center gap-1"><Paintbrush className="size-3" />{job.color}</span><span>{job.quantity} required</span><span>{job.machinist || "Unclaimed"}</span><span>Location: {job.storageLocation ?? "Not recorded"}</span></div>
                   <p className={cn("mt-2 line-clamp-2 text-xs", job.qcNotes ? "text-foreground" : "text-muted-foreground")}>QC notes: {job.qcNotes || "No inspection notes"}</p>
                 </button>
@@ -317,7 +318,7 @@ export function FabricationDashboard({
               <SheetHeader className="border-b p-6 pr-14">
                 <div className="mb-2 flex flex-wrap items-center gap-2"><StatusBadge status={selected.status} /><Badge variant="outline" className="gap-1.5"><span className={cn("size-2 rounded-full", selected.color.toLocaleLowerCase() === "red" ? "bg-red-600" : "bg-slate-900")} />{selected.color}</Badge></div>
                 <SheetTitle className="text-2xl font-bold tracking-tight">{selected.partName}</SheetTitle>
-                <SheetDescription className="font-mono text-xs font-semibold text-primary">{selected.partNumber}</SheetDescription>
+                <SheetDescription className="font-mono text-xs font-semibold text-primary"><CopyPartNumber partNumber={selected.partNumber} /></SheetDescription>
               </SheetHeader>
 
               <div className="detail-sections p-6"><div className="detail-columns space-y-6">

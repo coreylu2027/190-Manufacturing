@@ -1,4 +1,5 @@
 "use client";
+import { CopyPartNumber } from "@/components/copy-part-number";
 
 import { ForceQcPicker } from "@/components/force-qc";
 
@@ -142,7 +143,7 @@ function PartCell({ data }: { data?: QualityControlItem }) {
   const operation = data.operations[0];
   return (
     <div className="flex h-full min-w-0 flex-col justify-center leading-tight">
-      <span className="font-mono text-xs font-bold text-primary">{operation.partNumber}</span>
+      <span className="font-mono text-xs font-bold text-primary"><CopyPartNumber partNumber={operation.partNumber} /></span>
       <span className="mt-1.5 truncate font-semibold" title={operation.partName}>{operation.partName}</span>
       <span className="mt-1.5 truncate text-[11px] text-muted-foreground" title={`Completed by ${completedBy(data)}`}>Qty {operation.quantity} · {completedBy(data)}</span>
     </div>
@@ -513,7 +514,7 @@ export function QualityControlDashboard() {
                 return (
                   <article key={item.requirementId} className="p-4">
                     <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0"><p className="font-mono text-xs font-bold text-primary">{operation.partNumber}</p><h3 className="mt-1 truncate font-semibold">{operation.partName}</h3><p className="mt-1 text-xs text-muted-foreground">{item.operations.length} operation{item.operations.length === 1 ? "" : "s"} · Qty {operation.quantity} · {completedBy(item)}</p></div>
+                      <div className="min-w-0"><p className="font-mono text-xs font-bold text-primary"><CopyPartNumber partNumber={operation.partNumber} /></p><h3 className="mt-1 truncate font-semibold">{operation.partName}</h3><p className="mt-1 text-xs text-muted-foreground">{item.operations.length} operation{item.operations.length === 1 ? "" : "s"} · Qty {operation.quantity} · {completedBy(item)}</p></div>
                       <ResultBadge result={item.result} />
                     </div>
                     <div className="mt-3 flex flex-wrap gap-1.5">{item.operations.map((row) => <Badge key={row.id} variant="outline">{row.operationNumber} · {row.machine}</Badge>)}</div>
@@ -562,7 +563,7 @@ export function QualityControlDashboard() {
                   <Badge variant="outline">Qty {operation.quantity}</Badge>
                 </div>
                 <SheetTitle className="text-2xl font-bold tracking-tight">{operation.partName}</SheetTitle>
-                <SheetDescription className="font-mono text-xs font-semibold text-primary">{operation.partNumber}</SheetDescription>
+                <SheetDescription className="font-mono text-xs font-semibold text-primary"><CopyPartNumber partNumber={operation.partNumber} /></SheetDescription>
               </SheetHeader>
 
               <div className="detail-sections p-6"><div className="detail-columns space-y-6">
