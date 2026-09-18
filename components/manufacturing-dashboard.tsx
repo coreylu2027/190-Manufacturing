@@ -95,6 +95,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { mergeVisibleSelection, settleSequentially } from "@/lib/bulk-selection";
 import { safeManufacturingFileName } from "@/lib/manufacturing/file-names";
+import { requirementStatus, type ProductionStatus } from "@/lib/production-status";
 import { nextWorkflowAction } from "@/lib/manufacturing-workflow";
 import { isShopName } from "@/lib/profile-name";
 import { createClient } from "@/lib/supabase/client";
@@ -172,7 +173,7 @@ interface ProductionRequirement {
   completedManufacturingOperations: number;
   totalManufacturingOperations: number;
   routingProgress: number;
-  status: OperationStatus;
+  status: ProductionStatus;
   storageLocation: ManufacturingOperation["storageLocation"];
   locationUpdatedBy: string | null;
   locationUpdatedAt: string | null;
@@ -198,19 +199,20 @@ const gridTheme = themeQuartz.withParams({
   spacing: 6,
 });
 
-const statusStyles: Record<OperationStatus, string> = {
+const statusStyles: Record<ProductionStatus, string> = {
   Planned: "border-slate-200 bg-slate-100 text-slate-700",
   Ready: "border-emerald-200 bg-emerald-100 text-emerald-800",
   "In Progress": "border-blue-200 bg-blue-100 text-blue-800",
   Blocked: "border-amber-200 bg-amber-100 text-amber-900",
+  "QC Pending": "border-cyan-200 bg-cyan-100 text-cyan-800",
   Complete: "border-violet-200 bg-violet-100 text-violet-800",
 };
 
-function StatusBadge({ status }: { status: OperationStatus }) {
+function StatusBadge({ status }: { status: ProductionStatus }) {
   return <Badge variant="outline" className={cn("font-semibold", statusStyles[status])}>{status}</Badge>;
 }
 
-function StatusCell({ value }: { value: OperationStatus }) {
+function StatusCell({ value }: { value: ProductionStatus }) {
   return <div className="flex h-full items-center"><StatusBadge status={value} /></div>;
 }
 
@@ -372,13 +374,6 @@ const inverseQuantityAction: Record<OperationQuantityAction, OperationQuantityAc
   undo_complete: "complete",
 };
 
-function requirementStatus(operations: ManufacturingOperation[]): OperationStatus {
-  if (operations.every((operation) => operation.status === "Complete")) return "Complete";
-  if (operations.some((operation) => operation.status === "Blocked")) return "Blocked";
-  if (operations.some((operation) => operation.status === "In Progress")) return "In Progress";
-  if (operations.some((operation) => operation.status === "Ready")) return "Ready";
-  return "Planned";
-}
 
 function ProductionOverview({
   canForceQc,
@@ -396,7 +391,7 @@ function ProductionOverview({
   onRetry: () => void;
 }) {
   const [search, setSearch] = useState("");
-  const [status, setStatus] = useState<"all" | OperationStatus>("all");
+  const [status, setStatus] = useState<"all" | ProductionStatus>("all");
   const [sourceDocument, setSourceDocument] = useState("all");
   const [location, setLocation] = useState("all");
   const [selectedRequirementKey, setSelectedRequirementKey] = useState<string | null>(null);
@@ -579,9 +574,9 @@ function ProductionOverview({
               <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
               <Input value={search} onChange={(event) => setSearch(event.target.value)} className="h-9 bg-card pl-9" placeholder="Search part, revision, assembly, document…" />
             </div>
-            <Select value={status} onValueChange={(value) => setStatus((value ?? "all") as "all" | OperationStatus)}>
+            <Select value={status} onValueChange={(value) => setStatus((value ?? "all") as "all" | ProductionStatus)}>
               <SelectTrigger className="h-9 w-full bg-card xl:w-48"><SlidersHorizontal className="text-muted-foreground" /><SelectValue placeholder="All statuses" /></SelectTrigger>
-              <SelectContent><SelectItem value="all">All statuses</SelectItem>{(["Planned", "Ready", "In Progress", "Blocked", "Complete"] as OperationStatus[]).map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
+              <SelectContent><SelectItem value="all">All statuses</SelectItem>{(["Planned", "Ready", "In Progress", "Blocked", "QC Pending", "Complete"] as ProductionStatus[]).map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
             </Select>
             <Select value={sourceDocument} onValueChange={(value) => setSourceDocument(value ?? "all")}>
               <SelectTrigger className="h-9 w-full bg-card xl:w-56"><FileText className="text-muted-foreground" /><SelectValue placeholder="All source documents" /></SelectTrigger>

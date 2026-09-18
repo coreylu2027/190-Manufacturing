@@ -1,3 +1,4 @@
+import { requirementStatus } from "../production-status.ts";
 import { requirementIdentity } from "./identity.ts";
 // Pure projections from normalized manufacturing rows and the Supabase attachment catalog.
 import { deduplicateOperations, requiresPassedQc } from "../manufacturing-workflow.ts";
@@ -316,13 +317,6 @@ export function projectQc(operations: ManufacturingOperation[], reviews: ReviewR
   );
 }
 
-function requirementStatus(operations: ManufacturingOperation[]): OperationStatus {
-  if (operations.every((operation) => operation.status === "Complete")) return "Complete";
-  if (operations.some((operation) => operation.status === "Blocked")) return "Blocked";
-  if (operations.some((operation) => operation.status === "In Progress")) return "In Progress";
-  if (operations.some((operation) => operation.status === "Ready")) return "Ready";
-  return "Planned";
-}
 
 export function withFinishingQc(jobs: FabricationJob[], reviews: ReviewRow[], operations: ManufacturingOperation[]) {
   const metadata = qualityMetadataByRequirement(operations, normalizedReviews(reviews), [], []).metadata;

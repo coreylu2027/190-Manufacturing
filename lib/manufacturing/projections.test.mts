@@ -109,3 +109,15 @@ test("requirement projections include independent location and lifecycle details
   assert.equal(projectedFinishing.locationUpdatedBy, "Morgan M.");
   assert.equal(projectedFinishing.productionNotes, "Keep masking installed");
 });
+
+ test("production status identifies pending QC before completion and post-QC inserts", async () => {
+  const { projectProduction } = await import("./projections.ts");
+  const completed = projectOperations([{ ...operation, Status: { value: "Complete" } }], [requirement], [part]);
+  assert.equal(projectProduction(completed)[0].status, "QC Pending");
+  const inserts = { ...completed[0], id: 5, machine: "Threaded Insert", status: "Planned" as const };
+  assert.equal(projectProduction([...completed, inserts])[0].status, "QC Pending");
+  assert.equal(projectProduction(completed.map(row => ({ ...row, effectiveQcResult: "passed" as const })))[0].status, "Complete");
+  assert.equal(projectProduction(completed.map(row => ({ ...row, status: "In Progress" as const })))[0].status, "In Progress");
+  assert.equal(projectProduction(completed.map(row => ({ ...row, workType: "CAM" as const })))[0].status, "Complete");
+  assert.notEqual(projectProduction(completed.map(row => ({ ...row, effectiveQcResult: "failed" as const })))[0].status, "QC Pending");
+});
