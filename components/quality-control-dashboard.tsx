@@ -11,6 +11,7 @@ import dynamic from "next/dynamic";
 import {
   Check,
   ChevronRight,
+  ChevronDown,
   ClipboardCheck,
   Clock3,
   ExternalLink,
@@ -24,13 +25,16 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { StorageLocationEditor } from "@/components/storage-location-editor";
 import { ManufacturingFileLink } from "@/components/manufacturing-file-link";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import { Checkbox } from "@/components/ui/checkbox";
+import { mergeVisibleSelection, settleSequentially } from "@/lib/bulk-selection";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -95,6 +99,11 @@ async function submitReview(item: QualityControlItem, result: "passed" | "failed
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error ?? "Unable to record the quality review");
   return body;
+}
+
+function canBulkPass(item: QualityControlItem) {
+  return item.result === "pending" && item.operations.length > 0
+    && item.operations.every((operation) => operation.status === "Complete" && !operation.obsolete && operation.activeInBom);
 }
 
 async function undoPassedReview(item: QualityControlItem) {
@@ -251,6 +260,37 @@ export function QualityControlDashboard() {
   const [failureDialogItem, setFailureDialogItem] = useState<QualityControlItem | null>(null);
   const [failureReason, setFailureReason] = useState("");
   const [rejectedQuantityDraft, setRejectedQuantityDraft] = useState("1");
+  const qcGridRef = useRef<AgGridReact<QualityControlItem>>(null);
+  const [bulkIds, setBulkIds] = useState<number[]>([]);
+  const [bulkDialogOpen, setBulkDialogOpen] = useState(false);
+  const toggleBulk = useCallback((id: number, checked: boolean) => {
+    setBulkIds((ids) => checked ? [...new Set([...ids, id])] : ids.filter((value) => value !== id));
+  }, []);
+  const bulkReviewMutation = useMutation({
+    mutationFn: async (reviews: { item: QualityControlItem; notes: string }[]) => {
+      const results = await settleSequentially(reviews, async ({ item, notes }) => {
+        if (!canBulkPass(item)) throw new Error(`${item.operations[0]?.partNumber ?? item.requirementId}: no longer ready for QC`);
+        try {
+          await submitReview(item, "passed", notes);
+          return item.requirementId;
+        } catch (error) {
+          throw new Error(`${item.operations[0].partNumber}: ${error instanceof Error ? error.message : "Unable to pass QC"}`);
+        }
+      });
+      return {
+        succeeded: results.flatMap((entry) => entry.status === "fulfilled" ? [entry.value] : []),
+        errors: results.flatMap((entry) => entry.status === "rejected" ? [String(entry.reason instanceof Error ? entry.reason.message : entry.reason)] : []),
+      };
+    },
+    onSuccess: ({ succeeded, errors }) => {
+      setBulkIds((ids) => ids.filter((id) => !succeeded.includes(id)));
+      setDraftNotes((current) => Object.fromEntries(Object.entries(current).filter(([id]) => !succeeded.includes(Number(id)))));
+      if (errors.length) toast.warning(`Passed ${succeeded.length} requirements; ${errors.length} failed and remain selected.`, { description: errors.join("; ") });
+      else { toast.success(`QC passed for ${succeeded.length} requirements`); setBulkDialogOpen(false); }
+    },
+    onError: (error) => toast.error(error.message),
+    onSettled: () => invalidateManufacturing(),
+  });
 
   const invalidateManufacturing = () => {
     queryClient.invalidateQueries({ queryKey: ["qc"] }, { cancelRefetch: false });
@@ -320,7 +360,7 @@ export function QualityControlDashboard() {
     onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to delete production notes"),
   });
   const mutateReview = reviewMutation.mutate;
-  const reviewIsPending = reviewMutation.isPending;
+  const reviewIsPending = reviewMutation.isPending || bulkReviewMutation.isPending;
   const mutateUndoReview = undoReviewMutation.mutate;
   const undoReviewIsPending = undoReviewMutation.isPending;
   const mutateNotes = updateNotesMutation.mutate;
@@ -356,6 +396,11 @@ export function QualityControlDashboard() {
       return true;
     });
   }, [items, location, machine, result, search]);
+
+  const bulkSelected = items.filter((item) => bulkIds.includes(item.requirementId));
+  const bulkEligible = bulkSelected.filter(canBulkPass);
+  const visibleBulkIds = filtered.filter(canBulkPass).map((item) => item.requirementId);
+  const bulkBusy = reviewIsPending || undoReviewIsPending || notesArePending;
 
   const stats = useMemo(() => ({
     pending: items.filter((item) => item.result === "pending").length,
@@ -427,6 +472,20 @@ export function QualityControlDashboard() {
     },
   ], []);
 
+  const rowSelection = useMemo(() => ({
+    mode: "multiRow" as const, checkboxes: true, headerCheckbox: true,
+    selectAll: "filtered" as const, hideDisabledCheckboxes: false, enableClickSelection: false,
+    isRowSelectable: ({ data }: { data?: QualityControlItem }) => Boolean(data && canBulkPass(data)),
+  }), []);
+  const syncSelection = useCallback(() => {
+    const api = qcGridRef.current?.api;
+    if (!api) return;
+    api.forEachNode((node) => {
+      if (node.data) node.setSelected(canBulkPass(node.data) && bulkIds.includes(node.data.requirementId), false, "api");
+    });
+  }, [bulkIds]);
+  useEffect(() => { syncSelection(); }, [syncSelection, filtered]);
+
   const clearFilters = () => {
     setSearch("");
     setResult("all");
@@ -461,12 +520,13 @@ export function QualityControlDashboard() {
 
       <div className="overflow-hidden rounded-2xl border bg-card shadow-[0_14px_42px_rgba(15,23,42,.055)]">
         <div className="border-b bg-muted/25 p-3 md:p-4">
-          <div className="flex flex-col gap-3 xl:flex-row xl:items-center">
-            <div className="min-w-48 xl:mr-auto">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="order-1 min-w-48">
               <h2 className="font-semibold">Quality control queue</h2>
               <p className="mt-0.5 text-xs text-muted-foreground">Review completed production requirements.</p>
             </div>
-            <div className="relative min-w-0 flex-1 xl:max-w-md">
+            <div className="order-2 grid w-full basis-full grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(15rem,1fr)_11rem_12rem_12rem]">
+            <div className="relative min-w-0">
               <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
               <Input value={search} onChange={(event) => setSearch(event.target.value)} className="h-9 bg-card pl-9" placeholder="Search part, operation, machinist, notes…" />
             </div>
@@ -482,7 +542,18 @@ export function QualityControlDashboard() {
               <SelectTrigger className="h-9 w-full bg-card xl:w-48"><MapPin className="text-muted-foreground" /><SelectValue placeholder="All locations" /></SelectTrigger>
               <SelectContent><SelectItem value="all">All locations</SelectItem>{locations.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}<SelectItem value="unassigned">Not recorded</SelectItem></SelectContent>
             </Select>
-            <div className="whitespace-nowrap text-xs text-muted-foreground">{filtered.length} of {items.length} shown</div>
+            </div>
+            <div className="order-1 flex w-full flex-wrap items-center justify-between gap-3 sm:ml-auto sm:w-auto">
+              <div className="flex items-center gap-2 whitespace-nowrap text-xs text-muted-foreground"><SlidersHorizontal className="size-3.5" />{filtered.length} shown{bulkSelected.length > 0 ? ` · ${bulkSelected.length} selected` : ""}</div>
+              <Button size="sm" disabled={bulkBusy || !bulkEligible.length} onClick={() => setBulkDialogOpen(true)}><Check />Bulk pass QC{bulkEligible.length > 0 ? ` (${bulkEligible.length})` : ""}</Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger render={<Button size="sm" variant="outline" className="w-8 px-0" aria-label="More bulk actions" disabled={bulkBusy} />}><ChevronDown className="size-4" /></DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-52">
+                  <DropdownMenuItem disabled={!visibleBulkIds.length} onClick={() => setBulkIds((ids) => mergeVisibleSelection(ids, visibleBulkIds, visibleBulkIds))}>Select visible parts</DropdownMenuItem>
+                  <DropdownMenuItem disabled={!bulkIds.length} onClick={() => setBulkIds([])}>Clear selection</DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
           </div>
         </div>
 
@@ -498,6 +569,15 @@ export function QualityControlDashboard() {
           <>
             <div className="hidden h-[min(66vh,760px)] min-h-[500px] md:block">
               <AgGridReact<QualityControlItem>
+                ref={qcGridRef}
+                rowSelection={rowSelection}
+                selectionColumnDef={{ width: 48, pinned: "left", resizable: false }}
+                onGridReady={syncSelection}
+                onRowDataUpdated={syncSelection}
+                onSelectionChanged={({ api, source }) => {
+                  if (["api", "rowDataChanged", "gridInitializing", "selectableChanged"].includes(source)) return;
+                  setBulkIds((ids) => mergeVisibleSelection(ids, filtered.map((item) => item.requirementId), api.getSelectedRows().map((item) => item.requirementId)));
+                }}
                 theme={gridTheme}
                 rowData={filtered}
                 columnDefs={columnDefs}
@@ -515,6 +595,7 @@ export function QualityControlDashboard() {
                 const operation = item.operations[0];
                 return (
                   <article key={item.requirementId} className="p-4">
+                    <label className="mb-3 flex items-center justify-center gap-2 text-xs"><Checkbox aria-label={`Select ${operation.partNumber}`} checked={bulkIds.includes(item.requirementId)} disabled={bulkBusy || !canBulkPass(item)} onCheckedChange={(checked) => toggleBulk(item.requirementId, Boolean(checked))} />Select part</label>
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0"><p className="font-mono text-xs font-bold text-primary"><CopyPartNumber partNumber={operation.partNumber} /> <ObsoleteBadge obsolete={operation.obsolete} /></p><h3 className="mt-1 truncate font-semibold">{operation.partName}</h3><p className="mt-1 text-xs text-muted-foreground">{item.operations.length} operation{item.operations.length === 1 ? "" : "s"} · Qty {operation.quantity} · {completedBy(item)}</p></div>
                       <ResultBadge result={item.result} />
@@ -553,6 +634,23 @@ export function QualityControlDashboard() {
         )}
       </div>
 
+      <Dialog open={bulkDialogOpen} onOpenChange={(open) => { if (!bulkReviewMutation.isPending) setBulkDialogOpen(open); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Pass QC for {bulkEligible.length} requirements?</DialogTitle>
+            <DialogDescription>Confirm that you inspected all quantities of each listed part. Each requirement will pass QC using its own inspection notes.</DialogDescription>
+          </DialogHeader>
+          <ul className="max-h-60 space-y-2 overflow-y-auto text-sm">
+            {bulkEligible.map((item) => <li key={item.requirementId}><CopyPartNumber partNumber={item.operations[0].partNumber} /> · Qty {item.operations[0].quantity}<p className="whitespace-pre-wrap text-xs text-muted-foreground">{(draftNotes[item.requirementId] ?? item.notes) || "No inspection notes"}</p></li>)}
+          </ul>
+          {bulkSelected.some((item) => !filtered.some((row) => row.requirementId === item.requirementId)) && <p className="text-sm text-amber-700">Includes selected parts hidden by the current filters.</p>}
+          {bulkSelected.length > bulkEligible.length && <p className="text-sm text-amber-700">{bulkSelected.length - bulkEligible.length} selected requirements are no longer eligible and will be skipped.</p>}
+          <DialogFooter>
+            <Button variant="outline" disabled={bulkReviewMutation.isPending} onClick={() => setBulkDialogOpen(false)}>Cancel</Button>
+            <Button disabled={bulkBusy || !bulkEligible.length} onClick={() => bulkReviewMutation.mutate(bulkEligible.map((item) => ({ item, notes: draftNotes[item.requirementId] ?? item.notes })))}>{bulkReviewMutation.isPending ? <LoaderCircle className="animate-spin" /> : <Check />}Pass QC</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Sheet open={Boolean(selected)} onOpenChange={(open) => !open && setSelectedId(null)}>
         <SheetContent detailView className="w-full overflow-y-auto sm:max-w-xl">
           {selected && (() => {
