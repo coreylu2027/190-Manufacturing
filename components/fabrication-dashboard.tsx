@@ -10,6 +10,9 @@ import {
   ArrowUpRight,
   Check,
   ChevronRight,
+  ChevronDown,
+  ListChecks,
+  MapPin,
   CircleDot,
   Cloud,
   Download,
@@ -25,20 +28,24 @@ import {
   TriangleAlert,
   XCircle,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { ManufacturingFileLink } from "@/components/manufacturing-file-link";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import { mergeVisibleSelection, settleSequentially } from "@/lib/bulk-selection";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ProductionRequirementNotes } from "@/components/production-requirement-notes";
-import { StorageLocationEditor } from "@/components/storage-location-editor";
+import { StorageLocationEditor, StorageLocationSelect } from "@/components/storage-location-editor";
 import { isShopName } from "@/lib/profile-name";
-import { canUseOnRobotLocation } from "@/lib/storage-locations";
+import { canUseOnRobotLocation, type StorageLocation } from "@/lib/storage-locations";
 import type { FabricationAction, FabricationActionPatch, FabricationJob, FabricationResponse, OperationStatus, OperationsResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -149,6 +156,10 @@ export function FabricationDashboard({
   const [view, setView] = useState<QueueView>("available");
   const [color, setColor] = useState("all");
   const [search, setSearch] = useState("");
+  const gridRef = useRef<AgGridReact<FabricationJob>>(null);
+  const [bulkIds, setBulkIds] = useState<number[]>([]);
+  const [bulkDialog, setBulkDialog] = useState<"claim" | "complete" | "release" | "location" | null>(null);
+  const [bulkLocation, setBulkLocation] = useState<StorageLocation | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const query = useQuery({ queryKey: ["fabrication"], queryFn: fetchFabrication });
   const jobs = useMemo(() => query.data?.jobs ?? [], [query.data?.jobs]);
@@ -210,6 +221,61 @@ export function FabricationDashboard({
     });
   }, [color, jobs, search, userName, view]);
 
+  const selectedJobs = jobs.filter((job) => bulkIds.includes(job.id));
+  const claimable = selectedJobs.filter((job) => !job.obsolete && job.active && job.status === "Ready");
+  const owned = selectedJobs.filter((job) => !job.obsolete && job.active && job.status === "In Progress" && ownedBy(job, userName));
+  const primaryAction = selectedJobs.length > 0 && claimable.length === selectedJobs.length ? "claim" : selectedJobs.length > 0 && owned.length === selectedJobs.length ? "complete" : null;
+  const primaryLabel = primaryAction === "complete" || view === "mine" ? "Bulk complete" : "Bulk claim";
+  const dialogJobs = bulkDialog === "location" ? selectedJobs : bulkDialog === "claim" ? claimable : owned;
+  const locationJobs = [...new Map(selectedJobs.map((job) => [job.requirementId, job])).values()];
+  const allowOnRobot = locationJobs.length > 0 && locationJobs.every((job) => !job.obsolete && job.active && canUseOnRobotLocation(job.effectiveQcResult === "passed", job.status === "Complete"));
+  const bulkMutation = useMutation({
+    mutationFn: async ({ action, targets, location }: { action: "claim" | "complete" | "release" | "location"; targets: FabricationJob[]; location: StorageLocation | null }) => {
+      const results = await settleSequentially(targets, async (job) => {
+        const response = await fetch(action === "location" ? `/api/requirements/${job.requirementId}/location` : `/api/fabrication/${job.id}`, {
+          method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(action === "location" ? { location } : { action }),
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(`${job.partNumber}: ${body.error ?? "Unable to update finishing job"}`);
+        return job;
+      });
+      return {
+        action,
+        succeeded: results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []),
+        errors: results.flatMap((result) => result.status === "rejected" ? [result.reason instanceof Error ? result.reason.message : "Unable to update finishing job"] : []),
+      };
+    },
+    onSuccess: ({ action, succeeded, errors }) => {
+      const done = new Set(selectedJobs.filter((job) => succeeded.some((success) => action === "location" ? success.requirementId === job.requirementId : success.id === job.id)).map((job) => job.id));
+      setBulkIds((ids) => ids.filter((id) => !done.has(id)));
+      if (errors.length) toast.warning(`Updated ${succeeded.length} finishing jobs; ${errors.length} failed and remain selected.`, { description: errors.join("; ") });
+      else { toast.success(`${action === "location" ? "Location updated" : actionCopy[action].success}: ${succeeded.length}`); setBulkDialog(null); }
+    },
+    onError: (error) => toast.error(error.message),
+    onSettled: () => {
+      for (const queryKey of [["fabrication"], ["operations"], ["qc"], ["admin"]]) void queryClient.invalidateQueries({ queryKey });
+    },
+  });
+  const bulkBusy = mutation.isPending || bulkMutation.isPending;
+  const openBulk = (action: NonNullable<typeof bulkDialog>) => {
+    if (action !== "location" && !isShopName(userName)) { onProfileRequired(); toast.info("Set your first name and last initial before recording work"); return; }
+    setBulkLocation(null);
+    setBulkDialog(action);
+  };
+  const rowSelection = useMemo(() => ({
+    mode: "multiRow" as const, checkboxes: true, headerCheckbox: true, selectAll: "all" as const,
+    hideDisabledCheckboxes: false, enableClickSelection: false,
+    isRowSelectable: () => Boolean(user?.approved),
+  }), [user?.approved]);
+  const syncSelection = useCallback(() => {
+    const api = gridRef.current?.api;
+    if (!api || api.isDestroyed()) return;
+    api.forEachNode((node) => {
+      if (node.data) node.setSelected(bulkIds.includes(node.data.id), false, "api");
+    });
+  }, [bulkIds]);
+  useEffect(() => { syncSelection(); }, [syncSelection, filtered]);
+
   const stats = useMemo(() => ({
     ready: jobs.filter((job) => !job.obsolete && job.active && job.status === "Ready").length,
     active: jobs.filter((job) => job.status === "In Progress").length,
@@ -256,15 +322,16 @@ export function FabricationDashboard({
 
       <div className="overflow-hidden rounded-2xl border bg-card shadow-[0_14px_42px_rgba(15,23,42,.055)]">
         <div className="border-b bg-muted/25 p-3 md:p-4">
-          <div className="flex flex-col gap-3 xl:flex-row xl:items-center">
-            <div className="flex w-full overflow-x-auto rounded-lg bg-muted p-1 xl:w-auto">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex w-full overflow-x-auto rounded-lg bg-muted p-1 sm:w-auto">
               {([{ id: "available", label: "Available" }, { id: "mine", label: "My work" }, { id: "all", label: "All finishing" }] as const).map((item) => (
                 <Button key={item.id} size="sm" variant="ghost" onClick={() => setView(item.id)} className={cn("min-w-fit", view === item.id && "bg-card text-foreground shadow-sm hover:bg-card")}>
                   {item.label}{item.id === "available" && <span className="ml-1 rounded bg-emerald-100 px-1.5 text-[10px] font-bold text-emerald-800">{stats.ready}</span>}
                 </Button>
               ))}
             </div>
-            <div className="relative min-w-0 flex-1">
+            <div className="order-2 grid w-full basis-full grid-cols-1 gap-3 sm:grid-cols-[minmax(15rem,1fr)_13rem]">
+            <div className="relative min-w-0">
               <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
               <Input value={search} onChange={(event) => setSearch(event.target.value)} className="h-9 bg-card pl-9" placeholder="Search part, assembly, color…" />
             </div>
@@ -272,7 +339,22 @@ export function FabricationDashboard({
               <SelectTrigger className="h-9 w-full bg-card xl:w-52"><Paintbrush className="text-muted-foreground" /><SelectValue placeholder="All finishes" /></SelectTrigger>
               <SelectContent><SelectItem value="all">All finishes</SelectItem>{colors.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
             </Select>
-            <div className="flex items-center gap-2 text-xs text-muted-foreground"><SlidersHorizontal className="size-3.5" /> {filtered.length} shown</div>
+            </div>
+            <div className="order-1 flex w-full items-center justify-between gap-3 sm:ml-auto sm:w-auto">
+              <div className="flex items-center gap-2 whitespace-nowrap text-xs text-muted-foreground"><SlidersHorizontal className="size-3.5" />{filtered.length} shown{selectedJobs.length > 0 ? ` · ${selectedJobs.length} selected` : ""}</div>
+              <div className="flex items-center gap-1">
+                <Button size="sm" disabled={bulkBusy || !user?.approved || !primaryAction} onClick={() => primaryAction && openBulk(primaryAction)} title={!primaryAction && selectedJobs.length ? "Select only claimable work or only work assigned to you" : undefined}><ListChecks />{primaryLabel}{primaryAction ? ` (${selectedJobs.length})` : ""}</Button>
+                <DropdownMenu>
+                  <DropdownMenuTrigger render={<Button size="sm" variant="outline" className="w-8 px-0" aria-label="More bulk actions" disabled={bulkBusy || !user?.approved} />}><ChevronDown className="size-4" /></DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-52">
+                    <DropdownMenuItem disabled={!locationJobs.length} onClick={() => openBulk("location")}><MapPin />Bulk set location{locationJobs.length ? ` (${locationJobs.length})` : ""}</DropdownMenuItem>
+                    <DropdownMenuItem disabled={!owned.length} onClick={() => openBulk("release")}><RotateCcw />Bulk release claim{owned.length ? ` (${owned.length})` : ""}</DropdownMenuItem>
+                    <DropdownMenuItem disabled={!filtered.length} onClick={() => setBulkIds((ids) => mergeVisibleSelection(ids, filtered.map((job) => job.id), filtered.map((job) => job.id)))}>Select visible parts</DropdownMenuItem>
+                    <DropdownMenuItem disabled={!bulkIds.length} onClick={() => setBulkIds([])}>Clear selection</DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -286,6 +368,15 @@ export function FabricationDashboard({
           <>
             <div className="hidden h-[min(59vh,680px)] min-h-[430px] md:block">
               <AgGridReact<FabricationJob>
+                ref={gridRef}
+                rowSelection={rowSelection}
+                selectionColumnDef={{ width: 48, pinned: "left", resizable: false }}
+                onGridReady={syncSelection}
+                onRowDataUpdated={syncSelection}
+                onSelectionChanged={({ api, source }) => {
+                  if (["api", "rowDataChanged", "gridInitializing", "selectableChanged"].includes(source)) return;
+                  setBulkIds((ids) => mergeVisibleSelection(ids, filtered.map((job) => job.id), api.getSelectedRows().map((job) => job.id)));
+                }}
                 theme={gridTheme}
                 rowData={filtered}
                 columnDefs={columnDefs}
@@ -300,11 +391,15 @@ export function FabricationDashboard({
             </div>
             <div className="divide-y md:hidden">
               {filtered.map((job) => (
-                <button key={job.id} onClick={() => openJob(job)} className="block w-full p-4 text-left transition hover:bg-muted/40">
+                <article key={job.id} className="flex items-center gap-3 p-4 text-left transition hover:bg-muted/40">
+                  <Checkbox aria-label={`Select ${job.partNumber}`} checked={bulkIds.includes(job.id)} disabled={bulkBusy || !user?.approved} onCheckedChange={(checked) => setBulkIds((ids) => checked ? [...new Set([...ids, job.id])] : ids.filter((id) => id !== job.id))} />
+                  <div className="min-w-0 flex-1">
                   <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary"><CopyPartNumber partNumber={job.partNumber} /> <ObsoleteBadge obsolete={job.obsolete} /></p><h3 className="mt-1 font-semibold">{job.partName}</h3><p className="mt-1 font-mono text-[11px] text-muted-foreground">{job.documentName ?? "Document not synced"}</p></div><StatusBadge status={job.status} /></div>
                   <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground"><span className="flex items-center gap-1"><Paintbrush className="size-3" />{job.color}</span><span>{job.quantity} required</span><span>{job.machinist || "Unclaimed"}</span><span>Location: {job.storageLocation ?? "Not recorded"}</span></div>
                   <p className={cn("mt-2 line-clamp-2 text-xs", job.qcNotes ? "text-foreground" : "text-muted-foreground")}>QC notes: {job.qcNotes || "No inspection notes"}</p>
-                </button>
+                  <Button size="sm" variant="outline" className="mt-3" onClick={() => openJob(job)}>Open<ChevronRight /></Button>
+                  </div>
+                </article>
               ))}
             </div>
           </>
@@ -312,6 +407,16 @@ export function FabricationDashboard({
       </div>
       <div className="mt-3 flex flex-col gap-1 text-[11px] text-muted-foreground sm:flex-row sm:items-center sm:justify-between"><span>Finishing jobs become available after manufacturing QC passes.</span><span>Last refreshed {query.data ? formatDate(query.data.syncedAt) : "—"}</span></div>
 
+      <Dialog open={bulkDialog !== null} onOpenChange={(open) => { if (!bulkMutation.isPending && !open) setBulkDialog(null); }}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>{bulkDialog === "location" ? "Bulk set location" : bulkDialog === "release" ? "Bulk release claim" : bulkDialog === "complete" ? "Bulk complete finishing" : "Bulk claim finishing"}</DialogTitle><DialogDescription>{bulkDialog === "location" ? locationJobs.length : dialogJobs.length} selected {bulkDialog === "location" ? "part requirements" : "finishing jobs"}. Applies to the full quantity of each job.</DialogDescription></DialogHeader>
+          <ul className="max-h-48 space-y-1 overflow-y-auto text-sm">{dialogJobs.map((job) => <li key={job.id}><CopyPartNumber partNumber={job.partNumber} /> · {job.color} · Qty {job.quantity}</li>)}</ul>
+          {dialogJobs.some((job) => !filtered.some((row) => row.id === job.id)) && <p className="text-xs text-amber-700">Includes selected jobs hidden by the current filters.</p>}
+          {bulkDialog === "release" && <p className="text-xs text-muted-foreground">Only your active claims are released; other selected jobs are skipped.</p>}
+          {bulkDialog === "location" && <><StorageLocationSelect value={bulkLocation} onChange={setBulkLocation} disabled={bulkBusy} emptyLabel="Choose a location" allowOnRobot={allowOnRobot} />{!allowOnRobot && <p className="text-xs text-muted-foreground">On Robot requires active parts with passed QC and completed finishing.</p>}</>}
+          <DialogFooter><Button variant="outline" disabled={bulkMutation.isPending} onClick={() => setBulkDialog(null)}>Cancel</Button><Button disabled={bulkBusy || !dialogJobs.length || !user?.approved || (bulkDialog === "location" && (!bulkLocation || bulkLocation === "On Robot" && !allowOnRobot))} onClick={() => { if (bulkDialog) bulkMutation.mutate({ action: bulkDialog, targets: bulkDialog === "location" ? locationJobs : dialogJobs, location: bulkLocation }); }}>{bulkMutation.isPending && <LoaderCircle className="animate-spin" />}{bulkDialog === "location" ? "Set location" : bulkDialog === "release" ? "Release claims" : bulkDialog === "complete" ? "Mark complete" : "Claim jobs"}</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Sheet open={Boolean(selected)} onOpenChange={(open) => !open && setSelectedId(null)}>
         <SheetContent detailView className="w-full overflow-y-auto sm:max-w-xl">
           {selected && (
