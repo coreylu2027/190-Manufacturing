@@ -125,6 +125,14 @@ The reusable notification service in `lib/notifications.ts` stores an in-site al
 
 ## Assembly GLB previews
 
+To generate previews only for STEP-backed parts that have no existing GLB, run:
+
+```powershell
+npm run manufacturing:generate-previews -- --apply --missing-only
+```
+
+This skips both STEP-derived and assembly-derived previews, verifies each uploaded GLB, and checks that existing STEP-preview metadata remains unchanged. Do not combine `--missing-only` with `--force`.
+
 Parts without STEP previews can use isolated meshes extracted from an Onshape assembly GLB. The `assembly_part_previews` table is a separate, private fallback; importing never updates `part_previews`, replaces an existing fallback, or overwrites a Storage object. The authenticated preview routes support both sources. Deploy the dashboard changes to show the viewer for parts without STEP files.
 
 Apply `supabase/migrations/20260910031802_assembly_glb_previews.sql` after the production part-preview schema. Obtain an inventory using the server-only `manufacturing_assembly_preview_inventory()` RPC and save its JSON array locally. Then run:

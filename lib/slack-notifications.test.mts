@@ -21,6 +21,20 @@ const operationEvent: SlackManufacturingEvent = {
   becameReadyForQc: true,
 };
 
+test("obsoletion and restoration alerts identify the requirement and give safe work guidance", () => {
+  const base = { actorName: "Alex <A>", requirementId: 20, partNumber: "P-1", partName: "Fixture <plate>", assemblyNumber: "A-1", revision: "B&2", location: "On Robot" };
+  const obsolete = formatSlackManufacturingEvent({ ...base, type: "requirement_obsoleted" });
+  assert.match(obsolete.text, /Do not manufacture or install/);
+  const blocks = JSON.stringify(obsolete.blocks);
+  for (const pattern of [/Alex &lt;A&gt;/, /Fixture &lt;plate&gt;/, /Assembly A-1/, /Requirement #20/, /Revision B&amp;2/, /currently recorded as On Robot/]) assert.match(blocks, pattern);
+  const stored = formatSlackManufacturingEvent({ ...base, type: "requirement_obsoleted", location: null });
+  assert.doesNotMatch(JSON.stringify(stored), /currently recorded as On Robot/);
+  const restored = formatSlackManufacturingEvent({ ...base, type: "requirement_restored" });
+  assert.match(restored.text, /restored from obsolete/);
+  assert.match(JSON.stringify(restored.blocks), /Existing workflow, QC, and routing requirements still apply/);
+  assert.doesNotMatch(JSON.stringify(restored.blocks), /Do not manufacture or install/);
+});
+
 test("operation notifications combine completion and the Ready for QC transition", () => {
   const payload = formatSlackManufacturingEvent(operationEvent);
   assert.match(payload.text, /Ready for QC/);

@@ -93,6 +93,12 @@ export function createSupabaseManufacturingAdapter(config: AdapterConfig) {
             "Part Location": row.part_location ?? null,
             "Location Updated By": row.location_updated_by ?? null,
             "Location Updated At": row.location_updated_at ?? null,
+            "Obsolete": row.obsolete ?? false,
+            "Obsoletion Version": row.obsoletion_version ?? 0,
+            "Obsoletion Changed At": row.obsoletion_changed_at ?? null,
+            "Obsoletion Changed By": row.obsoletion_changed_by ?? null,
+            "Obsoletion Origin": row.obsoletion_origin ?? null,
+            "Replacement Requirement": row.obsolete_replacement_id ?? null,
           } : raw;
         })
           .sort((a,b)=>Number(a.order??a.id)-Number(b.order??b.id) || a.id-b.id)] as const));

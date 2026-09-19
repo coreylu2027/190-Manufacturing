@@ -1,4 +1,8 @@
 "use client";
+import { workAllowed } from "@/lib/obsoletion";
+import type { ObsoletionFields } from "@/lib/types";
+import { ObsoleteBadge, ObsoleteWarning, RequirementObsoletion } from "@/components/requirement-obsoletion";
+import { CopyPartNumber, PartNumberCell } from "@/components/copy-part-number";
 import { ForceQcButton, hasUnfinishedQcPrerequisites } from "@/components/force-qc";
 
 import {
@@ -94,6 +98,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { mergeVisibleSelection, settleSequentially } from "@/lib/bulk-selection";
 import { safeManufacturingFileName } from "@/lib/manufacturing/file-names";
+import { requirementStatus, type ProductionStatus } from "@/lib/production-status";
 import { nextWorkflowAction } from "@/lib/manufacturing-workflow";
 import { isShopName } from "@/lib/profile-name";
 import { createClient } from "@/lib/supabase/client";
@@ -135,7 +140,7 @@ function activeManufacturingQueryKey(workspaceView: WorkspaceView) {
   return workspaceView;
 }
 
-interface ProductionRequirement {
+interface ProductionRequirement extends ObsoletionFields {
   key: string;
   requirementId: number | null;
   requirementKey: string | null;
@@ -171,7 +176,7 @@ interface ProductionRequirement {
   completedManufacturingOperations: number;
   totalManufacturingOperations: number;
   routingProgress: number;
-  status: OperationStatus;
+  status: ProductionStatus;
   storageLocation: ManufacturingOperation["storageLocation"];
   locationUpdatedBy: string | null;
   locationUpdatedAt: string | null;
@@ -197,26 +202,27 @@ const gridTheme = themeQuartz.withParams({
   spacing: 6,
 });
 
-const statusStyles: Record<OperationStatus, string> = {
+const statusStyles: Record<ProductionStatus, string> = {
   Planned: "border-slate-200 bg-slate-100 text-slate-700",
   Ready: "border-emerald-200 bg-emerald-100 text-emerald-800",
   "In Progress": "border-blue-200 bg-blue-100 text-blue-800",
   Blocked: "border-amber-200 bg-amber-100 text-amber-900",
+  "QC Pending": "border-cyan-200 bg-cyan-100 text-cyan-800",
   Complete: "border-violet-200 bg-violet-100 text-violet-800",
 };
 
-function StatusBadge({ status }: { status: OperationStatus }) {
+function StatusBadge({ status }: { status: ProductionStatus }) {
   return <Badge variant="outline" className={cn("font-semibold", statusStyles[status])}>{status}</Badge>;
 }
 
-function StatusCell({ value }: { value: OperationStatus }) {
+function StatusCell({ value }: { value: ProductionStatus }) {
   return <div className="flex h-full items-center"><StatusBadge status={value} /></div>;
 }
 
 function ActionCell({ data, onOpen, user }: { data?: ManufacturingOperation; onOpen: (operation: ManufacturingOperation) => void; user: OperationsResponse["user"] }) {
   if (!data) return null;
-  const claimable = ["Ready", "In Progress"].includes(data.status) && data.availableQuantity > 0;
-  const printable = isPrintingOperation(data) && data.claimedQuantity > 0;
+  const claimable = workAllowed(data) && ["Ready", "In Progress"].includes(data.status) && data.availableQuantity > 0;
+  const printable = workAllowed(data) && isPrintingOperation(data) && data.claimedQuantity > 0;
   const stealable = isOperationStealable(data, user);
   return (
     <div className="flex h-full items-center justify-end">
@@ -303,13 +309,13 @@ function otherClaimants(operation: ManufacturingOperation, user: OperationsRespo
 }
 
 function isOperationStealable(operation: ManufacturingOperation, user: OperationsResponse["user"]) {
-  return ["Ready", "In Progress"].includes(operation.status)
+  return workAllowed(operation) && ["Ready", "In Progress"].includes(operation.status)
     && operation.availableQuantity === 0
     && otherClaimants(operation, user).length > 0;
 }
 
 function isOperationClaimable(operation: ManufacturingOperation) {
-  return ["Ready", "In Progress"].includes(operation.status) && operation.availableQuantity > 0;
+  return workAllowed(operation) && ["Ready", "In Progress"].includes(operation.status) && operation.availableQuantity > 0;
 }
 
 /** Keeps every file in a bulk download distinct, since parts can share a STEP file name. */
@@ -347,6 +353,7 @@ function saveBlobAs(blob: Blob, fileName: string) {
 type BulkAction = Extract<OperationQuantityAction, "claim" | "complete">;
 
 function bulkActionPlan(operation: ManufacturingOperation, user: OperationsResponse["user"], view: QueueView) {
+  if (!workAllowed(operation)) return null;
   const claimedQuantity = allocationForUser(operation, user).claimed;
   const claimable = isOperationClaimable(operation);
   if (view === "available") return claimable ? { action: "claim" as const, quantity: operation.availableQuantity } : null;
@@ -371,13 +378,6 @@ const inverseQuantityAction: Record<OperationQuantityAction, OperationQuantityAc
   undo_complete: "complete",
 };
 
-function requirementStatus(operations: ManufacturingOperation[]): OperationStatus {
-  if (operations.every((operation) => operation.status === "Complete")) return "Complete";
-  if (operations.some((operation) => operation.status === "Blocked")) return "Blocked";
-  if (operations.some((operation) => operation.status === "In Progress")) return "In Progress";
-  if (operations.some((operation) => operation.status === "Ready")) return "Ready";
-  return "Planned";
-}
 
 function ProductionOverview({
   canForceQc,
@@ -395,10 +395,15 @@ function ProductionOverview({
   onRetry: () => void;
 }) {
   const [search, setSearch] = useState("");
-  const [status, setStatus] = useState<"all" | OperationStatus>("all");
+  const [status, setStatus] = useState<"all" | "Obsolete" | ProductionStatus>("all");
   const [sourceDocument, setSourceDocument] = useState("all");
   const [location, setLocation] = useState("all");
   const [selectedRequirementKey, setSelectedRequirementKey] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+  const [locationIds, setLocationIds] = useState<number[]>([]);
+  const requirementsGridRef = useRef<AgGridReact<ProductionRequirement>>(null);
+  const [locationDialogOpen, setLocationDialogOpen] = useState(false);
+  const [moveLocation, setMoveLocation] = useState<StorageLocation | null>(null);
   const requirements = useMemo<ProductionRequirement[]>(() => {
     const grouped = new Map<string, ManufacturingOperation[]>();
 
@@ -413,6 +418,12 @@ function ProductionOverview({
         const first = routedOperations[0];
         return {
           key,
+          obsolete: first.obsolete,
+          obsoletionVersion: first.obsoletionVersion,
+          obsoletionChangedAt: first.obsoletionChangedAt,
+          obsoletionChangedBy: first.obsoletionChangedBy,
+          obsoletionOrigin: first.obsoletionOrigin,
+          replacementRequirementId: first.replacementRequirementId,
           requirementId: first.requirementId,
           requirementKey: first.requirementKey,
           partNumber: first.partNumber,
@@ -461,12 +472,13 @@ function ProductionOverview({
   const visibleRequirements = useMemo(() => {
     const term = search.trim().toLocaleLowerCase();
     const filtered = requirements.filter((requirement) => {
-      if (status !== "all" && requirement.status !== status) return false;
+      if (status === "Obsolete" ? !requirement.obsolete : status !== "all" && requirement.status !== status) return false;
       if (sourceDocument === "missing" && requirement.documentName) return false;
       if (sourceDocument !== "all" && sourceDocument !== "missing" && requirement.documentName !== sourceDocument) return false;
       if (location === "unassigned" && requirement.storageLocation) return false;
       if (location !== "all" && location !== "unassigned" && requirement.storageLocation !== location) return false;
       if (term && ![
+        requirement.obsolete ? "obsolete" : "",
         requirement.partNumber,
         requirement.revision,
         requirement.partName,
@@ -490,12 +502,59 @@ function ProductionOverview({
     total: requirements.length,
     complete: requirements.filter((requirement) => requirement.status === "Complete").length,
     active: requirements.filter((requirement) => requirement.status === "In Progress").length,
-    attention: requirements.filter((requirement) => requirement.status === "Blocked").length,
+    attention: requirements.filter((requirement) => requirement.obsolete || requirement.status === "Blocked").length,
   }), [requirements]);
   const selectedRequirement = requirements.find((requirement) => requirement.key === selectedRequirementKey) ?? null;
   const openRequirement = (requirement: ProductionRequirement) => setSelectedRequirementKey(requirement.key);
+  const selectedParts = requirements.filter((part) => part.requirementId !== null && locationIds.includes(part.requirementId));
+  const blockedParts = selectedParts.filter((part) => part.obsolete || !part.activeInBom || !canUseOnRobotLocation(part.effectiveQcResult === "passed", part.finishingComplete));
+  const visibleIds = visibleRequirements.flatMap((part) => part.requirementId === null ? [] : [part.requirementId]);
+  const togglePart = useCallback((id: number, checked: boolean) => {
+    setLocationIds((ids) => checked ? [...new Set([...ids, id])] : ids.filter((value) => value !== id));
+  }, []);
+  const syncRequirementSelection = useCallback(() => {
+    const api = requirementsGridRef.current?.api;
+    if (!api) return;
+    const selectedIds = new Set(locationIds);
+    const toSelect: Parameters<typeof api.setNodesSelected>[0]["nodes"] = [];
+    const toDeselect: Parameters<typeof api.setNodesSelected>[0]["nodes"] = [];
+    api.forEachNode((node) => {
+      if (!node.data) return;
+      (node.data.requirementId !== null && selectedIds.has(node.data.requirementId) ? toSelect : toDeselect).push(node);
+    });
+    if (toSelect.length) api.setNodesSelected({ nodes: toSelect, newValue: true, source: "api" });
+    if (toDeselect.length) api.setNodesSelected({ nodes: toDeselect, newValue: false, source: "api" });
+  }, [locationIds]);
+  useEffect(() => { syncRequirementSelection(); }, [syncRequirementSelection, visibleRequirements]);
+  const locationMutation = useMutation({
+    mutationFn: async () => {
+      if (!moveLocation || !selectedParts.length) throw new Error("Select parts and a location");
+      if (moveLocation === "On Robot" && blockedParts.length) throw new Error("Selected parts still require QC or finishing");
+      const results = await settleSequentially(selectedParts, async (part) => {
+        const response = await fetch(`/api/requirements/${part.requirementId}/location`, {
+          method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ location: moveLocation }),
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(`${part.partNumber}: ${body.error ?? "Unable to update location"}`);
+        return part.requirementId!;
+      });
+      return {
+        succeeded: results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []),
+        errors: results.flatMap((result) => result.status === "rejected" ? [result.reason instanceof Error ? result.reason.message : "Unable to update location"] : []),
+      };
+    },
+    onSuccess: ({ succeeded, errors }) => {
+      setLocationIds((ids) => ids.filter((id) => !succeeded.includes(id)));
+      if (errors.length) toast.warning(`Updated ${succeeded.length} part locations; ${errors.length} failed and remain selected.`, { description: errors.join("; ") });
+      else { toast.success(`Location updated for ${succeeded.length} part requirements`); setLocationDialogOpen(false); }
+    },
+    onError: (error) => toast.error(error.message),
+    onSettled: () => {
+      for (const queryKey of [["operations"], ["qc"], ["fabrication"], ["admin"]]) void queryClient.invalidateQueries({ queryKey });
+    },
+  });
   const columnDefs = useMemo<ColDef<ProductionRequirement>[]>(() => [
-    { field: "partNumber", headerName: "PART", minWidth: 155, pinned: "left", cellClass: "font-mono font-semibold" },
+    { field: "partNumber", equals: () => false, cellRenderer: PartNumberCell, cellRendererParams: { suppressMouseEventHandling: () => true }, headerName: "PART", minWidth: 155, pinned: "left", cellClass: "font-mono font-semibold" },
     { field: "revision", headerName: "REVISION", width: 104, valueFormatter: ({ value }) => value || "—" },
     { field: "partName", headerName: "DESCRIPTION", minWidth: 230, flex: 1 },
     { field: "documentName", headerName: "SOURCE DOCUMENT", minWidth: 175, cellClass: "font-mono", valueFormatter: ({ value }) => value || "Not synced" },
@@ -505,6 +564,15 @@ function ProductionOverview({
     { field: "status", headerName: "STATUS", minWidth: 145, cellRenderer: StatusCell },
     { headerName: "", width: 142, pinned: "right", sortable: false, filter: false, resizable: false, cellRenderer: ProductionActionCell, cellRendererParams: { onOpen: openRequirement } },
   ], []);
+  const requirementRowSelection = useMemo(() => ({
+    mode: "multiRow" as const,
+    checkboxes: true,
+    headerCheckbox: true,
+    selectAll: "all" as const,
+    hideDisabledCheckboxes: false,
+    enableClickSelection: false,
+    isRowSelectable: ({ data }: { data?: ProductionRequirement }) => data?.requirementId != null,
+  }), []);
 
   return (
     <section className="mx-auto max-w-[1800px] px-4 py-5 md:px-7 md:py-7">
@@ -531,18 +599,19 @@ function ProductionOverview({
 
       <div className="overflow-hidden rounded-2xl border bg-card shadow-[0_14px_42px_rgba(15,23,42,.055)]">
         <div className="border-b bg-muted/25 p-3 md:p-4">
-          <div className="flex flex-col gap-3 xl:flex-row xl:items-center">
-            <div className="min-w-52 xl:mr-auto">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="order-1 min-w-52">
               <h2 className="font-semibold">Routed parts</h2>
               <p className="mt-0.5 text-xs text-muted-foreground">Grouped by source document and part number.</p>
             </div>
-            <div className="relative min-w-0 flex-1 xl:max-w-md">
+            <div className="order-2 grid w-full basis-full grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(15rem,1fr)_12rem_14rem_13rem]">
+            <div className="relative min-w-0">
               <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
               <Input value={search} onChange={(event) => setSearch(event.target.value)} className="h-9 bg-card pl-9" placeholder="Search part, revision, assembly, document…" />
             </div>
-            <Select value={status} onValueChange={(value) => setStatus((value ?? "all") as "all" | OperationStatus)}>
+            <Select value={status} onValueChange={(value) => setStatus((value ?? "all") as "all" | "Obsolete" | ProductionStatus)}>
               <SelectTrigger className="h-9 w-full bg-card xl:w-48"><SlidersHorizontal className="text-muted-foreground" /><SelectValue placeholder="All statuses" /></SelectTrigger>
-              <SelectContent><SelectItem value="all">All statuses</SelectItem>{(["Planned", "Ready", "In Progress", "Blocked", "Complete"] as OperationStatus[]).map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
+              <SelectContent><SelectItem value="all">All statuses</SelectItem><SelectItem value="Obsolete">Obsolete</SelectItem>{(["Planned", "Ready", "In Progress", "Blocked", "QC Pending", "Complete"] as ProductionStatus[]).map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
             </Select>
             <Select value={sourceDocument} onValueChange={(value) => setSourceDocument(value ?? "all")}>
               <SelectTrigger className="h-9 w-full bg-card xl:w-56"><FileText className="text-muted-foreground" /><SelectValue placeholder="All source documents" /></SelectTrigger>
@@ -552,7 +621,19 @@ function ProductionOverview({
               <SelectTrigger className="h-9 w-full bg-card xl:w-52"><MapPin className="text-muted-foreground" /><SelectValue placeholder="All locations" /></SelectTrigger>
               <SelectContent><SelectItem value="all">All locations</SelectItem>{locations.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}<SelectItem value="unassigned">Not recorded</SelectItem></SelectContent>
             </Select>
-            <div className="whitespace-nowrap text-xs text-muted-foreground">{visibleRequirements.length} of {requirements.length} shown</div>
+            </div>
+            <div className="order-1 flex w-full flex-wrap items-center justify-between gap-3 sm:ml-auto sm:w-auto">
+              <div className="flex items-center gap-2 whitespace-nowrap text-xs text-muted-foreground"><SlidersHorizontal className="size-3.5" /> {visibleRequirements.length} shown{selectedParts.length > 0 ? ` · ${selectedParts.length} selected` : ""}</div>
+              <Button size="sm" disabled={!selectedParts.length || locationMutation.isPending} onClick={() => { setMoveLocation(null); setLocationDialogOpen(true); }}><MapPin /> Bulk set location{selectedParts.length > 0 ? ` (${selectedParts.length})` : ""}</Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger render={<Button size="sm" variant="outline" className="w-8 px-0" aria-label="More bulk actions" disabled={locationMutation.isPending} />}>
+                  <ChevronDown className="size-4" />
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-52">
+                  <DropdownMenuItem disabled={!locationIds.length} onClick={() => setLocationIds([])}>Clear selection</DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
           </div>
         </div>
 
@@ -568,9 +649,19 @@ function ProductionOverview({
           <>
             <div className="hidden h-[min(59vh,680px)] min-h-[430px] md:block">
               <AgGridReact<ProductionRequirement>
+                ref={requirementsGridRef}
                 theme={gridTheme}
                 rowData={visibleRequirements}
                 columnDefs={columnDefs}
+                rowSelection={requirementRowSelection}
+                selectionColumnDef={{ width: 48, pinned: "left", resizable: false }}
+                onGridReady={syncRequirementSelection}
+                onRowDataUpdated={syncRequirementSelection}
+                onSelectionChanged={({ api, source }) => {
+                  if (["api", "rowDataChanged", "gridInitializing", "selectableChanged"].includes(source)) return;
+                  const selectedVisibleIds = api.getSelectedRows().flatMap((part) => part.requirementId === null ? [] : [part.requirementId]);
+                  setLocationIds((current) => mergeVisibleSelection(current, visibleIds, selectedVisibleIds));
+                }}
                 defaultColDef={{ sortable: true, filter: false, resizable: true }}
                 initialState={{ sort: { sortModel: [{ colId: "documentName", sort: "asc" }] } }}
                 getRowId={({ data }) => data.key}
@@ -585,10 +676,13 @@ function ProductionOverview({
               {visibleRequirements.map((requirement) => {
                 const percent = Math.round((requirement.completedOperations / requirement.totalOperations) * 100);
                 return (
-                  <article key={requirement.key} className="p-4">
-                    <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary">{requirement.partNumber}</p><h3 className="mt-1 font-semibold">{requirement.partName}</h3><p className="mt-1 font-mono text-[11px] text-muted-foreground">Rev {requirement.revision ?? "—"} · {requirement.documentName ?? "Document not synced"} · Qty {requirement.quantity}</p><p className="mt-1 text-xs text-muted-foreground">Location: {requirement.storageLocation ?? "Not recorded"}</p></div><StatusBadge status={requirement.status} /></div>
+                  <article key={requirement.key} className="flex items-start gap-3 p-4 transition hover:bg-muted/40">
+                    <Checkbox className="mt-1" aria-label={`Select ${requirement.partNumber}`} checked={requirement.requirementId !== null && locationIds.includes(requirement.requirementId)} disabled={requirement.requirementId === null || locationMutation.isPending} onCheckedChange={(checked) => requirement.requirementId !== null && togglePart(requirement.requirementId, Boolean(checked))} />
+                    <div className="min-w-0 flex-1">
+                    <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary"><CopyPartNumber partNumber={requirement.partNumber} /> <ObsoleteBadge obsolete={requirement.obsolete} /></p><h3 className="mt-1 font-semibold">{requirement.partName}</h3><p className="mt-1 font-mono text-[11px] text-muted-foreground">Rev {requirement.revision ?? "—"} · {requirement.documentName ?? "Document not synced"} · Qty {requirement.quantity}</p><p className="mt-1 text-xs text-muted-foreground">Location: {requirement.storageLocation ?? "Not recorded"}</p></div><StatusBadge status={requirement.status} /></div>
                      <div className="mt-3"><div className="mb-1.5 flex justify-between text-xs text-muted-foreground"><span>Mfg {requirement.completedManufacturingOperations}/{requirement.totalManufacturingOperations}{requirement.totalCamTasks > 0 ? ` · CAM ${requirement.completedCamTasks}/${requirement.totalCamTasks}` : ""}</span><span className="font-semibold text-foreground">{percent}%</span></div><div className="h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary" style={{ width: `${percent}%` }} /></div></div>
                      <Button className="mt-3 w-full" variant="outline" onClick={() => setSelectedRequirementKey(requirement.key)}>More details<ChevronRight /></Button>
+                    </div>
                    </article>
                 );
               })}
@@ -597,13 +691,22 @@ function ProductionOverview({
         )}
       </div>
 
+      <Dialog open={locationDialogOpen} onOpenChange={(open) => { if (!locationMutation.isPending) setLocationDialogOpen(open); }}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Change part locations</DialogTitle><DialogDescription>Set one location for {selectedParts.length} selected part requirements. This applies to all quantities and operations of each requirement.</DialogDescription></DialogHeader>
+          <StorageLocationSelect showUnavailableOnRobot value={moveLocation} onChange={setMoveLocation} emptyLabel="Choose a location" disabled={locationMutation.isPending} allowOnRobot={selectedParts.length > 0 && blockedParts.length === 0} />
+          {blockedParts.length > 0 && <p className="max-h-40 overflow-y-auto text-sm text-muted-foreground">On Robot requires passed QC and completed finishing: {blockedParts.map((part) => `${part.partNumber} (${[part.effectiveQcResult !== "passed" ? "QC required" : "", !part.finishingComplete ? "finishing required" : ""].filter(Boolean).join(", ")})`).join("; ")}.</p>}
+          {selectedParts.some((part) => !visibleIds.includes(part.requirementId!)) && <p className="text-sm text-amber-700">Includes selected parts hidden by the current filters.</p>}
+          <DialogFooter><Button variant="outline" disabled={locationMutation.isPending} onClick={() => setLocationDialogOpen(false)}>Cancel</Button><Button disabled={!moveLocation || !selectedParts.length || locationMutation.isPending || (moveLocation === "On Robot" && blockedParts.length > 0)} onClick={() => locationMutation.mutate()}>{locationMutation.isPending && <LoaderCircle className="animate-spin" />}Set location</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Sheet open={Boolean(selectedRequirement)} onOpenChange={(open) => !open && setSelectedRequirementKey(null)}>
         <SheetContent detailView className="w-full overflow-y-auto sm:max-w-2xl">
           {selectedRequirement && (
             <>
               <SheetHeader className="border-b p-6 pr-14">
                 <div className="mb-2 flex flex-wrap items-center gap-2">
-                  <StatusBadge status={selectedRequirement.status} />
+                  <StatusBadge status={selectedRequirement.status} /><ObsoleteBadge obsolete={selectedRequirement.obsolete} />
                   <Badge variant="outline">{selectedRequirement.requirementStatus}</Badge>
                   <Badge variant="outline" className={cn(
                     selectedRequirement.effectiveQcResult === "passed" && "border-emerald-200 bg-emerald-50 text-emerald-800",
@@ -613,10 +716,12 @@ function ProductionOverview({
                   </Badge>
                 </div>
                 <SheetTitle className="text-2xl font-bold tracking-tight">{selectedRequirement.partName}</SheetTitle>
-                <SheetDescription className="font-mono text-xs font-semibold text-primary">{selectedRequirement.partNumber}{selectedRequirement.revision ? ` · Rev ${selectedRequirement.revision}` : ""}</SheetDescription>
+                <SheetDescription className="font-mono text-xs font-semibold text-primary"><CopyPartNumber partNumber={selectedRequirement.partNumber} />{selectedRequirement.revision ? ` · Rev ${selectedRequirement.revision}` : ""}</SheetDescription>
               </SheetHeader>
 
               <div className="detail-sections p-6"><div className="detail-columns space-y-6">
+                <ObsoleteWarning obsolete={selectedRequirement.obsolete} onRobot={selectedRequirement.storageLocation === "On Robot"} />
+                {selectedRequirement.requirementId !== null && <RequirementObsoletion key={selectedRequirement.requirementId} requirementId={selectedRequirement.requirementId} state={selectedRequirement} />}
                 {selectedRequirement.operations[0] && (
                   <section>
                     <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">3D part preview</h3>
@@ -678,7 +783,7 @@ function ProductionOverview({
                       updatedBy={selectedRequirement.locationUpdatedBy}
                       updatedAt={selectedRequirement.locationUpdatedAt}
                       canEdit
-                      allowOnRobot={canUseOnRobotLocation(selectedRequirement.effectiveQcResult === "passed", selectedRequirement.finishingComplete)}
+                      allowOnRobot={!selectedRequirement.obsolete && selectedRequirement.activeInBom && canUseOnRobotLocation(selectedRequirement.effectiveQcResult === "passed", selectedRequirement.finishingComplete)}
                     />
                     {!canUseOnRobotLocation(selectedRequirement.effectiveQcResult === "passed", selectedRequirement.finishingComplete) && (
                       <p className="mt-2 text-xs text-muted-foreground">“On Robot” becomes available after QC passes and any required finishing is complete.</p>
@@ -689,7 +794,7 @@ function ProductionOverview({
                 <section>
                   <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                     <h3 className="text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Quality review</h3>
-                    {canForceQc && selectedRequirement.requirementId !== null && selectedRequirement.activeInBom && selectedRequirement.effectiveQcResult !== "passed" && hasUnfinishedQcPrerequisites(selectedRequirement.operations) && (
+                    {canForceQc && !selectedRequirement.obsolete && selectedRequirement.requirementId !== null && selectedRequirement.activeInBom && selectedRequirement.effectiveQcResult !== "passed" && hasUnfinishedQcPrerequisites(selectedRequirement.operations) && (
                       <ForceQcButton
                         key={selectedRequirement.requirementId}
                         requirementId={selectedRequirement.requirementId}
@@ -1193,6 +1298,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
   const selectedLocationOperations = selectedBulkOperations.filter((operation) => operation.requirementId !== null);
   const selectedLocationRequirementCount = new Set(selectedLocationOperations.map((operation) => operation.requirementId)).size;
   const selectedReleaseItems = selectedBulkOperations.flatMap((operation) => {
+    if (!workAllowed(operation)) return [];
     const { claimed } = allocationForUser(operation, query.data?.user ?? null);
     return claimed > 0 ? [{ operation, quantity: claimed }] : [];
   });
@@ -1344,7 +1450,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
   };
 
   const columnDefs = useMemo<ColDef<ManufacturingOperation>[]>(() => [
-    { field: "partNumber", headerName: "PART", minWidth: 155, pinned: "left", cellClass: "font-mono font-semibold" },
+    { field: "partNumber", equals: () => false, cellRenderer: PartNumberCell, cellRendererParams: { suppressMouseEventHandling: () => true }, headerName: "PART", minWidth: 155, pinned: "left", cellClass: "font-mono font-semibold" },
     { field: "revision", headerName: "REVISION", width: 104, valueFormatter: ({ value }) => value || "—" },
     { field: "partName", headerName: "DESCRIPTION", minWidth: 230, flex: 1 },
     { field: "material", headerName: "MATERIAL", minWidth: 165, valueFormatter: ({ value }) => value || "Unspecified" },
@@ -1650,7 +1756,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                         onCheckedChange={(nextChecked) => setBulkSelectedIds((current) => nextChecked ? [...new Set([...current, operation.id])] : current.filter((id) => id !== operation.id))}
                       />
                       <button onClick={() => openOperation(operation)} className="min-w-0 flex-1 text-left">
-                        <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary">{operation.partNumber}</p><h3 className="mt-1 font-semibold">{operation.partName}</h3></div><StatusBadge status={operation.status} /></div>
+                        <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary"><CopyPartNumber partNumber={operation.partNumber} /> <ObsoleteBadge obsolete={operation.obsolete} /></p><h3 className="mt-1 font-semibold">{operation.partName}</h3></div><StatusBadge status={operation.status} /></div>
                         <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground"><span>Rev {operation.revision ?? "—"}</span><span>{operationLabel(operation)}</span><Badge variant="outline">{operation.workType}</Badge><span className="flex items-center gap-1"><Wrench className="size-3" />{operation.machine}</span><span>{operation.completedQuantity}/{operation.taskQuantity} done</span><span>{operation.availableQuantity} available</span></div>
                         <p className="mt-2 text-xs text-muted-foreground">Location: {operation.storageLocation ?? "Not recorded"}</p>
                       </button>
@@ -1685,10 +1791,11 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
               <SheetHeader className="border-b p-6 pr-14">
                 <div className="mb-2 flex items-center gap-2"><StatusBadge status={selected.status} /><Badge variant="outline">{operationLabel(selected)}</Badge><Badge variant="outline">{selected.workType}</Badge></div>
                 <SheetTitle className="text-2xl font-bold tracking-tight">{selected.workType === "CAM" ? `CAM — ${selected.partName}` : selected.partName}</SheetTitle>
-                <SheetDescription className="font-mono text-xs font-semibold text-primary">{selected.partNumber}</SheetDescription>
+                <SheetDescription className="font-mono text-xs font-semibold text-primary"><CopyPartNumber partNumber={selected.partNumber} /></SheetDescription>
               </SheetHeader>
 
               <div className="detail-sections p-6"><div className="detail-columns space-y-6">
+                <ObsoleteWarning obsolete={selected.obsolete} onRobot={selected.storageLocation === "On Robot"} />
                 {selected.requirementId && (
                   <section>
                     <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">3D part preview</h3>
@@ -1722,7 +1829,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                       updatedBy={selected.locationUpdatedBy}
                       updatedAt={selected.locationUpdatedAt}
                       canEdit
-                      allowOnRobot={canUseOnRobotLocation(selected.effectiveQcResult === "passed", selected.finishingComplete)}
+                      allowOnRobot={!selected.obsolete && selected.activeInBom && canUseOnRobotLocation(selected.effectiveQcResult === "passed", selected.finishingComplete)}
                     />
                   </section>
                 )}
@@ -1743,7 +1850,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                     <div className="mb-3 flex items-center justify-between gap-3">
                       <h3 className="text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">CAM handoff</h3>
                       {query.data?.user?.role === "admin" && selectedCamHandoff?.status === "Complete" && (
-                        <Button size="sm" variant="outline" onClick={openCamHandoffEditor}><Pencil /> Edit handoff</Button>
+                        <Button size="sm" variant="outline" disabled={!workAllowed(selected)} onClick={openCamHandoffEditor}><Pencil /> Edit handoff</Button>
                       )}
                     </div>
                     <div className="space-y-3 rounded-xl border bg-muted/20 p-4">
@@ -1799,12 +1906,12 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
               </div></div>
 
               <SheetFooter className="sticky bottom-0 border-t bg-card/95 p-4 backdrop-blur">
-                {["Ready", "In Progress"].includes(selected.status) && selected.availableQuantity > 0 && <Button size="lg" className="h-11" onClick={() => requestQuantityAction("claim", selected.availableQuantity)} disabled={mutation.isPending}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <CircleDot />} {selected.workType === "CAM" ? "Claim CAM task" : `Claim ${selected.availableQuantity === 1 ? "part" : "parts"}`}</Button>}
-                {isOperationStealable(selected, query.data?.user ?? null) && <Button size="lg" variant="destructive" className="h-11" onClick={requestSteal} disabled={mutation.isPending}><TriangleAlert /> Steal {selected.workType === "CAM" ? "CAM task" : "production requirement"}</Button>}
-                {selectedAllocation.claimed > 0 && <Button size="lg" className="h-11 bg-emerald-600 hover:bg-emerald-700" onClick={() => requestQuantityAction("complete", selectedAllocation.claimed)} disabled={mutation.isPending}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <Check />} Mark complete</Button>}
-                {isPrintingOperation(selected) && selectedOtherClaimants.length > 0 && <Button size="lg" className="h-11 bg-emerald-600 hover:bg-emerald-700" onClick={() => requestQuantityAction("complete", selected.claimedQuantity, true)} disabled={mutation.isPending}><Check /> Complete all claimed prints</Button>}
-                {selectedAllocation.claimed > 0 && <Button variant="outline" onClick={() => requestQuantityAction("release", selectedAllocation.claimed)} disabled={mutation.isPending}><RotateCcw /> Release claim</Button>}
-                {selectedAllocation.completed > 0 && <Button variant="outline" onClick={() => requestQuantityAction("undo_complete", selectedAllocation.completed)} disabled={mutation.isPending}><RotateCcw /> Undo completion</Button>}
+                {["Ready", "In Progress"].includes(selected.status) && selected.availableQuantity > 0 && <Button size="lg" className="h-11" onClick={() => requestQuantityAction("claim", selected.availableQuantity)} disabled={mutation.isPending || !workAllowed(selected)}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <CircleDot />} {selected.workType === "CAM" ? "Claim CAM task" : `Claim ${selected.availableQuantity === 1 ? "part" : "parts"}`}</Button>}
+                {isOperationStealable(selected, query.data?.user ?? null) && <Button size="lg" variant="destructive" className="h-11" onClick={requestSteal} disabled={mutation.isPending || !workAllowed(selected)}><TriangleAlert /> Steal {selected.workType === "CAM" ? "CAM task" : "production requirement"}</Button>}
+                {selectedAllocation.claimed > 0 && <Button size="lg" className="h-11 bg-emerald-600 hover:bg-emerald-700" onClick={() => requestQuantityAction("complete", selectedAllocation.claimed)} disabled={mutation.isPending || !workAllowed(selected)}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <Check />} Mark complete</Button>}
+                {isPrintingOperation(selected) && selectedOtherClaimants.length > 0 && <Button size="lg" className="h-11 bg-emerald-600 hover:bg-emerald-700" onClick={() => requestQuantityAction("complete", selected.claimedQuantity, true)} disabled={mutation.isPending || !workAllowed(selected)}><Check /> Complete all claimed prints</Button>}
+                {selectedAllocation.claimed > 0 && <Button variant="outline" onClick={() => requestQuantityAction("release", selectedAllocation.claimed)} disabled={mutation.isPending || !workAllowed(selected)}><RotateCcw /> Release claim</Button>}
+                {selectedAllocation.completed > 0 && <Button variant="outline" onClick={() => requestQuantityAction("undo_complete", selectedAllocation.completed)} disabled={mutation.isPending || !workAllowed(selected)}><RotateCcw /> Undo completion</Button>}
                 {selected.status === "Complete" && <div className="flex items-center justify-center gap-2 rounded-xl bg-emerald-50 p-3 text-sm font-semibold text-emerald-800"><Check className="size-4" /> {selected.workType === "CAM" ? "CAM completed" : `${selected.completedQuantity} of ${selected.taskQuantity} completed`} by {selected.machinist || "machinist"}</div>}
                 <Button variant="outline" onClick={() => setSelectedId(null)}>Close</Button>
               </SheetFooter>
@@ -1837,7 +1944,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                 <p className="text-xs text-muted-foreground">Current: {selected.storageLocation ?? "Not recorded"}. Location applies to all quantities of this part requirement.</p>
               </div>
             )}
-            <DialogFooter><Button type="button" variant="outline" onClick={() => setQuantityDialog(null)}>Cancel</Button><Button type="submit" disabled={mutation.isPending}>{mutation.isPending && <LoaderCircle className="animate-spin" />}{quantityDialog ? quantityActionCopy[quantityDialog.action].button : "Save"}</Button></DialogFooter>
+            <DialogFooter><Button type="button" variant="outline" onClick={() => setQuantityDialog(null)}>Cancel</Button><Button type="submit" disabled={mutation.isPending || !selected || !workAllowed(selected)}>{mutation.isPending && <LoaderCircle className="animate-spin" />}{quantityDialog ? quantityActionCopy[quantityDialog.action].button : "Save"}</Button></DialogFooter>
           </form>
         </DialogContent>
       </Dialog>
@@ -1860,7 +1967,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                 <textarea id="cam-notes" value={camNotes} onChange={(event) => setCamNotes(event.target.value)} maxLength={5000} placeholder="Workholding, tooling, or setup detail. Include here if your CAM has been checked." className="min-h-28 w-full resize-y rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring focus:ring-3 focus:ring-ring/50" />
               </div>
             </div>
-            <DialogFooter><Button type="button" variant="outline" onClick={() => setCamCompletionOpen(false)}>Cancel</Button><Button type="submit" disabled={mutation.isPending}>{mutation.isPending && <LoaderCircle className="animate-spin" />}Complete CAM</Button></DialogFooter>
+            <DialogFooter><Button type="button" variant="outline" onClick={() => setCamCompletionOpen(false)}>Cancel</Button><Button type="submit" disabled={mutation.isPending || !selected || !workAllowed(selected)}>{mutation.isPending && <LoaderCircle className="animate-spin" />}Complete CAM</Button></DialogFooter>
           </form>
         </DialogContent>
       </Dialog>
@@ -1953,7 +2060,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
               <DialogDescription>Set one location for {selectedLocationRequirementCount} part {selectedLocationRequirementCount === 1 ? "requirement" : "requirements"} across {selectedLocationOperations.length} selected operations. Claim and completion status will stay the same.</DialogDescription>
             </DialogHeader>
             <div className="my-5 space-y-3">
-              <StorageLocationSelect value={bulkMoveLocation} onChange={setBulkMoveLocation} emptyLabel="Choose a location" disabled={bulkLocationMutation.isPending} allowOnRobot={selectedLocationOperations.length > 0 && selectedLocationOperations.every((operation) => canUseOnRobotLocation(operation.effectiveQcResult === "passed", operation.finishingComplete))} />
+              <StorageLocationSelect value={bulkMoveLocation} onChange={setBulkMoveLocation} emptyLabel="Choose a location" disabled={bulkLocationMutation.isPending} allowOnRobot={selectedLocationOperations.length > 0 && selectedLocationOperations.every((operation) => !operation.obsolete && operation.activeInBom && canUseOnRobotLocation(operation.effectiveQcResult === "passed", operation.finishingComplete))} />
               <p className="text-xs text-muted-foreground">Location applies to all quantities and operations of each selected part requirement.</p>
               {selectedLocationOperations.some((operation) => !visibleOperationIds.has(operation.id)) && <p className="text-xs text-amber-700">Includes selected operations hidden by the current filters.</p>}
             </div>

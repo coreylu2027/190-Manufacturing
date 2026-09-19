@@ -89,6 +89,8 @@ function retryDelay(attempt: number) {
 
 const apply = process.argv.includes("--apply");
 const force = process.argv.includes("--force");
+const missingOnly = process.argv.includes("--missing-only");
+if (missingOnly && force) throw new Error("--missing-only cannot be combined with --force");
 const limitArgument = process.argv.find((argument) => argument.startsWith("--limit="));
 const limit = limitArgument ? Number(limitArgument.slice("--limit=".length)) : Number.POSITIVE_INFINITY;
 if (!apply) throw new Error("Pass --apply to generate, upload, verify, and register private GLB previews");
@@ -122,7 +124,22 @@ if (requiresMimeUpdate || requiresSizeUpdate) {
 
 const { data: sourceData, error: sourceError } = await supabase.rpc("manufacturing_step_preview_sources");
 if (sourceError) throw new Error(`Unable to load STEP preview sources: ${sourceError.message}`);
-const sources = parseSources(sourceData).slice(0, limit);
+async function previewInventory() {
+  const { data, error } = await supabase.rpc("manufacturing_assembly_preview_inventory");
+  if (error || !Array.isArray(data) || data.some((part) => !Number.isSafeInteger(part.id) || typeof part.has_preview !== "boolean")) {
+    throw new Error(`Unable to check existing previews: ${error?.message ?? "invalid inventory"}`);
+  }
+  return data as { id: number; has_preview: boolean }[];
+}
+
+const inventory = missingOnly ? await previewInventory() : null;
+const { data: originalManifest, error: originalManifestError } = missingOnly
+  ? await supabase.rpc("manufacturing_preview_manifest")
+  : { data: [], error: null };
+if (originalManifestError || !Array.isArray(originalManifest)) throw new Error("Unable to snapshot existing preview metadata");
+const sources = parseSources(sourceData).filter((source) => !missingOnly
+  || inventory!.some((part) => part.id === source.part_id && !part.has_preview)).slice(0, limit);
+console.log(`Selected ${sources.length} STEP sources${missingOnly ? " without existing previews" : ""}`);
 const occt = await createOpenCascadeImporter();
 let generated = 0;
 let skipped = 0;
@@ -187,6 +204,12 @@ for (const [index, source] of sources.entries()) {
   }
   inspectGlb(verifiedBytes);
 
+  // Recheck after conversion/upload so a preview added during this run is preserved.
+  if (missingOnly && !(await previewInventory()).some((part) => part.id === source.part_id && !part.has_preview)) {
+    skipped += 1;
+    console.log(`[${index + 1}/${sources.length}] Existing preview preserved: ${source.original_name}`);
+    continue;
+  }
   const { error: registerError } = await supabase.rpc("manufacturing_register_part_preview", {
     p_source_attachment_id: source.attachment_id,
     p_source_sha256: source.sha256,
@@ -209,6 +232,13 @@ for (const [index, source] of sources.entries()) {
 const { data: manifest, error: manifestError } = await supabase.rpc("manufacturing_preview_manifest");
 if (manifestError || !Array.isArray(manifest)) {
   throw new Error(`Unable to verify the preview manifest: ${manifestError?.message ?? "invalid response"}`);
+}
+if (missingOnly) {
+  for (const original of originalManifest) {
+    if (JSON.stringify(manifest.find((part) => part.part_id === original.part_id)) !== JSON.stringify(original)) {
+      throw new Error(`Existing preview metadata changed during this run: ${original.part_id}`);
+    }
+  }
 }
 console.log(JSON.stringify({
   sources: sources.length,

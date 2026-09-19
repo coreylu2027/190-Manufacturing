@@ -1,3 +1,5 @@
+import { requirementStatus } from "../production-status.ts";
+import { projectObsoletion } from "../obsoletion.ts";
 import { requirementIdentity } from "./identity.ts";
 // Pure projections from normalized manufacturing rows and the Supabase attachment catalog.
 import { deduplicateOperations, requiresPassedQc } from "../manufacturing-workflow.ts";
@@ -155,6 +157,7 @@ export function projectOperations(operationRows: SourceRow[], requirementRows: S
       requirementId,
       requirementKey: textValue(requirement?.["Production Key"]) || null,
       id: row.id,
+      ...projectObsoletion(requirement),
       operationKey: String(row.Operation ?? `${row.id}`),
       ...parsed,
       revision: revisionName(requirement, part),
@@ -205,7 +208,9 @@ export function projectOperations(operationRows: SourceRow[], requirementRows: S
     };
   });
 
-  const canonicalOperations = deduplicateOperations(parsedOperations.filter((operation) => operation.activeInRouting));
+  const activeRequirements = new Set(parsedOperations.filter((operation) => operation.activeInRouting).map((operation) => operation.requirementId));
+  const canonicalOperations = deduplicateOperations(parsedOperations.filter((operation) => operation.activeInRouting
+    || !activeRequirements.has(operation.requirementId) && (operation.obsolete || operation.obsoletionVersion > 0)));
   const camByTarget = new Map(canonicalOperations
     .filter((operation) => operation.workType === "CAM" && operation.requirementId)
     .map((operation) => [`${operation.requirementId}|${operation.operationNumber}`, operation]));
@@ -265,6 +270,7 @@ export function projectFinishing(
     const stepFile = partId ? files.get(`${partId}|step`) : undefined;
     return [{
       id: row.id,
+      ...projectObsoletion(requirement),
       productionKey: String(row["Production Key"] ?? row.id),
       requirementId,
       ...parsed,
@@ -276,7 +282,7 @@ export function projectFinishing(
       status: finishingCompleteBeforePostQcWork ? "Complete" : fabricationStatus(requirementStatus, machinist),
       requirementStatus,
       machinist,
-      active: Boolean(row.Active),
+      active: Boolean(row.Active) && requirement["Active in BOM"] !== false,
       lastSyncedAt: row["Last Synced At"] ? String(row["Last Synced At"]) : null,
       drawingUrl: part ? textValue(part["Onshape Drawing"]) || null : null,
       hasDrawingPdf: Boolean(drawingPdf),
@@ -292,7 +298,7 @@ export function projectFinishing(
     }];
   });
 
-  return jobs.filter(job => job.active);
+  return jobs.filter(job => job.active || job.obsolete || job.obsoletionVersion > 0);
 }
 export type ReviewRow = Omit<QualityReviewRow, "storage_location" | "location_updated_by" | "location_updated_at" | "rejected_quantity"> &
   Partial<Pick<QualityReviewRow, "storage_location" | "location_updated_by" | "location_updated_at" | "rejected_quantity">>;
@@ -316,13 +322,6 @@ export function projectQc(operations: ManufacturingOperation[], reviews: ReviewR
   );
 }
 
-function requirementStatus(operations: ManufacturingOperation[]): OperationStatus {
-  if (operations.every((operation) => operation.status === "Complete")) return "Complete";
-  if (operations.some((operation) => operation.status === "Blocked")) return "Blocked";
-  if (operations.some((operation) => operation.status === "In Progress")) return "In Progress";
-  if (operations.some((operation) => operation.status === "Ready")) return "Ready";
-  return "Planned";
-}
 
 export function withFinishingQc(jobs: FabricationJob[], reviews: ReviewRow[], operations: ManufacturingOperation[]) {
   const metadata = qualityMetadataByRequirement(operations, normalizedReviews(reviews), [], []).metadata;

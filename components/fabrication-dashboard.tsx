@@ -1,4 +1,6 @@
 "use client";
+import { ObsoleteBadge, ObsoleteWarning } from "@/components/requirement-obsoletion";
+import { CopyPartNumber, PartNumberCell } from "@/components/copy-part-number";
 
 import { themeQuartz, type ColDef } from "ag-grid-community";
 import { AgGridReact } from "ag-grid-react";
@@ -99,8 +101,8 @@ function ActionCell({ data, onOpen }: { data?: FabricationJob; onOpen: (job: Fab
   if (!data) return null;
   return (
     <div className="flex h-full items-center justify-end">
-      <Button size="sm" variant={data.status === "Ready" ? "default" : "ghost"} onClick={() => onOpen(data)}>
-        {data.status === "Ready" ? "Claim" : "Open"}<ChevronRight />
+      <Button size="sm" variant={!data.obsolete && data.active && data.status === "Ready" ? "default" : "ghost"} onClick={() => onOpen(data)}>
+        {!data.obsolete && data.active && data.status === "Ready" ? "Claim" : "Open"}<ChevronRight />
       </Button>
     </div>
   );
@@ -201,7 +203,7 @@ export function FabricationDashboard({
     const term = search.trim().toLocaleLowerCase();
     return jobs.filter((job) => {
       if (color !== "all" && job.color !== color) return false;
-      if (view === "available" && job.status !== "Ready") return false;
+      if (view === "available" && (job.obsolete || !job.active || job.status !== "Ready")) return false;
       if (view === "mine" && !(ownedBy(job, userName) && job.status === "In Progress")) return false;
       if (term && ![job.partNumber, job.partName, job.documentName, job.color, job.productionNotes, job.qcNotes, job.lastQualityFailure?.notes, job.machinist, job.storageLocation].join(" ").toLocaleLowerCase().includes(term)) return false;
       return true;
@@ -209,7 +211,7 @@ export function FabricationDashboard({
   }, [color, jobs, search, userName, view]);
 
   const stats = useMemo(() => ({
-    ready: jobs.filter((job) => job.status === "Ready").length,
+    ready: jobs.filter((job) => !job.obsolete && job.active && job.status === "Ready").length,
     active: jobs.filter((job) => job.status === "In Progress").length,
     waiting: jobs.filter((job) => job.status === "Planned").length,
     complete: jobs.filter((job) => job.status === "Complete").length,
@@ -217,7 +219,7 @@ export function FabricationDashboard({
 
   const openJob = (job: FabricationJob) => setSelectedId(job.id);
   const columnDefs = useMemo<ColDef<FabricationJob>[]>(() => [
-    { field: "partNumber", headerName: "PART", minWidth: 155, pinned: "left", cellClass: "font-mono font-semibold" },
+    { field: "partNumber", equals: () => false, cellRenderer: PartNumberCell, cellRendererParams: { suppressMouseEventHandling: () => true }, headerName: "PART", minWidth: 155, pinned: "left", cellClass: "font-mono font-semibold" },
     { field: "partName", headerName: "DESCRIPTION", minWidth: 230, flex: 1 },
     { field: "documentName", headerName: "SOURCE DOCUMENT", minWidth: 175, valueFormatter: ({ value }) => value || "Not synced" },
     { field: "quantity", headerName: "REQUIRED", width: 105, filter: "agNumberColumnFilter" },
@@ -299,7 +301,7 @@ export function FabricationDashboard({
             <div className="divide-y md:hidden">
               {filtered.map((job) => (
                 <button key={job.id} onClick={() => openJob(job)} className="block w-full p-4 text-left transition hover:bg-muted/40">
-                  <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary">{job.partNumber}</p><h3 className="mt-1 font-semibold">{job.partName}</h3><p className="mt-1 font-mono text-[11px] text-muted-foreground">{job.documentName ?? "Document not synced"}</p></div><StatusBadge status={job.status} /></div>
+                  <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary"><CopyPartNumber partNumber={job.partNumber} /> <ObsoleteBadge obsolete={job.obsolete} /></p><h3 className="mt-1 font-semibold">{job.partName}</h3><p className="mt-1 font-mono text-[11px] text-muted-foreground">{job.documentName ?? "Document not synced"}</p></div><StatusBadge status={job.status} /></div>
                   <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground"><span className="flex items-center gap-1"><Paintbrush className="size-3" />{job.color}</span><span>{job.quantity} required</span><span>{job.machinist || "Unclaimed"}</span><span>Location: {job.storageLocation ?? "Not recorded"}</span></div>
                   <p className={cn("mt-2 line-clamp-2 text-xs", job.qcNotes ? "text-foreground" : "text-muted-foreground")}>QC notes: {job.qcNotes || "No inspection notes"}</p>
                 </button>
@@ -316,11 +318,12 @@ export function FabricationDashboard({
             <>
               <SheetHeader className="border-b p-6 pr-14">
                 <div className="mb-2 flex flex-wrap items-center gap-2"><StatusBadge status={selected.status} /><Badge variant="outline" className="gap-1.5"><span className={cn("size-2 rounded-full", selected.color.toLocaleLowerCase() === "red" ? "bg-red-600" : "bg-slate-900")} />{selected.color}</Badge></div>
-                <SheetTitle className="text-2xl font-bold tracking-tight">{selected.partName}</SheetTitle>
-                <SheetDescription className="font-mono text-xs font-semibold text-primary">{selected.partNumber}</SheetDescription>
+                <SheetTitle className="text-2xl font-bold tracking-tight">{selected.partName} <ObsoleteBadge obsolete={selected.obsolete} /></SheetTitle>
+                <SheetDescription className="font-mono text-xs font-semibold text-primary"><CopyPartNumber partNumber={selected.partNumber} /></SheetDescription>
               </SheetHeader>
 
               <div className="detail-sections p-6"><div className="detail-columns space-y-6">
+                <ObsoleteWarning obsolete={selected.obsolete} onRobot={selected.storageLocation === "On Robot"} />
                 {selected.requirementId && (
                   <section>
                     <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">3D part preview</h3>
@@ -362,7 +365,7 @@ export function FabricationDashboard({
                     updatedBy={selected.locationUpdatedBy}
                     updatedAt={selected.locationUpdatedAt}
                     canEdit
-                    allowOnRobot={canUseOnRobotLocation(selected.effectiveQcResult === "passed", selected.status === "Complete")}
+                    allowOnRobot={!selected.obsolete && selected.active && canUseOnRobotLocation(selected.effectiveQcResult === "passed", selected.status === "Complete")}
                   />
                 </section>
 
@@ -397,10 +400,10 @@ export function FabricationDashboard({
               </div></div>
 
               <SheetFooter className="sticky bottom-0 border-t bg-card/95 p-4 backdrop-blur">
-                {selected.status === "Ready" && <Button size="lg" className="h-11" onClick={() => runAction("claim")} disabled={mutation.isPending}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <CircleDot />} Claim finishing job</Button>}
-                {selected.status === "In Progress" && ownedBy(selected, userName) && <Button size="lg" className="h-11 bg-emerald-600 hover:bg-emerald-700" onClick={() => runAction("complete")} disabled={mutation.isPending}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <Check />} Mark complete</Button>}
-                {selected.status === "In Progress" && ownedBy(selected, userName) && <Button variant="outline" onClick={() => runAction("release")} disabled={mutation.isPending}><RotateCcw /> Release claim</Button>}
-                {selected.status === "Complete" && ownedBy(selected, userName) && <Button variant="outline" onClick={() => runAction("undo_complete")} disabled={mutation.isPending}><RotateCcw /> Undo completion</Button>}
+                {selected.status === "Ready" && <Button size="lg" className="h-11" onClick={() => runAction("claim")} disabled={mutation.isPending || selected.obsolete || !selected.active}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <CircleDot />} Claim finishing job</Button>}
+                {selected.status === "In Progress" && ownedBy(selected, userName) && <Button size="lg" className="h-11 bg-emerald-600 hover:bg-emerald-700" onClick={() => runAction("complete")} disabled={mutation.isPending || selected.obsolete || !selected.active}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <Check />} Mark complete</Button>}
+                {selected.status === "In Progress" && ownedBy(selected, userName) && <Button variant="outline" onClick={() => runAction("release")} disabled={mutation.isPending || selected.obsolete || !selected.active}><RotateCcw /> Release claim</Button>}
+                {selected.status === "Complete" && ownedBy(selected, userName) && <Button variant="outline" onClick={() => runAction("undo_complete")} disabled={mutation.isPending || selected.obsolete || !selected.active}><RotateCcw /> Undo completion</Button>}
                 {selected.status === "Complete" && <div className="flex items-center justify-center gap-2 rounded-xl bg-emerald-50 p-3 text-sm font-semibold text-emerald-800"><Check className="size-4" /> {selected.quantity} finished by {selected.machinist || "machinist"}</div>}
                 {selected.status === "Planned" && <div className="flex items-center justify-center gap-2 rounded-xl bg-slate-100 p-3 text-sm font-semibold text-slate-700"><PackageCheck className="size-4" /> Waiting on manufacturing and QC</div>}
                 <Button variant="outline" onClick={() => setSelectedId(null)}>Close</Button>

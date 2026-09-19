@@ -28,7 +28,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
       <script dangerouslySetInnerHTML={{ __html: colorThemeScript }} />
       <QueryClientProvider client={queryClient}>
         <TooltipProvider>{children}</TooltipProvider>
-        <Toaster position="bottom-right" richColors />
+        <Toaster position="bottom-left" mobileOffset={{ bottom: "88px", left: "16px", right: "16px" }} richColors />
       </QueryClientProvider>
     </ThemeProvider>
   );
