@@ -1,4 +1,5 @@
 "use client";
+import { ObsoleteBadge, ObsoleteWarning } from "@/components/requirement-obsoletion";
 import { CopyPartNumber } from "@/components/copy-part-number";
 
 import { ForceQcPicker } from "@/components/force-qc";
@@ -143,7 +144,7 @@ function PartCell({ data }: { data?: QualityControlItem }) {
   const operation = data.operations[0];
   return (
     <div className="flex h-full min-w-0 flex-col justify-center leading-tight">
-      <span className="font-mono text-xs font-bold text-primary"><CopyPartNumber partNumber={operation.partNumber} /></span>
+      <span className="font-mono text-xs font-bold text-primary"><CopyPartNumber partNumber={operation.partNumber} /> <ObsoleteBadge obsolete={operation.obsolete} /></span>
       <span className="mt-1.5 truncate font-semibold" title={operation.partName}>{operation.partName}</span>
       <span className="mt-1.5 truncate text-[11px] text-muted-foreground" title={`Completed by ${completedBy(data)}`}>Qty {operation.quantity} · {completedBy(data)}</span>
     </div>
@@ -384,6 +385,7 @@ export function QualityControlDashboard() {
   const columnDefs = useMemo<ColDef<QualityControlItem>[]>(() => [
     {
       colId: "part",
+      equals: () => false, // Obsoletion can change while the displayed part identity stays the same.
       headerName: "PART",
       minWidth: 220,
       pinned: "left",
@@ -514,11 +516,11 @@ export function QualityControlDashboard() {
                 return (
                   <article key={item.requirementId} className="p-4">
                     <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0"><p className="font-mono text-xs font-bold text-primary"><CopyPartNumber partNumber={operation.partNumber} /></p><h3 className="mt-1 truncate font-semibold">{operation.partName}</h3><p className="mt-1 text-xs text-muted-foreground">{item.operations.length} operation{item.operations.length === 1 ? "" : "s"} · Qty {operation.quantity} · {completedBy(item)}</p></div>
+                      <div className="min-w-0"><p className="font-mono text-xs font-bold text-primary"><CopyPartNumber partNumber={operation.partNumber} /> <ObsoleteBadge obsolete={operation.obsolete} /></p><h3 className="mt-1 truncate font-semibold">{operation.partName}</h3><p className="mt-1 text-xs text-muted-foreground">{item.operations.length} operation{item.operations.length === 1 ? "" : "s"} · Qty {operation.quantity} · {completedBy(item)}</p></div>
                       <ResultBadge result={item.result} />
                     </div>
                     <div className="mt-3 flex flex-wrap gap-1.5">{item.operations.map((row) => <Badge key={row.id} variant="outline">{row.operationNumber} · {row.machine}</Badge>)}</div>
-                    <div className="mt-3"><QualityFailureCallout failure={item.lastQualityFailure} /></div>
+                    <div className="mt-3"><ObsoleteWarning obsolete={operation.obsolete} onRobot={item.storageLocation === "On Robot"} /><QualityFailureCallout failure={item.lastQualityFailure} /></div>
                     <label className="mt-4 block text-xs font-semibold text-muted-foreground" htmlFor={`qc-notes-${item.requirementId}`}>Inspection notes</label>
                     <textarea
                       id={`qc-notes-${item.requirementId}`}
@@ -535,12 +537,12 @@ export function QualityControlDashboard() {
                       deleting={productionNotesAreDeleting}
                       onDelete={deleteProductionNotesMutation.mutate}
                     />
-                    <div className="mt-3"><StorageLocationEditor requirementId={item.requirementId} value={item.storageLocation} updatedBy={item.locationUpdatedBy} updatedAt={item.locationUpdatedAt} canEdit allowOnRobot={canUseOnRobotLocation(item.effectiveQcResult === "passed", operation.finishingComplete)} /></div>
+                    <div className="mt-3"><StorageLocationEditor requirementId={item.requirementId} value={item.storageLocation} updatedBy={item.locationUpdatedBy} updatedAt={item.locationUpdatedAt} canEdit allowOnRobot={!operation.obsolete && operation.activeInBom && canUseOnRobotLocation(item.effectiveQcResult === "passed", operation.finishingComplete)} /></div>
                     <div className="mt-3 flex flex-wrap items-center gap-2">
                       <Button variant="outline" nativeButton={!operation.hasDrawingPdf} render={operation.hasDrawingPdf ? <a href={`/api/operations/${operation.id}/files/drawing-pdf`} target="_blank" rel="noreferrer" /> : undefined} disabled={!operation.hasDrawingPdf}><FileText /> Drawing PDF</Button>
                       <Button variant="outline" nativeButton={!operation.onshapeUrl} render={operation.onshapeUrl ? <a href={operation.onshapeUrl} target="_blank" rel="noreferrer" /> : undefined} disabled={!operation.onshapeUrl}><ExternalLink /> Onshape source</Button>
                       <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
-                        {item.result === "pending" ? <><Button variant="destructive" onClick={() => openFailureDialog(item)} disabled={reviewIsPending || !item.operations.every((row) => row.status === "Complete")}><X /> Fail QC</Button><Button className="bg-emerald-600 hover:bg-emerald-700" onClick={() => mutateReview({ item, result: "passed", notes: draftNotes[item.requirementId] ?? item.notes })} disabled={reviewIsPending || !item.operations.every((row) => row.status === "Complete")}>{reviewIsPending ? <LoaderCircle className="animate-spin" /> : <Check />} Pass QC</Button></> : item.result === "passed" ? <><Button onClick={() => mutateNotes({ item, notes: draftNotes[item.requirementId] ?? item.notes })} disabled={notesArePending || draftNotes[item.requirementId] === undefined || draftNotes[item.requirementId] === item.notes}>{notesArePending ? <LoaderCircle className="animate-spin" /> : <Save />} Save note</Button><Button variant="outline" onClick={() => mutateUndoReview(item)} disabled={undoReviewIsPending || notesArePending}><Clock3 /> Undo QC pass</Button></> : <p className="text-xs text-muted-foreground">Complete the reopened route to request QC again.</p>}
+                        {item.result === "pending" ? <><Button variant="destructive" onClick={() => openFailureDialog(item)} disabled={operation.obsolete || !operation.activeInBom || reviewIsPending || !item.operations.every((row) => row.status === "Complete")}><X /> Fail QC</Button><Button className="bg-emerald-600 hover:bg-emerald-700" onClick={() => mutateReview({ item, result: "passed", notes: draftNotes[item.requirementId] ?? item.notes })} disabled={operation.obsolete || !operation.activeInBom || reviewIsPending || !item.operations.every((row) => row.status === "Complete")}>{reviewIsPending ? <LoaderCircle className="animate-spin" /> : <Check />} Pass QC</Button></> : item.result === "passed" ? <><Button onClick={() => mutateNotes({ item, notes: draftNotes[item.requirementId] ?? item.notes })} disabled={notesArePending || draftNotes[item.requirementId] === undefined || draftNotes[item.requirementId] === item.notes}>{notesArePending ? <LoaderCircle className="animate-spin" /> : <Save />} Save note</Button><Button variant="outline" onClick={() => mutateUndoReview(item)} disabled={operation.obsolete || !operation.activeInBom || undoReviewIsPending || notesArePending}><Clock3 /> Undo QC pass</Button></> : <p className="text-xs text-muted-foreground">Complete the reopened route to request QC again.</p>}
                       </div>
                     </div>
                   </article>
@@ -563,7 +565,7 @@ export function QualityControlDashboard() {
                   <Badge variant="outline">Qty {operation.quantity}</Badge>
                 </div>
                 <SheetTitle className="text-2xl font-bold tracking-tight">{operation.partName}</SheetTitle>
-                <SheetDescription className="font-mono text-xs font-semibold text-primary"><CopyPartNumber partNumber={operation.partNumber} /></SheetDescription>
+                <SheetDescription className="font-mono text-xs font-semibold text-primary"><CopyPartNumber partNumber={operation.partNumber} /> <ObsoleteBadge obsolete={operation.obsolete} /></SheetDescription>
               </SheetHeader>
 
               <div className="detail-sections p-6"><div className="detail-columns space-y-6">
@@ -582,7 +584,7 @@ export function QualityControlDashboard() {
                   </div>
                 </section>
 
-                <QualityFailureCallout failure={selected.lastQualityFailure} />
+                <ObsoleteWarning obsolete={operation.obsolete} onRobot={selected.storageLocation === "On Robot"} /><QualityFailureCallout failure={selected.lastQualityFailure} />
 
                 <section>
                   <label className="mb-3 block text-xs font-bold uppercase tracking-[.14em] text-muted-foreground" htmlFor={`qc-review-notes-${selected.requirementId}`}>Inspection notes</label>
@@ -610,7 +612,7 @@ export function QualityControlDashboard() {
                     updatedBy={selected.locationUpdatedBy}
                     updatedAt={selected.locationUpdatedAt}
                     canEdit
-                    allowOnRobot={canUseOnRobotLocation(selected.effectiveQcResult === "passed", operation.finishingComplete)}
+                    allowOnRobot={!operation.obsolete && operation.activeInBom && canUseOnRobotLocation(selected.effectiveQcResult === "passed", operation.finishingComplete)}
                   />
                 </section>
 
@@ -625,12 +627,12 @@ export function QualityControlDashboard() {
 
               <SheetFooter className="sticky bottom-0 border-t bg-card/95 p-4 backdrop-blur">
                 {selected.result === "pending" ? <>
-                  <Button size="lg" variant="destructive" className="h-11" onClick={() => openFailureDialog(selected)} disabled={reviewIsPending || !ready}><X /> Fail QC</Button>
-                  <Button size="lg" className="h-11 bg-emerald-600 hover:bg-emerald-700" onClick={() => mutateReview({ item: selected, result: "passed", notes: draftNotes[selected.requirementId] ?? selected.notes })} disabled={reviewIsPending || !ready}>{reviewIsPending ? <LoaderCircle className="animate-spin" /> : <Check />} Pass QC</Button>
+                  <Button size="lg" variant="destructive" className="h-11" onClick={() => openFailureDialog(selected)} disabled={operation.obsolete || !operation.activeInBom || reviewIsPending || !ready}><X /> Fail QC</Button>
+                  <Button size="lg" className="h-11 bg-emerald-600 hover:bg-emerald-700" onClick={() => mutateReview({ item: selected, result: "passed", notes: draftNotes[selected.requirementId] ?? selected.notes })} disabled={operation.obsolete || !operation.activeInBom || reviewIsPending || !ready}>{reviewIsPending ? <LoaderCircle className="animate-spin" /> : <Check />} Pass QC</Button>
                 </> : selected.result === "passed" ? (
                   <>
                     <Button size="lg" className="h-11" onClick={() => mutateNotes({ item: selected, notes: draftNotes[selected.requirementId] ?? selected.notes })} disabled={notesArePending || draftNotes[selected.requirementId] === undefined || draftNotes[selected.requirementId] === selected.notes}>{notesArePending ? <LoaderCircle className="animate-spin" /> : <Save />} Save note</Button>
-                    <Button size="lg" variant="outline" className="h-11" onClick={() => mutateUndoReview(selected)} disabled={undoReviewIsPending || notesArePending}>{undoReviewIsPending ? <LoaderCircle className="animate-spin" /> : <Clock3 />} Undo QC pass</Button>
+                    <Button size="lg" variant="outline" className="h-11" onClick={() => mutateUndoReview(selected)} disabled={operation.obsolete || !operation.activeInBom || undoReviewIsPending || notesArePending}>{undoReviewIsPending ? <LoaderCircle className="animate-spin" /> : <Clock3 />} Undo QC pass</Button>
                   </>
                 ) : (
                   <div className="rounded-xl bg-rose-50 p-3 text-center text-sm font-medium text-rose-800">Complete the reopened route to request QC again.</div>
@@ -669,7 +671,7 @@ export function QualityControlDashboard() {
           )}
           <DialogFooter>
             <Button variant="outline" onClick={() => setFailureDialogItem(null)} disabled={reviewIsPending}>Cancel</Button>
-            <Button variant="destructive" onClick={submitFailure} disabled={reviewIsPending}>{reviewIsPending && <LoaderCircle className="animate-spin" />} Reject and restart route</Button>
+            <Button variant="destructive" onClick={submitFailure} disabled={!failureDialogItem || items.find((item) => item.requirementId === failureDialogItem.requirementId)?.operations[0]?.obsolete || reviewIsPending}>{reviewIsPending && <LoaderCircle className="animate-spin" />} Reject and restart route</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

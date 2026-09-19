@@ -48,7 +48,16 @@ export interface QualityLocationFields {
   lastQualityFailure: QualityFailureSummary | null;
 }
 
-export interface ManufacturingOperation extends QualityLocationFields {
+export interface ObsoletionFields {
+  obsolete: boolean;
+  obsoletionVersion: number;
+  obsoletionChangedAt: string | null;
+  obsoletionChangedBy: string | null;
+  obsoletionOrigin: "manual" | "automatic" | null;
+  replacementRequirementId: number | null;
+}
+
+export interface ManufacturingOperation extends QualityLocationFields, ObsoletionFields {
   id: number;
   requirementId: number | null;
   requirementKey: string | null;
@@ -108,7 +117,7 @@ export interface OperationsResponse {
   user: { id: string; name: string; email: string | null; role: UserRole; approved: boolean } | null;
 }
 
-export interface FabricationJob extends QualityLocationFields {
+export interface FabricationJob extends QualityLocationFields, ObsoletionFields {
   id: number;
   productionKey: string;
   requirementId: number;

@@ -285,7 +285,8 @@ function harness(state: WriteState, commitResponse?: (body: Record<string, unkno
       }
       assert.ok(String(input).endsWith("/manufacturing_commit_with_qc_quantities")
         || String(input).endsWith("/manufacturing_commit_with_operation_location")
-        || String(input).endsWith("/manufacturing_update_requirement_notes"));
+        || String(input).endsWith("/manufacturing_update_requirement_notes")
+        || String(input).endsWith("/manufacturing_set_requirement_obsolete"));
       assert.equal(init?.method, "POST");
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       commits.push(body);
@@ -778,4 +779,55 @@ test("Supabase writes reject demo and missing identities before reading state", 
     (error: unknown) => error instanceof ManufacturingWriteError && error.status === 401,
   );
   assert.equal(called, false);
+});
+
+test("obsolete requirements block every work mutation while notes and off-robot locations remain editable", async () => {
+  const state = fixture();
+  state.rows.requirements[0].obsolete = true;
+  const { adapter, commits } = harness(state);
+  const actions = [
+    () => adapter.applyQuantityAction(10, "claim", 1, ACTOR),
+    () => adapter.applyQuantityAction(10, "release", 1, ACTOR),
+    () => adapter.applyQuantityAction(10, "complete", 1, ACTOR),
+    () => adapter.applyQuantityAction(10, "undo_complete", 1, ACTOR),
+    () => adapter.stealOperationClaim(10, ACTOR),
+    () => adapter.patchOperation(10, { status: "Blocked" }, ACTOR),
+    () => adapter.updateCamHandoff(10, { completedBy: "Alex", programPath: "", notes: "" }, ACTOR),
+    () => adapter.applyFabricationAction(30, "claim", ACTOR),
+    () => adapter.applyFabricationAction(30, "complete", ACTOR),
+    () => adapter.applyFabricationAction(30, "release", ACTOR),
+    () => adapter.applyFabricationAction(30, "undo_complete", ACTOR),
+    () => adapter.recordQualityReview(20, "passed", "", ACTOR),
+    () => adapter.recordQualityReview(20, "failed", "Defect", ACTOR),
+    () => adapter.undoQualityReview(20, ACTOR),
+    () => adapter.previewForceQuality(20),
+    () => adapter.forceQualityReview(20, "", state.token, ACTOR),
+    () => adapter.updatePartLocation(20, "On Robot", ACTOR),
+  ];
+  for (const action of actions) await assert.rejects(action, error => error instanceof ManufacturingWriteError && error.status === 409 && /obsolete/.test(error.message));
+  assert.equal(commits.length, 0);
+  await adapter.updateRequirementNotes(20, "Remove from robot", ACTOR);
+  await adapter.updatePartLocation(20, "Shelf 1", ACTOR);
+  assert.equal(commits.length, 2);
+});
+
+test("obsoletion uses the displayed version, database snapshot, and an idempotent request ID", async () => {
+  const state = fixture();
+  state.rows.requirements[0].obsoletion_version = 4;
+  const original = structuredClone(state);
+  const retry = harness(state, (body, attempt) => {
+    if (attempt === 1) throw new TypeError("Lost response");
+    return Response.json({ requirementId: 20, obsolete: body.p_obsolete, obsoletionVersion: 5 });
+  });
+  await assert.rejects(retry.adapter.setRequirementObsolete(20, false, 3, ACTOR), /Obsoletion changed/);
+  assert.equal(retry.commits.length, 0);
+  const result = await retry.adapter.setRequirementObsolete(20, true, 4, ACTOR);
+  assert.equal(result.obsolete, true);
+  assert.equal(result.obsoletionVersion, 5);
+  assert.equal(retry.commits.length, 2);
+  assert.deepEqual(retry.commits[0], retry.commits[1]);
+  assert.equal(retry.commits[0].p_expected, state.token);
+  assert.deepEqual(state, original);
+  const denied = harness(state, () => Response.json({ code: "42501" }, { status: 403 }));
+  await assert.rejects(denied.adapter.setRequirementObsolete(20, true, 4, ACTOR), error => error instanceof ManufacturingWriteError && error.status === 403);
 });

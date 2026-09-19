@@ -33,6 +33,26 @@ const attachments = [
   { partId: 3, kind: "step" as const, position: 0, originalName: "P-1 REV B.step" },
 ];
 
+test("obsolete and restored historical requirements remain visible without resurrecting deactivated stages of active routes", () => {
+  const historical = { ...requirement, Obsolete: true, "Obsoletion Version": 1, "Active in BOM": false,
+    "Required Part Revision": "A", "Obsoletion Origin": "automatic", "Replacement Requirement": 99 };
+  const done = { ...operation, "Active in Routing": false, Status: { value: "Complete" }, "Completed Quantity": 2 };
+  const [projected] = projectOperations([done], [historical], [part]);
+  assert.equal(projected.obsolete, true);
+  assert.equal(projected.completedQuantity, 2);
+  assert.equal(projected.revision, "A");
+  assert.equal(projected.activeInRouting, false);
+  assert.equal(projected.replacementRequirementId, 99);
+  const [restored] = projectOperations([done], [{ ...historical, Obsolete: false, "Obsoletion Version": 2 }], [part]);
+  assert.equal(restored.obsolete, false);
+  assert.equal(restored.activeInRouting, false);
+  assert.equal(restored.status, "Complete");
+  assert.equal(projectFinishing([{ ...finishing, Active: false }], [historical])[0].obsolete, true);
+  assert.equal(projectOperations([done], [requirement], [part]).length, 0);
+  const active = { ...operation, id: 8, Operation: "new-route" };
+  assert.deepEqual(projectOperations([done, active], [historical], [part]).map(row => row.id), [8]);
+});
+
 test("file availability and exact names come only from the Supabase attachment catalog", () => {
   const withoutCatalog = projectOperations([operation], [requirement], [part]);
   assert.equal(withoutCatalog[0].hasDrawingPdf, false);

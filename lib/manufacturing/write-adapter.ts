@@ -90,6 +90,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
   function operation(state: WriteState, id: number) {
     const row = state.rows.operations.find(row => row.id === id);
     if (!row || !row.active_in_routing) throw new ManufacturingWriteError("This operation is no longer active", 409);
+    assertWorkAllowed(state, Number(row.requirement_id));
     const canonical = deduplicateOperations(state.rows.operations.filter(row => row.active_in_routing).map(row => ({
       id: row.id, operationKey: String(row.operation_key ?? ""), workType: row.work_type === "CAM" ? "CAM" as const : "Manufacturing" as const,
       status: (row.status === "Needs Rework" ? "Ready" : row.status) as import("../types.ts").OperationStatus, claimedQuantity: Number(row.claimed_quantity ?? 0), completedQuantity: Number(row.completed_quantity ?? 0),
@@ -107,6 +108,12 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
   function requirement(state: WriteState, requirementId: number) {
     const row = state.rows.requirements.find((candidate) => candidate.id === requirementId);
     if (!row) throw new ManufacturingWriteError("Production requirement no longer exists", 409);
+    return row;
+  }
+  function assertWorkAllowed(state: WriteState, requirementId: number) {
+    const row = requirement(state, requirementId);
+    if (row.obsolete) throw new ManufacturingWriteError("This requirement is obsolete. Do not manufacture or install it.", 409);
+    if (!row.active_in_bom) throw new ManufacturingWriteError("This requirement is inactive in the BOM", 409);
     return row;
   }
   function notificationPartContext(state: WriteState, requirementId: number) {
@@ -139,7 +146,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     return review;
   }
   function assertForceEligible(state: WriteState, requirementId: number) {
-    requirement(state, requirementId);
+    assertWorkAllowed(state, requirementId);
     let passed = false;
     try { assertEffectivePassedReview(state, requirementId); passed = true; }
     catch (error) { if (!(error instanceof ManufacturingWriteError)) throw error; }
@@ -231,6 +238,9 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     },
     applyFabricationAction(id: number, action: FabricationAction, actor: Actor) {
       return transact(actor, `finishing_${action}`, (plan, state) => {
+        const finishing = state.rows.finishing.find((candidate) => candidate.id === id);
+        if (!finishing?.active) throw new ManufacturingWriteError("This finishing job is no longer active", 409);
+        assertWorkAllowed(state, Number(finishing.requirement_id));
         if (action === "undo_complete") {
           const finishingRow = state.rows.finishing.find((candidate) => candidate.id === id);
           const requirementRow = finishingRow ? requirement(state, Number(finishingRow.requirement_id)) : null;
@@ -258,7 +268,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       if (location === ROBOT_LOCATION) throw new ManufacturingWriteError("On Robot becomes available after QC passes and finishing is complete", 409);
       const reviewedAt = new Date().toISOString();
       return transact(actor, "qc_review", async (plan, state) => {
-        const requirementRow = requirement(state, requirementId);
+        const requirementRow = assertWorkAllowed(state, requirementId);
         const maximumQuantity = Math.max(1, Math.floor(Number(requirementRow.required_quantity ?? 1)));
         const effectiveRejectedQuantity = result === "failed" ? rejectedQuantity ?? maximumQuantity : null;
         if (result === "failed") {
@@ -314,6 +324,19 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       try { return await rpc<{ requirementId: number; productionNotes: string }>("manufacturing_update_requirement_notes", body); }
       catch (error) { if (error instanceof ManufacturingWriteError) throw error; return rpc<{ requirementId: number; productionNotes: string }>("manufacturing_update_requirement_notes", body); }
     },
+    async setRequirementObsolete(requirementId: number, obsolete: boolean, expectedVersion: number, actor: Actor) {
+      if (!UUID_PATTERN.test(actor.id) || !actor.name.trim()) throw new ManufacturingWriteError("An authenticated manufacturing actor is required", 401);
+      const state = await rpc<WriteState>("manufacturing_write_state");
+      const row = requirement(state, requirementId);
+      if (Number(row.obsoletion_version ?? 0) !== expectedVersion) {
+        throw new ManufacturingWriteError("Obsoletion changed. Refresh before trying again.", 409);
+      }
+      const body = { p_request_id: crypto.randomUUID(), p_actor: actor.id, p_expected: state.token,
+        p_requirement_id: requirementId, p_obsolete: obsolete, p_version: expectedVersion };
+      type Result = { requirementId: number; obsolete: boolean; obsoletionVersion: number };
+      try { return await rpc<Result>("manufacturing_set_requirement_obsolete", body); }
+      catch (error) { if (error instanceof ManufacturingWriteError) throw error; return rpc<Result>("manufacturing_set_requirement_obsolete", body); }
+    },
     updatePassedQualityNotes(requirementId: number, notes: string, actor: Actor) {
       const reviewedAt = new Date().toISOString();
       return transact(actor, "qc_review", async (plan, state) => {
@@ -338,6 +361,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
           || requirementRow.qc_outcome === "Passed"
             && !["Ready for QC", "Ready for Finishing"].includes(String(requirementRow.status ?? ""));
         if (location === ROBOT_LOCATION) {
+          assertWorkAllowed(state, requirementId);
           assertEffectivePassedReview(state, requirementId, "On Robot requires a current passed QC review");
           if (!canUseOnRobotLocation(true, finishingComplete)) {
             throw new ManufacturingWriteError("Complete finishing before moving this part onto the robot", 409);
@@ -356,6 +380,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     },
     undoQualityReview(requirementId: number, actor: Actor) {
       return transact(actor, "qc_undo", async (plan, state) => {
+        assertWorkAllowed(state, requirementId);
         if (requirement(state, requirementId).part_location === ROBOT_LOCATION) {
           throw new ManufacturingWriteError("Move the part off the robot before undoing QC", 409);
         }

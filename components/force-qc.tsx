@@ -127,7 +127,7 @@ export function ForceQcPicker() {
   } });
   const groups = new Map<number, OperationsResponse["operations"]>();
   for (const operation of query.data?.operations ?? []) {
-    if (operation.requirementId !== null && operation.activeInBom && operation.effectiveQcResult !== "passed") {
+    if (operation.requirementId !== null && !operation.obsolete && operation.activeInBom && operation.effectiveQcResult !== "passed") {
       groups.set(operation.requirementId, [...(groups.get(operation.requirementId) ?? []), operation]);
     }
   }

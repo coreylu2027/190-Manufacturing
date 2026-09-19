@@ -15,6 +15,10 @@ function writer() {
   return createSupabaseWriteAdapter(manufacturingSupabaseConfig());
 }
 
+export async function setRequirementObsolete(requirementId: number, obsolete: boolean, expectedVersion: number, actor: Actor) {
+  return writer().setRequirementObsolete(requirementId, obsolete, expectedVersion, actor);
+}
+
 export async function getOperations() {
   return reader().getOperations();
 }

@@ -610,6 +610,7 @@ async function stealOperationClaim(
 }
 async function renameMachinistAllocations(userId: string, oldName: string, newName: string) {
   if (oldName === newName) return;
+  const frozenRequirements = new Set((input.requirements ?? []).filter(row => row.obsolete).map(row => row.id));
 
   const [operationRows, requirementRows] = await Promise.all([
     listAllRows(OPERATIONS),
@@ -619,6 +620,7 @@ async function renameMachinistAllocations(userId: string, oldName: string, newNa
 
   await Promise.all(operationRows.map(async (operation) => {
     const requirementId = linkedId(operation["Production Requirement"]);
+    if (requirementId && frozenRequirements.has(requirementId)) return;
     const requirement = requirementId ? requirements.get(requirementId) : undefined;
     const requiredQuantity = Math.max(1, Math.floor(Number(requirement?.["Required Quantity"] ?? 1)));
     const taskQuantity = taskQuantityForRow(operation, requiredQuantity);
@@ -647,6 +649,7 @@ async function renameMachinistAllocations(userId: string, oldName: string, newNa
 
   const finishingRows = await listAllRows(FINISHING);
   await Promise.all(finishingRows.map(async (job) => {
+    if (frozenRequirements.has(linkedId(job["Production Requirement"]) ?? -1)) return;
     if (String(job.Machinist ?? "").trim().toLocaleLowerCase() !== oldName.toLocaleLowerCase()) return;
     await patchRow(FINISHING, job.id, { Machinist: newName });
   }));
