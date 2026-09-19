@@ -334,8 +334,21 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       const body = { p_request_id: crypto.randomUUID(), p_actor: actor.id, p_expected: state.token,
         p_requirement_id: requirementId, p_obsolete: obsolete, p_version: expectedVersion };
       type Result = { requirementId: number; obsolete: boolean; obsoletionVersion: number };
-      try { return await rpc<Result>("manufacturing_set_requirement_obsolete", body); }
-      catch (error) { if (error instanceof ManufacturingWriteError) throw error; return rpc<Result>("manufacturing_set_requirement_obsolete", body); }
+      const reader = createSupabaseManufacturingAdapter(config);
+      const [parts, assemblies] = await Promise.all([
+        state.rows.parts ?? reader.readEntity("parts"),
+        state.rows.assemblies ?? reader.readEntity("assemblies"),
+      ]);
+      const notificationContext = {
+        ...notificationPartContext({ ...state, rows: { ...state.rows, parts, assemblies } }, requirementId),
+        previousObsolete: Boolean(row.obsolete),
+        revision: String(row.required_part_revision ?? ""),
+        location: row.part_location == null ? null : String(row.part_location),
+      };
+      let result: Result;
+      try { result = await rpc<Result>("manufacturing_set_requirement_obsolete", body); }
+      catch (error) { if (error instanceof ManufacturingWriteError) throw error; result = await rpc<Result>("manufacturing_set_requirement_obsolete", body); }
+      return { ...result, notificationContext };
     },
     updatePassedQualityNotes(requirementId: number, notes: string, actor: Actor) {
       const reviewedAt = new Date().toISOString();

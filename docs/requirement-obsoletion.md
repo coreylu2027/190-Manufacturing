@@ -12,6 +12,53 @@ Operations, CAM, finishing, QC decisions (including Force QC), and moves onto
 the robot are blocked while obsolete. Notes and off-robot locations remain
 editable. Profile renames leave obsolete work credit untouched.
 
+Manual mark/restore actions, including both Undo directions, send notifications
+through the existing Slack webhook after a successful change. Alerts identify
+the actor, part, revision, assembly, and requirement. Obsolete alerts say not to
+manufacture or install and flag parts recorded as On Robot. Restoration alerts
+retain the distinction between removing obsoletion and satisfying workflow/QC/
+routing requirements. Failed, stale, and unchanged requests do not send alerts.
+Automatic database sync obsoletion does not use this application notification path.
+
+## Stop-work alerts for claimants
+
+Apply `supabase/migrations/20260919030147_obsolete_work_notifications.sql` after
+the obsoletion and existing notification migrations. Each false-to-true obsolete
+transition atomically inserts one `production_requirement_obsolete` notification
+per user with remaining claimed manufacturing or CAM work. This includes manual
+actions, Undo of restoration, and successful revision replacement. Deactivated
+routing is included because sync deactivates it before marking the requirement
+obsolete. Completed-only allocations do not notify. Legacy names resolve only
+when exactly one profile matches; ambiguous or unmapped names are not guessed.
+
+These records use the existing realtime subscription, unread queue, and
+Acknowledge dialog, with the same styling as stolen-operation alerts. There is
+no new UI. Repeated syncs and replacement-link updates on already-obsolete
+requirements do not repeat stop-work alerts. Restoring does not dismiss an
+unacknowledged alert; it remains a record of the stop-work event.
+
+Manual actions initiate email delivery after the response. For sync-created
+notifications, configure a Supabase Database Webhook:
+
+1. Set a random server-only `NOTIFICATION_WEBHOOK_SECRET` on the app deployment.
+2. Create an INSERT webhook on `public.notifications`, targeting
+   `https://<app-origin>/api/notifications/deliver` with method POST.
+3. Add `Authorization: Bearer <NOTIFICATION_WEBHOOK_SECRET>` and
+   `Content-Type: application/json` headers. Use a timeout of 20000 ms.
+4. Keep the existing `RESEND_API_KEY` and verified `NOTIFICATION_EMAIL_FROM`.
+
+The endpoint loads recipient and content from the stored row, not the webhook
+payload. Manual and webhook delivery share the existing Resend sender, HTML
+escaping, delivery status fields, and notification-ID idempotency key. A webhook
+can safely overlap manual delivery. Inbox delivery does not depend on email.
+Email failures remain recorded for inspection; missing email configuration
+leaves database-created alerts pending. Replaying the same INSERT payload retries
+delivery within 23 hours. Older uncertain deliveries require manual review to
+avoid resending after Resend's 24-hour idempotency window. Supabase webhooks do
+not provide automatic retry here; monitor non-2xx webhook responses and failed/
+pending `email_status` values. No production webhook or email test is created by
+the migration itself.
+
 ## Database installation
 
 Apply `supabase/migrations/20260918162451_requirement_obsoletion.sql` before

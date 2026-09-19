@@ -8,6 +8,7 @@ const install = async (path) => db.exec(await readFile(new URL(`../../${path}`, 
 await db.exec(`
   create role anon; create role authenticated; create role service_role;
   create schema auth; create table auth.users(id uuid primary key);
+  create function auth.uid() returns uuid language sql as 'select null::uuid';
   create table public.profiles(id uuid primary key, display_name text, approved boolean, role text);
   create type public.quality_result as enum ('passed','failed');
   create table public.quality_control(id bigint generated always as identity primary key,
@@ -21,6 +22,8 @@ await install("supabase/production/20260909_requirement_notes.sql");
 await db.exec("create table manufacturing.engineering_sync_runs(id integer primary key, status text)");
 await install("supabase/migrations/20260911033920_initialize_synced_routing.sql");
 await install("supabase/migrations/20260918162451_requirement_obsoletion.sql");
+await install("supabase/migrations/202609010003_notifications.sql");
+await install("supabase/migrations/20260919030147_obsolete_work_notifications.sql");
 const actor = "00000000-0000-4000-8000-000000000190";
 await sql("insert into auth.users values($1)", [actor]);
 await sql("insert into public.profiles values($1,'Alex A.',true,'machinist')", [actor]);
@@ -125,5 +128,60 @@ assert.equal((await row(unrelated)).obsolete, true);
 assert.equal((await sql("select status from manufacturing.operations where operation_key='manually-stopped|OP2'"))[0].status, null);
 assert.ok((await sql("select count(*)::int count from manufacturing.obsoletion_history"))[0].count >= 7);
 await assert.rejects(db.exec("delete from manufacturing.obsoletion_history"), /append only/);
+// Real alerts use the same inbox table and retain claims even after routing deactivation.
+const worker = "00000000-0000-4000-8000-000000000191";
+await sql("insert into auth.users values($1)",[worker]);
+await sql("insert into public.profiles values($1,'Blake B.',true,'machinist')",[worker]);
+const notifyReq = await requirement("notify", "N");
+const notifyOp = await operation(notifyReq);
+const ledger = JSON.stringify([{userId:actor,name:'Alex A.',claimed:1,completed:1},{userId:worker,name:'Blake B.',claimed:1,completed:0}]);
+await sql("update manufacturing.operations set status='In Progress',claimed_quantity=2,quantity_ledger=$2 where id=$1",[notifyOp,ledger]);
+await sql("insert into manufacturing.operations(operation_key,requirement_id,operation_number,work_type,status,quantity_ledger) values('notify-cam',$1,'OP1','CAM','In Progress',$2)",[notifyReq,ledger]);
+const notifications = async id => sql("select * from public.notifications where data->>'requirementId'=$1 order by recipient_id",[String(id)]);
+const notifyToken = await token(), notifyRequest = crypto.randomUUID();
+await change(notifyReq,true,0,notifyToken,notifyRequest);
+assert.equal((await notifications(notifyReq)).length,2,'deduplicate a user across CAM and manufacturing');
+assert.match((await notifications(notifyReq))[0].message,/Stop work. Do not manufacture or install/);
+assert.equal((await notifications(notifyReq))[0].email_status,'pending');
+await change(notifyReq,true,0,notifyToken,notifyRequest);
+assert.equal((await notifications(notifyReq)).length,2,'transport retry must not notify twice');
+await change(notifyReq,false,1);
+assert.equal((await notifications(notifyReq)).length,2,'restoration is not a stop-work alert');
+await change(notifyReq,true,2);
+assert.equal((await notifications(notifyReq)).length,4,'Undo restoration is a new stop-work event');
+assert.equal((await sql("select quantity_ledger from manufacturing.operations where id=$1",[notifyOp]))[0].quantity_ledger,ledger);
+// Completed-only allocations are not affected recipients; unique legacy names resolve.
+const legacyReq = await requirement('legacy-notify','L');
+const legacyOp = await operation(legacyReq);
+await sql("update manufacturing.operations set status='In Progress',claimed_quantity=1,machinist='Blake B.' where id=$1",[legacyOp]);
+await change(legacyReq,true,0);
+assert.deepEqual((await notifications(legacyReq)).map(n=>n.recipient_id),[worker]);
+const ambiguousReq = await requirement('ambiguous-notify','L');
+const ambiguousOp = await operation(ambiguousReq);
+await sql("update public.profiles set display_name='Blake B.' where id=$1",[actor]);
+await sql("update manufacturing.operations set status='In Progress',claimed_quantity=1,machinist='Blake B.',quantity_ledger='invalid' where id=$1",[ambiguousOp]);
+await change(ambiguousReq,true,0);
+assert.equal((await notifications(ambiguousReq)).length,0,'malformed legacy data must not block obsoletion or guess recipients');
+await sql("update public.profiles set display_name='Alex A.' where id=$1",[actor]);
+assert.equal((await notifications(old)).length,0,'completed-only work gets no stop-work alert');
+// Sync deactivates routing before the transition; its remaining claims still notify.
+await sql("update manufacturing.requirements set active_in_bom=false where active_in_bom and assembly_id=1");
+const syncReq = await requirement('sync-notify','X');
+const syncOp = await operation(syncReq);
+await sql("update manufacturing.operations set status='In Progress',claimed_quantity=2,quantity_ledger=$2 where id=$1",[syncOp,ledger]);
+await sync(syncReq,'Y');
+assert.equal((await notifications(syncReq)).length,2);
+assert.equal((await notifications(syncReq))[0].data.origin,'automatic');
+await db.exec("insert into manufacturing.engineering_sync_runs values(2000,'running'); update manufacturing.engineering_sync_runs set status='success' where id=2000");
+assert.equal((await notifications(syncReq)).length,2,'repeated sync does not duplicate alerts');
+await sql("update manufacturing.requirements set obsolete_replacement_id=null,obsoletion_version=obsoletion_version+1 where id=$1",[syncReq]);
+assert.equal((await notifications(syncReq)).length,2,'already-obsolete metadata changes must not alert again');
+// Transaction rollback also rolls back notifications.
+const rollbackReq = await requirement('rollback-notify','Z');
+const rollbackOp = await operation(rollbackReq);
+await sql("update manufacturing.operations set status='In Progress',quantity_ledger=$2 where id=$1",[rollbackOp,ledger]);
+await assert.rejects(db.transaction(async tx=>{await tx.query("update manufacturing.requirements set obsolete=true where id=$1",[rollbackReq]);throw new Error('rollback');}),/rollback/);
+assert.equal((await notifications(rollbackReq)).length,0);
+assert.equal((await sql("select has_function_privilege('authenticated','manufacturing.notify_obsolete_work()','execute') allowed"))[0].allowed,false);
 await db.close();
 console.log("Obsoletion PostgreSQL checks passed: permissions, history, work guards, Undo/CAS, sync scope, restoration, failed/partial/incomplete sync.");

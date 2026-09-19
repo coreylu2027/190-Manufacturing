@@ -7,6 +7,12 @@ export interface SlackPartContext {
 
 export type SlackManufacturingEvent =
   | (SlackPartContext & {
+      type: "requirement_obsoleted" | "requirement_restored";
+      actorName: string;
+      revision: string;
+      location: string | null;
+    })
+  | (SlackPartContext & {
       type: "operation_claimed" | "operation_completed" | "operation_released" | "operation_reopened";
       actorName: string;
       operationNumber: string;
@@ -119,6 +125,20 @@ function milestoneLines(event: {
 
 export function formatSlackManufacturingEvent(event: SlackManufacturingEvent): SlackWebhookPayload {
   const context = `Assembly ${escapeMrkdwn(event.assemblyNumber)} • Requirement #${event.requirementId}`;
+  if (event.type === "requirement_obsoleted" || event.type === "requirement_restored") {
+    const obsolete = event.type === "requirement_obsoleted";
+    const heading = obsolete ? "🛑 Requirement marked obsolete" : "↩️ Requirement restored from obsolete";
+    const guidance = obsolete
+      ? "*Do not manufacture or install.*" + (event.location === "On Robot" ? "\n*This part is currently recorded as On Robot. Review its installation.*" : "")
+      : "Obsolete restriction removed. Existing workflow, QC, and routing requirements still apply.";
+    return {
+      text: `${heading}: ${event.partNumber} — ${event.partName}${obsolete ? "; Do not manufacture or install." : ""}`,
+      blocks: [
+        { type: "section", text: { type: "mrkdwn", text: `*${heading}*\n*${partLabel(event)}*\n${escapeMrkdwn(event.actorName)} ${obsolete ? "marked this requirement obsolete" : "restored this requirement from obsolete"}.\n${guidance}` } },
+        { type: "context", elements: [{ type: "mrkdwn", text: `${context}${event.revision ? ` • Revision ${escapeMrkdwn(event.revision)}` : ""}` }] },
+      ],
+    };
+  }
 
   if (["operation_claimed", "operation_completed", "operation_released", "operation_reopened"].includes(event.type)) {
     const operationEvent = event as Extract<SlackManufacturingEvent, { type: "operation_claimed" | "operation_completed" | "operation_released" | "operation_reopened" }>;

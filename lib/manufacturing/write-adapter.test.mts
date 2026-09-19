@@ -824,10 +824,27 @@ test("obsoletion uses the displayed version, database snapshot, and an idempoten
   const result = await retry.adapter.setRequirementObsolete(20, true, 4, ACTOR);
   assert.equal(result.obsolete, true);
   assert.equal(result.obsoletionVersion, 5);
+  assert.equal(result.notificationContext.partNumber, "P-1");
+  assert.equal(result.notificationContext.partName, "Fixture");
+  assert.equal(result.notificationContext.assemblyNumber, "A-1");
+  assert.equal(result.notificationContext.previousObsolete, false);
   assert.equal(retry.commits.length, 2);
   assert.deepEqual(retry.commits[0], retry.commits[1]);
   assert.equal(retry.commits[0].p_expected, state.token);
   assert.deepEqual(state, original);
   const denied = harness(state, () => Response.json({ code: "42501" }, { status: 403 }));
   await assert.rejects(denied.adapter.setRequirementObsolete(20, true, 4, ACTOR), error => error instanceof ManufacturingWriteError && error.status === 403);
+});
+
+test("restoration and Undo return the previous flag and installation context for Slack", async () => {
+  for (const previousObsolete of [true, false]) {
+    const state = fixture();
+    Object.assign(state.rows.requirements[0], { obsolete: previousObsolete, obsoletion_version: 4, required_part_revision: "B", part_location: "On Robot" });
+    const { adapter } = harness(state, body => Response.json({ requirementId: 20, obsolete: body.p_obsolete, obsoletionVersion: 5 }));
+    const result = await adapter.setRequirementObsolete(20, !previousObsolete, 4, ACTOR);
+    assert.equal(result.notificationContext.previousObsolete, previousObsolete);
+    assert.equal(result.notificationContext.revision, "B");
+    assert.equal(result.notificationContext.location, "On Robot");
+    assert.equal(result.obsolete, !previousObsolete);
+  }
 });
