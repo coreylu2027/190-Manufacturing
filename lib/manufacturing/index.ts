@@ -19,6 +19,10 @@ export async function setRequirementObsolete(requirementId: number, obsolete: bo
   return writer().setRequirementObsolete(requirementId, obsolete, expectedVersion, actor);
 }
 
+export async function setRequirementHidden(requirementId: number, hidden: boolean, expectedVersion: number, actor: Actor) {
+  return writer().setRequirementHidden(requirementId, hidden, expectedVersion, actor);
+}
+
 export async function getOperations() {
   return reader().getOperations();
 }

@@ -286,7 +286,8 @@ function harness(state: WriteState, commitResponse?: (body: Record<string, unkno
       assert.ok(String(input).endsWith("/manufacturing_commit_with_qc_quantities")
         || String(input).endsWith("/manufacturing_commit_with_operation_location")
         || String(input).endsWith("/manufacturing_update_requirement_notes")
-        || String(input).endsWith("/manufacturing_set_requirement_obsolete"));
+        || String(input).endsWith("/manufacturing_set_requirement_obsolete")
+        || String(input).endsWith("/manufacturing_set_requirement_hidden"));
       assert.equal(init?.method, "POST");
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       commits.push(body);
@@ -847,4 +848,23 @@ test("restoration and Undo return the previous flag and installation context for
     assert.equal(result.notificationContext.location, "On Robot");
     assert.equal(result.obsolete, !previousObsolete);
   }
+});
+
+
+test("visibility writes validate obsolete/version and retry the identical transaction", async () => {
+  const state=fixture();
+  const { adapter, commits }=harness(state, (body,attempt)=>{
+    if(attempt===1) throw new TypeError("Lost response");
+    return Response.json({requirementId:20,hidden:body.p_hidden,visibilityVersion:1});
+  });
+  await assert.rejects(adapter.setRequirementHidden(20,true,0,ACTOR),/Only obsolete/);
+  assert.equal(commits.length,0);
+  state.rows.requirements[0].obsolete=true;
+  await assert.rejects(adapter.setRequirementHidden(20,true,1,ACTOR),/Visibility changed/);
+  const result=await adapter.setRequirementHidden(20,true,0,ACTOR);
+  assert.equal(result.hidden,true);
+  assert.equal(result.visibilityVersion,1);
+  assert.deepEqual(commits[0],commits[1]);
+  const denied=harness(state,()=>Response.json({code:"42501"},{status:403}));
+  await assert.rejects(denied.adapter.setRequirementHidden(20,true,0,ACTOR),error=>error instanceof ManufacturingWriteError && error.status===403);
 });

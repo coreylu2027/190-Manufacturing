@@ -133,7 +133,7 @@ export function ForceQcPicker() {
   }
   const candidates = [...groups.entries()].filter(([, operations]) => {
     return hasUnfinishedQcPrerequisites(operations)
-      && [operations[0].partNumber, operations[0].partName, operations[0].requirementKey].join(" ").toLowerCase().includes(search.toLowerCase());
+      && [operations[0].partNumber, operations[0].partName, operations[0].assemblyNumber, operations[0].requirementKey].join(" ").toLowerCase().includes(search.trim().toLowerCase());
   });
   return <>
     <Button size="lg" variant="destructive" className="h-11" onClick={() => setOpen(true)}>
@@ -149,7 +149,7 @@ export function ForceQcPicker() {
           Find a part
           <span className="relative mt-1.5 block">
             <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-            <input className="block w-full rounded-md border bg-background py-2 pl-9 pr-3 font-normal" value={search} onChange={event => setSearch(event.target.value)} placeholder="Part number, name, or production key" autoFocus />
+            <input className="block w-full rounded-md border bg-background py-2 pl-9 pr-3 font-normal" value={search} onChange={event => setSearch(event.target.value)} placeholder="Part number, name, assembly, or production key" autoFocus />
           </span>
         </label>
         {query.isLoading && <p role="status" className="text-sm text-muted-foreground">Loading parts…</p>}
