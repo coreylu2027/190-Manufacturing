@@ -397,7 +397,7 @@ function ProductionOverview({
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<"all" | "Obsolete" | ProductionStatus>("all");
   const [showHidden, setShowHidden] = useState(false);
-  const [assembly, setAssembly] = useState("all");
+  const [sourceDocument, setSourceDocument] = useState("all");
   const [location, setLocation] = useState("all");
   const [selectedRequirementKey, setSelectedRequirementKey] = useState<string | null>(null);
   const queryClient = useQueryClient();
@@ -477,7 +477,8 @@ function ProductionOverview({
     const filtered = requirements.filter((requirement) => {
       if (requirement.hidden && !(canForceQc && showHidden)) return false;
       if (status === "Obsolete" ? !requirement.obsolete : status !== "all" && requirement.status !== status) return false;
-      if (assembly !== "all" && requirement.assemblyNumber !== assembly) return false;
+      if (sourceDocument === "missing" && requirement.documentName) return false;
+      if (sourceDocument !== "all" && sourceDocument !== "missing" && requirement.documentName !== sourceDocument) return false;
       if (location === "unassigned" && requirement.storageLocation) return false;
       if (location !== "all" && location !== "unassigned" && requirement.storageLocation !== location) return false;
       if (term && ![
@@ -496,9 +497,9 @@ function ProductionOverview({
     });
 
     return [...filtered].sort((a, b) => (a.documentName ?? "").localeCompare(b.documentName ?? "") || a.partNumber.localeCompare(b.partNumber));
-  }, [canForceQc, showHidden, location, requirements, search, assembly, status]);
+  }, [canForceQc, showHidden, location, requirements, search, sourceDocument, status]);
 
-  const assemblies = useMemo(() => [...new Set(requirements.flatMap((requirement) => requirement.assemblyNumber ? [requirement.assemblyNumber] : []))].sort(), [requirements]);
+  const sourceDocuments = useMemo(() => [...new Set(requirements.flatMap((requirement) => requirement.documentName ? [requirement.documentName] : []))].sort(), [requirements]);
   const locations = useMemo(() => [...new Set(requirements.flatMap((requirement) => requirement.storageLocation ? [requirement.storageLocation] : []))].sort(), [requirements]);
 
   const summary = useMemo(() => {
@@ -619,9 +620,9 @@ function ProductionOverview({
               <SelectTrigger className="h-9 w-full bg-card xl:w-48"><SlidersHorizontal className="text-muted-foreground" /><SelectValue placeholder="All statuses" /></SelectTrigger>
               <SelectContent><SelectItem value="all">All statuses</SelectItem><SelectItem value="Obsolete">Obsolete</SelectItem>{(["Planned", "Ready", "In Progress", "Blocked", "QC Pending", "Complete"] as ProductionStatus[]).map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
             </Select>
-            <Select value={assembly} onValueChange={(value) => setAssembly(value ?? "all")}>
-              <SelectTrigger className="h-9 w-full bg-card xl:w-56"><FileText className="text-muted-foreground" /><SelectValue placeholder="All assemblies" /></SelectTrigger>
-              <SelectContent><SelectItem value="all">All assemblies</SelectItem>{assemblies.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
+            <Select value={sourceDocument} onValueChange={(value) => setSourceDocument(value ?? "all")}>
+              <SelectTrigger className="h-9 w-full bg-card xl:w-56"><FileText className="text-muted-foreground" /><SelectValue placeholder="All source documents" /></SelectTrigger>
+              <SelectContent><SelectItem value="all">All source documents</SelectItem>{sourceDocuments.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}<SelectItem value="missing">Not synced</SelectItem></SelectContent>
             </Select>
             <Select value={location} onValueChange={(value) => setLocation(value ?? "all")}>
               <SelectTrigger className="h-9 w-full bg-card xl:w-52"><MapPin className="text-muted-foreground" /><SelectValue placeholder="All locations" /></SelectTrigger>
@@ -651,7 +652,7 @@ function ProductionOverview({
         ) : requirements.length === 0 ? (
           <div className="grid min-h-80 place-items-center p-6 text-center"><div><PackageCheck className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h2 className="font-semibold">No routed parts</h2><p className="mt-1 text-sm text-muted-foreground">Production requirements will appear after operations are added to an active routing.</p></div></div>
         ) : visibleRequirements.length === 0 ? (
-          <div className="grid min-h-80 place-items-center p-6 text-center"><div><Search className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h2 className="font-semibold">No requirements match</h2><p className="mt-1 text-sm text-muted-foreground">Try another status, assembly, or location, or clear the search.</p><Button variant="outline" className="mt-4" onClick={() => { setSearch(""); setStatus("all"); setAssembly("all"); setLocation("all"); }}>Clear filters</Button></div></div>
+          <div className="grid min-h-80 place-items-center p-6 text-center"><div><Search className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h2 className="font-semibold">No requirements match</h2><p className="mt-1 text-sm text-muted-foreground">Try another status, source document, or location, or clear the search.</p><Button variant="outline" className="mt-4" onClick={() => { setSearch(""); setStatus("all"); setSourceDocument("all"); setLocation("all"); }}>Clear filters</Button></div></div>
         ) : (
           <>
             <div className="hidden h-[min(59vh,680px)] min-h-[430px] md:block">
@@ -891,7 +892,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
   const [workType, setWorkType] = useState<WorkTypeFilter>("all");
   const [machine, setMachine] = useState("all");
   const [locationFilter, setLocationFilter] = useState("all");
-  const [assembly, setAssembly] = useState("all");
+  const [sourceDocument, setSourceDocument] = useState("all");
   const [search, setSearch] = useState("");
   const [bulkSelectedIds, setBulkSelectedIds] = useState<number[]>([]);
   const [bulkActionDialogOpen, setBulkActionDialogOpen] = useState(false);
@@ -1277,7 +1278,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
   const selectedAllocation = selected ? allocationForUser(selected, query.data?.user ?? null) : { claimed: 0, completed: 0 };
   const selectedOtherClaimants = selected ? otherClaimants(selected, query.data?.user ?? null) : [];
   const machines = useMemo(() => [...new Set(operations.map((operation) => operation.machine))].sort(), [operations]);
-  const assemblies = useMemo(() => [...new Set(operations.flatMap((operation) => operation.assemblyNumber ? [operation.assemblyNumber] : []))].sort(), [operations]);
+  const sourceDocuments = useMemo(() => [...new Set(operations.flatMap((operation) => operation.documentName ? [operation.documentName] : []))].sort(), [operations]);
 
   const filtered = useMemo(() => {
     const term = search.trim().toLowerCase();
@@ -1286,7 +1287,8 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
       if (machine !== "all" && operation.machine !== machine) return false;
       if (locationFilter === "missing" && operation.storageLocation !== null) return false;
       if (locationFilter !== "all" && locationFilter !== "missing" && operation.storageLocation !== locationFilter) return false;
-      if (assembly !== "all" && operation.assemblyNumber !== assembly) return false;
+      if (sourceDocument === "missing" && operation.documentName) return false;
+      if (sourceDocument !== "all" && sourceDocument !== "missing" && operation.documentName !== sourceDocument) return false;
       const allocation = allocationForUser(operation, query.data?.user ?? null);
       const claimable = isOperationClaimable(operation);
       if (view === "available" && !claimable && !isOperationStealable(operation, query.data?.user ?? null)) return false;
@@ -1294,7 +1296,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
       if (term && ![operation.partNumber, operation.revision, operation.partName, operation.assemblyNumber, operation.documentName, operation.material, operation.machine, operation.operationNumber, operation.workType, operation.camProgramPath, operation.storageLocation, operation.qualityNotes, operation.lastQualityFailure?.notes].join(" ").toLowerCase().includes(term)) return false;
       return true;
     });
-  }, [machine, locationFilter, operations, query.data?.user, search, assembly, view, workType, showCompletedWork]);
+  }, [machine, locationFilter, operations, query.data?.user, search, sourceDocument, view, workType, showCompletedWork]);
 
   const bulkItems = useMemo(() => operations.flatMap((operation) => {
     if (!bulkSelectedIds.includes(operation.id)) return [];
@@ -1667,9 +1669,9 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                 <SelectTrigger className="h-9 w-full bg-card xl:w-56"><Wrench className="text-muted-foreground" /><SelectValue placeholder="All machines" /></SelectTrigger>
                 <SelectContent><SelectItem value="all">All machines</SelectItem>{machines.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
               </Select>
-              <Select value={assembly} onValueChange={(value) => setAssembly(value ?? "all")}>
-                <SelectTrigger className="h-9 w-full bg-card xl:w-56"><FileText className="text-muted-foreground" /><SelectValue placeholder="All assemblies" /></SelectTrigger>
-                <SelectContent><SelectItem value="all">All assemblies</SelectItem>{assemblies.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
+              <Select value={sourceDocument} onValueChange={(value) => setSourceDocument(value ?? "all")}>
+                <SelectTrigger className="h-9 w-full bg-card xl:w-56"><FileText className="text-muted-foreground" /><SelectValue placeholder="All source documents" /></SelectTrigger>
+                <SelectContent><SelectItem value="all">All source documents</SelectItem>{sourceDocuments.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}<SelectItem value="missing">Not synced</SelectItem></SelectContent>
               </Select>
               <Select value={locationFilter} onValueChange={(value) => {
                 setLocationFilter(value ?? "all");
@@ -1719,7 +1721,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
           ) : query.isError && !query.data ? (
             <div className="grid min-h-80 place-items-center p-6 text-center"><div><XCircle className="mx-auto mb-3 size-9 text-destructive" /><h2 className="font-semibold">Couldn’t load the queue</h2><p className="mt-1 max-w-md text-sm text-muted-foreground">{query.error.message}</p><Button className="mt-4" onClick={() => query.refetch()}>Try again</Button></div></div>
           ) : filtered.length === 0 ? (
-            <div className="grid min-h-80 place-items-center p-6 text-center"><div><PackageCheck className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h2 className="font-semibold">No operations match</h2><p className="mt-1 text-sm text-muted-foreground">Try another work type, machine, location, or assembly, or clear the search.</p><Button variant="outline" className="mt-4" onClick={() => { setWorkType("all"); setMachine("all"); setLocationFilter("all"); setAssembly("all"); setSearch(""); setView("all"); }}>Clear filters</Button></div></div>
+            <div className="grid min-h-80 place-items-center p-6 text-center"><div><PackageCheck className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h2 className="font-semibold">No operations match</h2><p className="mt-1 text-sm text-muted-foreground">Try another work type, machine, location, or source document, or clear the search.</p><Button variant="outline" className="mt-4" onClick={() => { setWorkType("all"); setMachine("all"); setLocationFilter("all"); setSourceDocument("all"); setSearch(""); setView("all"); }}>Clear filters</Button></div></div>
           ) : (
             <>
               <div className="hidden h-[min(59vh,680px)] min-h-[430px] md:block">
