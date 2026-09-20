@@ -2,6 +2,8 @@ import type { ObsoletionFields } from "./types.ts";
 
 export function projectObsoletion(row: Record<string, unknown> | undefined): ObsoletionFields {
   return {
+    hidden: row?.Hidden === true,
+    visibilityVersion: Number(row?.["Visibility Version"] ?? 0),
     obsolete: row?.Obsolete === true,
     obsoletionVersion: Number(row?.["Obsoletion Version"] ?? 0),
     obsoletionChangedAt: row?.["Obsoletion Changed At"] ? String(row["Obsoletion Changed At"]) : null,

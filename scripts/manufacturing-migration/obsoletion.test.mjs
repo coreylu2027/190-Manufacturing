@@ -24,6 +24,8 @@ await install("supabase/migrations/20260911033920_initialize_synced_routing.sql"
 await install("supabase/migrations/20260918162451_requirement_obsoletion.sql");
 await install("supabase/migrations/202609010003_notifications.sql");
 await install("supabase/migrations/20260919030147_obsolete_work_notifications.sql");
+await install("supabase/migrations/20260919222149_obsolete_removed_requirements.sql");
+await install("supabase/migrations/20260919223625_hide_obsolete_requirements.sql");
 const actor = "00000000-0000-4000-8000-000000000190";
 await sql("insert into auth.users values($1)", [actor]);
 await sql("insert into public.profiles values($1,'Alex A.',true,'machinist')", [actor]);
@@ -183,5 +185,84 @@ await sql("update manufacturing.operations set status='In Progress',quantity_led
 await assert.rejects(db.transaction(async tx=>{await tx.query("update manufacturing.requirements set obsolete=true where id=$1",[rollbackReq]);throw new Error('rollback');}),/rollback/);
 assert.equal((await notifications(rollbackReq)).length,0);
 assert.equal((await sql("select has_function_privilege('authenticated','manufacturing.notify_obsolete_work()','execute') allowed"))[0].allowed,false);
+// Successful removals without a replacement stop work and notify claimants.
+const removed = await requirement('removed','R',2);
+await sql("update manufacturing.requirements set configuration='removal-test',part_location='On Robot' where id=$1",[removed]);
+const removedOp = await operation(removed);
+await sql("update manufacturing.operations set status='In Progress',claimed_quantity=2,quantity_ledger=$2 where id=$1",[removedOp,ledger]);
+const originalRemovedOp = await sql("select quantity_ledger,completed_quantity from manufacturing.operations where id=$1",[removedOp]);
+async function removeInSync(id,status) {
+  await db.transaction(async tx=>{
+    const run=++runId;
+    await tx.query("insert into manufacturing.engineering_sync_runs values($1,'running')",[run]);
+    await tx.query("update manufacturing.requirements set active_in_bom=false where id=$1",[id]);
+    await tx.query("update manufacturing.operations set active_in_routing=false where requirement_id=$1",[id]);
+    await tx.query("update manufacturing.engineering_sync_runs set status=$2 where id=$1",[run,status]);
+  });
+}
+for(const status of ['failed','partial']) {
+  await removeInSync(removed,status);
+  assert.equal((await row(removed)).obsolete,false);
+  assert.equal((await notifications(removed)).length,0);
+  await sql("update manufacturing.requirements set active_in_bom=true where id=$1",[removed]);
+}
+await removeInSync(removed,'success');
+assert.equal((await row(removed)).obsolete,true);
+assert.equal((await row(removed)).obsolete_replacement_id,null);
+assert.equal((await row(removed)).obsoletion_origin,'automatic');
+assert.equal((await row(removed)).part_location,'On Robot');
+assert.equal((await row(removed)).qc_outcome,'Passed');
+assert.deepEqual(await sql("select quantity_ledger,completed_quantity from manufacturing.operations where id=$1",[removedOp]),originalRemovedOp);
+assert.equal((await notifications(removed)).length,2);
+const removalVersion=(await row(removed)).obsoletion_version;
+await removeInSync(removed,'success');
+assert.equal((await row(removed)).obsoletion_version,removalVersion);
+assert.equal((await notifications(removed)).length,2);
+await change(removed,false,removalVersion);
+await removeInSync(removed,'success');
+assert.equal((await row(removed)).obsolete,false,'unchanged sync preserves explicit restoration');
+// Reactivating then removing again is a new removal, which can stop work again.
+await sql("update manufacturing.requirements set active_in_bom=true where id=$1",[removed]);
+await removeInSync(removed,'success');
+assert.equal((await row(removed)).obsolete,true);
+assert.equal((await notifications(removed)).length,4);
+const manuallyStopped=await requirement('manual-removal','M',2);
+await change(manuallyStopped,true,0);
+const manualBefore=await row(manuallyStopped);
+await removeInSync(manuallyStopped,'success');
+assert.equal((await row(manuallyStopped)).obsoletion_version,manualBefore.obsoletion_version);
+assert.equal((await row(manuallyStopped)).obsoletion_origin,'manual');
+assert.equal((await row(rollbackReq)).obsolete,false,'unrelated active work is untouched');
+// Hiding is an admin-only, reversible list preference on obsolete requirements.
+const hide = async (id, hidden, version, request=crypto.randomUUID(), expected=null) => (await sql(
+  'select public.manufacturing_set_requirement_hidden($1,$2,$3,$4,$5,$6) result',
+  [request,actor,expected ?? await token(),id,hidden,version]))[0].result;
+await assert.rejects(hide(manuallyStopped,true,0),/administrator/);
+await sql("update public.profiles set role='admin' where id=$1",[actor]);
+await sql("update public.profiles set approved=false where id=$1",[actor]);
+await assert.rejects(hide(manuallyStopped,true,0),/administrator/);
+await sql("update public.profiles set approved=true where id=$1",[actor]);
+await assert.rejects(hide(rollbackReq,true,0),/Only obsolete/);
+const beforeHide=await row(manuallyStopped);
+const hideRequest=crypto.randomUUID(),hideToken=await token();
+const hiddenResult=await hide(manuallyStopped,true,0,hideRequest,hideToken);
+assert.equal(hiddenResult.hidden,true);
+assert.equal(hiddenResult.visibilityVersion,1);
+assert.deepEqual(await hide(manuallyStopped,true,0,hideRequest,hideToken),hiddenResult);
+for(const key of ['obsolete','obsoletion_version','status','qc_outcome','required_quantity','active_in_bom']) assert.equal((await row(manuallyStopped))[key],beforeHide[key]);
+assert.equal((await row(manuallyStopped)).visibility_changed_by,'Alex A.');
+assert.equal((await sql("select count(*)::int count from manufacturing.write_history where request_id=$1",[hideRequest]))[0].count,1);
+await assert.rejects(hide(manuallyStopped,false,0),/Visibility changed/);
+await hide(manuallyStopped,false,1);
+assert.equal((await row(manuallyStopped)).hidden,false);
+await hide(manuallyStopped,true,2); // Undo unhide.
+await assert.rejects(hide(manuallyStopped,false,3,crypto.randomUUID(),hideToken),/state changed/);
+await change(manuallyStopped,false,(await row(manuallyStopped)).obsoletion_version);
+assert.equal((await row(manuallyStopped)).hidden,false,'restoring obsolete work makes it visible');
+assert.equal((await row(manuallyStopped)).visibility_version,4);
+await assert.rejects(hide(manuallyStopped,true,3),/Visibility changed/);
+await assert.rejects(sql("update manufacturing.requirements set hidden=true where id=$1",[manuallyStopped]),/hidden_requirements_are_obsolete/);
+assert.equal((await sql("select has_function_privilege('authenticated','public.manufacturing_set_requirement_hidden(uuid,uuid,text,bigint,boolean,bigint)','execute') allowed"))[0].allowed,false);
+assert.equal((await sql("select has_function_privilege('service_role','public.manufacturing_set_requirement_hidden(uuid,uuid,text,bigint,boolean,bigint)','execute') allowed"))[0].allowed,true);
 await db.close();
 console.log("Obsoletion PostgreSQL checks passed: permissions, history, work guards, Undo/CAS, sync scope, restoration, failed/partial/incomplete sync.");

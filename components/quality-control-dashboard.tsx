@@ -381,6 +381,7 @@ export function QualityControlDashboard() {
       if (term && ![
         item.operations[0].partNumber,
         item.operations[0].partName,
+        item.operations[0].assemblyNumber,
         item.operations[0].documentName,
         item.storageLocation,
         item.notes,
@@ -528,7 +529,7 @@ export function QualityControlDashboard() {
             <div className="order-2 grid w-full basis-full grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(15rem,1fr)_11rem_12rem_12rem]">
             <div className="relative min-w-0">
               <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-              <Input value={search} onChange={(event) => setSearch(event.target.value)} className="h-9 bg-card pl-9" placeholder="Search part, operation, machinist, notes…" />
+              <Input value={search} onChange={(event) => setSearch(event.target.value)} className="h-9 bg-card pl-9" placeholder="Search part, assembly, operation, machinist, notes…" />
             </div>
             <Select value={result} onValueChange={(value) => setResult((value ?? "all") as "all" | QualityResult)}>
               <SelectTrigger className="h-9 w-full bg-card xl:w-44"><SlidersHorizontal className="text-muted-foreground" /><SelectValue placeholder="All QC statuses" /></SelectTrigger>

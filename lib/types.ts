@@ -49,6 +49,8 @@ export interface QualityLocationFields {
 }
 
 export interface ObsoletionFields {
+  hidden: boolean;
+  visibilityVersion: number;
   obsolete: boolean;
   obsoletionVersion: number;
   obsoletionChangedAt: string | null;

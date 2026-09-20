@@ -11,6 +11,17 @@ const requirement = {
   "Drawing PDF": [{ url: "https://legacy-source.invalid/legacy.pdf", visible_name: "legacy.pdf" }],
   "STEP File": [{ url: "https://legacy-source.invalid/legacy.step", visible_name: "legacy.step" }],
 };
+
+test("hidden obsolete history retains visibility metadata for the admin archive", () => {
+  const archived = { ...requirement, Obsolete: true, Hidden: true, "Visibility Version": 3, "Active in BOM": false };
+  const [op] = projectOperations([{ ...operation, "Active in Routing": false }], [archived], [part]);
+  assert.equal(op.hidden, true);
+  assert.equal(op.visibilityVersion, 3);
+  assert.equal(op.obsolete, true);
+  const [job] = projectFinishing([{ ...finishing, Active: false }], [archived]);
+  assert.equal(job.hidden, true);
+  assert.equal(job.visibilityVersion, 3);
+});
 const operation = {
   id: 1,
   Operation: "root|part|OP1",

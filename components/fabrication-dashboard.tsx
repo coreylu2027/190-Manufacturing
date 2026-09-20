@@ -216,7 +216,7 @@ export function FabricationDashboard({
       if (color !== "all" && job.color !== color) return false;
       if (view === "available" && (job.obsolete || !job.active || job.status !== "Ready")) return false;
       if (view === "mine" && !(ownedBy(job, userName) && job.status === "In Progress")) return false;
-      if (term && ![job.partNumber, job.partName, job.documentName, job.color, job.productionNotes, job.qcNotes, job.lastQualityFailure?.notes, job.machinist, job.storageLocation].join(" ").toLocaleLowerCase().includes(term)) return false;
+      if (term && ![job.partNumber, job.partName, job.assemblyNumber, job.documentName, job.color, job.productionNotes, job.qcNotes, job.lastQualityFailure?.notes, job.machinist, job.storageLocation].join(" ").toLocaleLowerCase().includes(term)) return false;
       return true;
     });
   }, [color, jobs, search, userName, view]);

@@ -61,6 +61,24 @@ the migration itself.
 
 ## Database installation
 
+### Admin visibility
+
+`supabase/migrations/20260919223625_hide_obsolete_requirements.sql` adds reversible
+requirement-level hiding. Approved admins can choose **Hide obsolete requirement**
+in Production details, with Undo. Only obsolete requirements can be hidden.
+The hidden requirement is omitted from normal Production, Manufacturing, CAM,
+Finishing, and QC lists for everyone. Admins use **Show hidden** in Production to
+find it and choose **Unhide requirement**, also with Undo. No table column is added.
+Restoring from obsolete automatically unhides it. Neither hide nor unhide changes
+manufacturing progress, quantities, QC, BOM membership, or routing.
+
+The service-only visibility RPC independently checks the approved admin profile,
+the manufacturing snapshot, and a separate visibility version. Writes are audited
+in the existing write history; retries reuse the transaction request ID. Existing
+requirement change triggers invalidate caches and broadcast realtime updates.
+Hidden records remain in the internal projection and are available to admins;
+this is a list visibility feature, not deletion or a new data confidentiality boundary.
+
 Apply `supabase/migrations/20260918162451_requirement_obsoletion.sql` before
 deploying the app changes. It depends on the normalized manufacturing schema,
 production write and note RPCs, and the engineering-sync API/routing initializer.
@@ -80,6 +98,17 @@ new obsolete flag, and new obsoletion version. Conflicts return HTTP 409 and
 refresh the UI instead of applying an old Undo to a newer decision.
 
 ## Revision-sync contract
+
+Apply `supabase/migrations/20260919222149_obsolete_removed_requirements.sql` to
+also obsolete requirements made inactive by a successful sync when there is no
+active requirement for the same part, assembly, source root, and configuration.
+These confirmed removals have no replacement link. Existing history, work
+guards, realtime claimant alerts, and email delivery apply unchanged. Already
+obsolete requirements retain their existing obsoletion metadata and do not
+notify again. Historical inactive records are not backfilled. Explicit restoration
+survives unchanged syncs; reactivation followed by another removal is a new event.
+Failed/partial syncs do not trigger removal obsoletion. An active but incomplete
+or ambiguous replacement is not treated as a removal.
 
 The engineering sync must reconcile requirements and update its run from
 `running` to `success` in the same transaction, as with routing initialization.

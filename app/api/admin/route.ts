@@ -59,7 +59,7 @@ export async function GET() {
     }).sort((a, b) => Number(a.approved) - Number(b.approved) || a.name.localeCompare(b.name));
 
     const qualityControl = projectQualityControl(
-      manufacturingData.snapshot.operations,
+      manufacturingData.snapshot.operations.filter((operation) => !operation.hidden),
       manufacturingData.snapshot.qualityReviews as QualityReviewRow[],
       manufacturingData.snapshot.retractedQualityReviewIds,
       users.map((user) => ({ id: user.id, display_name: user.name })),

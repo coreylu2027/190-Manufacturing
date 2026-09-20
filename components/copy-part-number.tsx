@@ -1,7 +1,7 @@
 "use client";
 
 import { toast } from "sonner";
-import { ObsoleteBadge } from "@/components/requirement-obsoletion";
+import { HiddenBadge, ObsoleteBadge } from "@/components/requirement-obsoletion";
 
 export function CopyPartNumber({ partNumber }: { partNumber: string }) {
   return (
@@ -28,6 +28,6 @@ export function CopyPartNumber({ partNumber }: { partNumber: string }) {
   );
 }
 
-export function PartNumberCell({ value, data }: { value?: string; data?: { obsolete?: boolean; operations?: { obsolete?: boolean }[] } }) {
-  return value ? <div className="flex h-full flex-col justify-center gap-0.5 leading-4"><CopyPartNumber partNumber={value} /><span><ObsoleteBadge obsolete={data?.obsolete ?? data?.operations?.[0]?.obsolete} /></span></div> : null;
+export function PartNumberCell({ value, data }: { value?: string; data?: { obsolete?: boolean; hidden?: boolean; operations?: { obsolete?: boolean }[] } }) {
+  return value ? <div className="flex h-full flex-col justify-center gap-0.5 leading-4"><CopyPartNumber partNumber={value} /><span className="flex gap-1"><ObsoleteBadge obsolete={data?.obsolete ?? data?.operations?.[0]?.obsolete} /><HiddenBadge hidden={data?.hidden} /></span></div> : null;
 }
