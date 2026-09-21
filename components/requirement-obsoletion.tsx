@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import type { ObsoletionFields } from "@/lib/types";
 
 export function ObsoleteBadge({ obsolete }: { obsolete?: boolean }) {
-  return obsolete ? <span className="inline-flex rounded border border-red-300 bg-red-50 px-1.5 py-0.5 font-sans text-[10px] font-bold leading-4 text-red-800">Obsolete</span> : null;
+  return obsolete ? <span className="inline-flex rounded border border-red-300 bg-red-50 px-1.5 py-0.5 font-sans text-[10px] font-bold leading-4 text-red-800 dark:border-red-400/30 dark:bg-red-400/15 dark:text-red-200">Obsolete</span> : null;
 }
 
 export function HiddenBadge({ hidden }: { hidden?: boolean }) {
@@ -48,7 +48,7 @@ export function RequirementVisibility({ requirementId, state }: { requirementId:
 }
 
 export function ObsoleteWarning({ obsolete, onRobot = false }: { obsolete?: boolean; onRobot?: boolean }) {
-  return obsolete ? <div role="status" className="rounded-xl border border-red-300 bg-red-50 p-3 text-sm text-red-900">
+  return obsolete ? <div role="status" className="rounded-xl border border-red-300 bg-red-50 p-3 text-sm text-red-900 dark:border-red-400/30 dark:bg-red-400/10 dark:text-red-100">
     <p className="font-bold">Obsolete — Do not manufacture or install</p>
     <p className="mt-1">Work is stopped for this production requirement. Its manufacturing history is preserved.</p>
     {onRobot && <p className="mt-1 font-semibold">This part is recorded as On Robot. Remove it and update its location.</p>}

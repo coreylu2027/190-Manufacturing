@@ -79,11 +79,11 @@ const gridTheme = themeQuartz.withParams({
 });
 
 const statusStyles: Record<OperationStatus, string> = {
-  Planned: "border-slate-200 bg-slate-100 text-slate-700",
-  Ready: "border-emerald-200 bg-emerald-100 text-emerald-800",
-  "In Progress": "border-blue-200 bg-blue-100 text-blue-800",
-  Blocked: "border-amber-200 bg-amber-100 text-amber-900",
-  Complete: "border-violet-200 bg-violet-100 text-violet-800",
+  Planned: "border-slate-200 bg-slate-100 text-slate-700 dark:border-slate-400/30 dark:bg-slate-400/15 dark:text-slate-200",
+  Ready: "border-emerald-200 bg-emerald-100 text-emerald-800 dark:border-emerald-400/30 dark:bg-emerald-400/15 dark:text-emerald-200",
+  "In Progress": "border-blue-200 bg-blue-100 text-blue-800 dark:border-blue-400/30 dark:bg-blue-400/15 dark:text-blue-200",
+  Blocked: "border-amber-200 bg-amber-100 text-amber-900 dark:border-amber-400/30 dark:bg-amber-400/15 dark:text-amber-100",
+  Complete: "border-violet-200 bg-violet-100 text-violet-800 dark:border-violet-400/30 dark:bg-violet-400/15 dark:text-violet-200",
 };
 
 function StatusBadge({ status }: { status: OperationStatus }) {
@@ -307,10 +307,10 @@ export function FabricationDashboard({
         </div>
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
           {[
-            { label: "Ready", value: stats.ready, icon: CircleDot, tone: "text-emerald-700 bg-emerald-50" },
-            { label: "In progress", value: stats.active, icon: Timer, tone: "text-blue-700 bg-blue-50" },
-            { label: "Upstream", value: stats.waiting, icon: TriangleAlert, tone: "text-amber-800 bg-amber-50" },
-            { label: "Complete", value: stats.complete, icon: Check, tone: "text-violet-700 bg-violet-50" },
+            { label: "Ready", value: stats.ready, icon: CircleDot, tone: "text-emerald-700 bg-emerald-50 dark:text-emerald-300 dark:bg-emerald-400/15" },
+            { label: "In progress", value: stats.active, icon: Timer, tone: "text-blue-700 bg-blue-50 dark:text-blue-300 dark:bg-blue-400/15" },
+            { label: "Upstream", value: stats.waiting, icon: TriangleAlert, tone: "text-amber-800 bg-amber-50 dark:text-amber-300 dark:bg-amber-400/15" },
+            { label: "Complete", value: stats.complete, icon: Check, tone: "text-violet-700 bg-violet-50 dark:text-violet-300 dark:bg-violet-400/15" },
           ].map(({ label, value, icon: Icon, tone }) => (
             <div key={label} className="flex min-w-32 items-center gap-3 rounded-xl border bg-card px-3 py-2.5 shadow-sm">
               <div className={cn("grid size-8 place-items-center rounded-lg", tone)}><Icon className="size-4" /></div>
@@ -326,7 +326,7 @@ export function FabricationDashboard({
             <div className="flex w-full overflow-x-auto rounded-lg bg-muted p-1 sm:w-auto">
               {([{ id: "available", label: "Available" }, { id: "mine", label: "My work" }, { id: "all", label: "All finishing" }] as const).map((item) => (
                 <Button key={item.id} size="sm" variant="ghost" onClick={() => setView(item.id)} className={cn("min-w-fit", view === item.id && "bg-card text-foreground shadow-sm hover:bg-card")}>
-                  {item.label}{item.id === "available" && <span className="ml-1 rounded bg-emerald-100 px-1.5 text-[10px] font-bold text-emerald-800">{stats.ready}</span>}
+                  {item.label}{item.id === "available" && <span className="ml-1 rounded bg-emerald-100 px-1.5 text-[10px] font-bold text-emerald-800 dark:bg-emerald-400/20 dark:text-emerald-200">{stats.ready}</span>}
                 </Button>
               ))}
             </div>
@@ -411,7 +411,7 @@ export function FabricationDashboard({
         <DialogContent>
           <DialogHeader><DialogTitle>{bulkDialog === "location" ? "Bulk set location" : bulkDialog === "release" ? "Bulk release claim" : bulkDialog === "complete" ? "Bulk complete finishing" : "Bulk claim finishing"}</DialogTitle><DialogDescription>{bulkDialog === "location" ? locationJobs.length : dialogJobs.length} selected {bulkDialog === "location" ? "part requirements" : "finishing jobs"}. Applies to the full quantity of each job.</DialogDescription></DialogHeader>
           <ul className="max-h-48 space-y-1 overflow-y-auto text-sm">{dialogJobs.map((job) => <li key={job.id}><CopyPartNumber partNumber={job.partNumber} /> · {job.color} · Qty {job.quantity}</li>)}</ul>
-          {dialogJobs.some((job) => !filtered.some((row) => row.id === job.id)) && <p className="text-xs text-amber-700">Includes selected jobs hidden by the current filters.</p>}
+          {dialogJobs.some((job) => !filtered.some((row) => row.id === job.id)) && <p className="text-xs text-amber-700 dark:text-amber-300">Includes selected jobs hidden by the current filters.</p>}
           {bulkDialog === "release" && <p className="text-xs text-muted-foreground">Only your active claims are released; other selected jobs are skipped.</p>}
           {bulkDialog === "location" && <><StorageLocationSelect value={bulkLocation} onChange={setBulkLocation} disabled={bulkBusy} emptyLabel="Choose a location" allowOnRobot={allowOnRobot} />{!allowOnRobot && <p className="text-xs text-muted-foreground">On Robot requires active parts with passed QC and completed finishing.</p>}</>}
           <DialogFooter><Button variant="outline" disabled={bulkMutation.isPending} onClick={() => setBulkDialog(null)}>Cancel</Button><Button disabled={bulkBusy || !dialogJobs.length || !user?.approved || (bulkDialog === "location" && (!bulkLocation || bulkLocation === "On Robot" && !allowOnRobot))} onClick={() => { if (bulkDialog) bulkMutation.mutate({ action: bulkDialog, targets: bulkDialog === "location" ? locationJobs : dialogJobs, location: bulkLocation }); }}>{bulkMutation.isPending && <LoaderCircle className="animate-spin" />}{bulkDialog === "location" ? "Set location" : bulkDialog === "release" ? "Release claims" : bulkDialog === "complete" ? "Mark complete" : "Claim jobs"}</Button></DialogFooter>
@@ -458,7 +458,7 @@ export function FabricationDashboard({
 
                 <section>
                   <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">QC inspection notes</h3>
-                  <p className={cn("whitespace-pre-wrap rounded-xl border p-4 text-sm leading-6", selected.qcNotes ? "bg-emerald-50/60 text-foreground" : "border-dashed bg-muted/30 text-muted-foreground")}>
+                  <p className={cn("whitespace-pre-wrap rounded-xl border p-4 text-sm leading-6", selected.qcNotes ? "bg-emerald-50/60 text-foreground dark:bg-emerald-400/10" : "border-dashed bg-muted/30 text-muted-foreground")}>
                     {selected.qcNotes || "No inspection notes were recorded."}
                   </p>
                 </section>
@@ -509,8 +509,8 @@ export function FabricationDashboard({
                 {selected.status === "In Progress" && ownedBy(selected, userName) && <Button size="lg" className="h-11 bg-emerald-600 hover:bg-emerald-700" onClick={() => runAction("complete")} disabled={mutation.isPending || selected.obsolete || !selected.active}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <Check />} Mark complete</Button>}
                 {selected.status === "In Progress" && ownedBy(selected, userName) && <Button variant="outline" onClick={() => runAction("release")} disabled={mutation.isPending || selected.obsolete || !selected.active}><RotateCcw /> Release claim</Button>}
                 {selected.status === "Complete" && ownedBy(selected, userName) && <Button variant="outline" onClick={() => runAction("undo_complete")} disabled={mutation.isPending || selected.obsolete || !selected.active}><RotateCcw /> Undo completion</Button>}
-                {selected.status === "Complete" && <div className="flex items-center justify-center gap-2 rounded-xl bg-emerald-50 p-3 text-sm font-semibold text-emerald-800"><Check className="size-4" /> {selected.quantity} finished by {selected.machinist || "machinist"}</div>}
-                {selected.status === "Planned" && <div className="flex items-center justify-center gap-2 rounded-xl bg-slate-100 p-3 text-sm font-semibold text-slate-700"><PackageCheck className="size-4" /> Waiting on manufacturing and QC</div>}
+                {selected.status === "Complete" && <div className="flex items-center justify-center gap-2 rounded-xl bg-emerald-50 p-3 text-sm font-semibold text-emerald-800 dark:bg-emerald-400/15 dark:text-emerald-200"><Check className="size-4" /> {selected.quantity} finished by {selected.machinist || "machinist"}</div>}
+                {selected.status === "Planned" && <div className="flex items-center justify-center gap-2 rounded-xl bg-slate-100 p-3 text-sm font-semibold text-slate-700 dark:bg-slate-400/15 dark:text-slate-200"><PackageCheck className="size-4" /> Waiting on manufacturing and QC</div>}
                 <Button variant="outline" onClick={() => setSelectedId(null)}>Close</Button>
               </SheetFooter>
             </>

@@ -72,9 +72,9 @@ const gridTheme = themeQuartz.withParams({
 });
 
 const resultStyles: Record<QualityResult, string> = {
-  pending: "border-amber-200 bg-amber-50 text-amber-800",
-  passed: "border-emerald-200 bg-emerald-50 text-emerald-800",
-  failed: "border-rose-200 bg-rose-50 text-rose-800",
+  pending: "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-400/30 dark:bg-amber-400/15 dark:text-amber-200",
+  passed: "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-400/30 dark:bg-emerald-400/15 dark:text-emerald-200",
+  failed: "border-rose-200 bg-rose-50 text-rose-800 dark:border-rose-400/30 dark:bg-rose-400/15 dark:text-rose-200",
 };
 
 const resultLabels: Record<QualityResult, string> = {
@@ -206,10 +206,10 @@ function ActionCell({ data, onOpen }: { data?: QualityControlItem; onOpen: (item
 function QualityFailureCallout({ failure }: { failure: QualityFailureSummary | null }) {
   if (!failure) return null;
   return (
-    <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-rose-950">
+    <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-rose-950 dark:border-rose-400/30 dark:bg-rose-400/10 dark:text-rose-50">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-xs font-bold uppercase tracking-[.14em] text-rose-800">Previous QC failure</p>
-        <p className="text-xs text-rose-700">
+        <p className="text-xs font-bold uppercase tracking-[.14em] text-rose-800 dark:text-rose-300">Previous QC failure</p>
+        <p className="text-xs text-rose-700 dark:text-rose-300">
           {failure.rejectedQuantity ? `${failure.rejectedQuantity} rejected · ` : ""}{formatDate(failure.reviewedAt)}
           {failure.reviewedBy ? ` · ${failure.reviewedBy}` : ""}
         </p>
@@ -506,9 +506,9 @@ export function QualityControlDashboard() {
           <ForceQcPicker />
           <div className="grid grid-cols-3 gap-2">
             {[
-              { label: "Awaiting QC", value: stats.pending, icon: ClipboardCheck, tone: "bg-violet-50 text-violet-700" },
-              { label: "Passed", value: stats.passed, icon: Check, tone: "bg-emerald-50 text-emerald-700" },
-              { label: "Failed", value: stats.failed, icon: X, tone: "bg-rose-50 text-rose-700" },
+              { label: "Awaiting QC", value: stats.pending, icon: ClipboardCheck, tone: "bg-violet-50 text-violet-700 dark:bg-violet-400/15 dark:text-violet-300" },
+              { label: "Passed", value: stats.passed, icon: Check, tone: "bg-emerald-50 text-emerald-700 dark:bg-emerald-400/15 dark:text-emerald-300" },
+              { label: "Failed", value: stats.failed, icon: X, tone: "bg-rose-50 text-rose-700 dark:bg-rose-400/15 dark:text-rose-300" },
             ].map(({ label, value, icon: Icon, tone }) => (
               <div key={label} className="flex min-w-28 items-center gap-3 rounded-xl border bg-card px-3 py-2.5 shadow-sm">
                 <div className={cn("grid size-8 place-items-center rounded-lg", tone)}><Icon className="size-4" /></div>
@@ -563,7 +563,7 @@ export function QualityControlDashboard() {
         ) : query.isError && !query.data ? (
           <div className="grid min-h-80 place-items-center p-6 text-center"><div><ShieldCheck className="mx-auto mb-3 size-10 text-destructive" /><h2 className="font-semibold">Couldn’t load quality control</h2><p className="mt-1 text-sm text-muted-foreground">{query.error.message}</p><Button className="mt-4" onClick={() => query.refetch()}>Try again</Button></div></div>
         ) : items.length === 0 ? (
-          <div className="grid min-h-60 place-items-center p-6 text-center"><div><ClipboardCheck className="mx-auto mb-3 size-10 text-emerald-600" /><h3 className="font-semibold">QC queue is clear</h3><p className="mt-1 text-sm text-muted-foreground">Requirements will appear after all pre-QC manufacturing operations are complete.</p></div></div>
+          <div className="grid min-h-60 place-items-center p-6 text-center"><div><ClipboardCheck className="mx-auto mb-3 size-10 text-emerald-600 dark:text-emerald-400" /><h3 className="font-semibold">QC queue is clear</h3><p className="mt-1 text-sm text-muted-foreground">Requirements will appear after all pre-QC manufacturing operations are complete.</p></div></div>
         ) : filtered.length === 0 ? (
           <div className="grid min-h-80 place-items-center p-6 text-center"><div><Search className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h2 className="font-semibold">No QC items match</h2><p className="mt-1 text-sm text-muted-foreground">Try another status, machine, or location, or clear the search.</p><Button variant="outline" className="mt-4" onClick={clearFilters}>Clear filters</Button></div></div>
         ) : (
@@ -644,8 +644,8 @@ export function QualityControlDashboard() {
           <ul className="max-h-60 space-y-2 overflow-y-auto text-sm">
             {bulkEligible.map((item) => <li key={item.requirementId}><CopyPartNumber partNumber={item.operations[0].partNumber} /> · Qty {item.operations[0].quantity}<p className="whitespace-pre-wrap text-xs text-muted-foreground">{(draftNotes[item.requirementId] ?? item.notes) || "No inspection notes"}</p></li>)}
           </ul>
-          {bulkSelected.some((item) => !filtered.some((row) => row.requirementId === item.requirementId)) && <p className="text-sm text-amber-700">Includes selected parts hidden by the current filters.</p>}
-          {bulkSelected.length > bulkEligible.length && <p className="text-sm text-amber-700">{bulkSelected.length - bulkEligible.length} selected requirements are no longer eligible and will be skipped.</p>}
+          {bulkSelected.some((item) => !filtered.some((row) => row.requirementId === item.requirementId)) && <p className="text-sm text-amber-700 dark:text-amber-300">Includes selected parts hidden by the current filters.</p>}
+          {bulkSelected.length > bulkEligible.length && <p className="text-sm text-amber-700 dark:text-amber-300">{bulkSelected.length - bulkEligible.length} selected requirements are no longer eligible and will be skipped.</p>}
           <DialogFooter>
             <Button variant="outline" disabled={bulkReviewMutation.isPending} onClick={() => setBulkDialogOpen(false)}>Cancel</Button>
             <Button disabled={bulkBusy || !bulkEligible.length} onClick={() => bulkReviewMutation.mutate(bulkEligible.map((item) => ({ item, notes: draftNotes[item.requirementId] ?? item.notes })))}>{bulkReviewMutation.isPending ? <LoaderCircle className="animate-spin" /> : <Check />}Pass QC</Button>
@@ -734,7 +734,7 @@ export function QualityControlDashboard() {
                     <Button size="lg" variant="outline" className="h-11" onClick={() => mutateUndoReview(selected)} disabled={operation.obsolete || !operation.activeInBom || undoReviewIsPending || notesArePending}>{undoReviewIsPending ? <LoaderCircle className="animate-spin" /> : <Clock3 />} Undo QC pass</Button>
                   </>
                 ) : (
-                  <div className="rounded-xl bg-rose-50 p-3 text-center text-sm font-medium text-rose-800">Complete the reopened route to request QC again.</div>
+                  <div className="rounded-xl bg-rose-50 p-3 text-center text-sm font-medium text-rose-800 dark:bg-rose-400/15 dark:text-rose-200">Complete the reopened route to request QC again.</div>
                 )}
                 <Button variant="outline" onClick={() => setSelectedId(null)}>Close</Button>
               </SheetFooter>

@@ -67,7 +67,7 @@ function AccountCell({ data }: { data?: AdminUserGridRow }) {
   if (!data) return null;
   return (
     <div className="flex h-full min-w-0 items-center gap-3 leading-normal">
-      <div className={cn("grid size-9 shrink-0 place-items-center rounded-full", data.approved ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-800")}>
+      <div className={cn("grid size-9 shrink-0 place-items-center rounded-full", data.approved ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-400/15 dark:text-emerald-300" : "bg-amber-50 text-amber-800 dark:bg-amber-400/15 dark:text-amber-300")}>
         <UserCheck className="size-4" />
       </div>
       <div className="min-w-0">
@@ -81,7 +81,7 @@ function AccountCell({ data }: { data?: AdminUserGridRow }) {
 function ApprovalCell({ value }: { value: boolean }) {
   return (
     <div className="flex h-full items-center">
-      <Badge variant="outline" className={value ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-200 bg-amber-50 text-amber-800"}>{value ? "Approved" : "Pending"}</Badge>
+      <Badge variant="outline" className={value ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-400/30 dark:bg-emerald-400/15 dark:text-emerald-200" : "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-400/30 dark:bg-amber-400/15 dark:text-amber-200"}>{value ? "Approved" : "Pending"}</Badge>
     </div>
   );
 }
@@ -208,8 +208,8 @@ export function AdminDashboard() {
         </div>
         <div className="grid grid-cols-2 gap-2">
           {[
-            { label: "Pending users", value: stats.pendingUsers, icon: Clock3, tone: "bg-amber-50 text-amber-800" },
-            { label: "Approved", value: stats.approvedUsers, icon: Users, tone: "bg-blue-50 text-blue-700" },
+            { label: "Pending users", value: stats.pendingUsers, icon: Clock3, tone: "bg-amber-50 text-amber-800 dark:bg-amber-400/15 dark:text-amber-300" },
+            { label: "Approved", value: stats.approvedUsers, icon: Users, tone: "bg-blue-50 text-blue-700 dark:bg-blue-400/15 dark:text-blue-300" },
           ].map(({ label, value, icon: Icon, tone }) => (
             <div key={label} className="flex min-w-32 items-center gap-3 rounded-xl border bg-card px-3 py-2.5 shadow-sm">
               <div className={cn("grid size-8 place-items-center rounded-lg", tone)}><Icon className="size-4" /></div>
@@ -269,8 +269,8 @@ export function AdminDashboard() {
               {filteredUsers.map((user) => (
                 <article key={user.id} className="p-4">
                   <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0"><div className="flex items-center gap-2"><h3 className="truncate font-semibold">{user.name}</h3><Badge variant="outline" className={user.approved ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-200 bg-amber-50 text-amber-800"}>{user.approved ? "Approved" : "Pending"}</Badge></div><p className="mt-1 truncate text-xs text-muted-foreground">{user.email}</p><p className="mt-1 text-[11px] text-muted-foreground">Joined {formatDate(user.createdAt)} · Last opened {formatDate(user.lastSeenAt)}</p></div>
-                    <UserCheck className={cn("mt-1 size-5 shrink-0", user.approved ? "text-emerald-600" : "text-muted-foreground")} />
+                    <div className="min-w-0"><div className="flex items-center gap-2"><h3 className="truncate font-semibold">{user.name}</h3><Badge variant="outline" className={user.approved ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-400/30 dark:bg-emerald-400/15 dark:text-emerald-200" : "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-400/30 dark:bg-amber-400/15 dark:text-amber-200"}>{user.approved ? "Approved" : "Pending"}</Badge></div><p className="mt-1 truncate text-xs text-muted-foreground">{user.email}</p><p className="mt-1 text-[11px] text-muted-foreground">Joined {formatDate(user.createdAt)} · Last opened {formatDate(user.lastSeenAt)}</p></div>
+                    <UserCheck className={cn("mt-1 size-5 shrink-0", user.approved ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground")} />
                   </div>
                   <div className="mt-3 flex items-center gap-2">
                     <Select value={user.draftRole} onValueChange={(value) => updateRoleDraft(user.id, (value ?? "machinist") as UserRole)}><SelectTrigger className="h-9 min-w-0 flex-1"><SelectValue>{user.draftRole === "admin" ? "Administrator" : "Machinist"}</SelectValue></SelectTrigger><SelectContent><SelectItem value="machinist">Machinist</SelectItem><SelectItem value="admin">Administrator</SelectItem></SelectContent></Select>

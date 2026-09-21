@@ -203,12 +203,12 @@ const gridTheme = themeQuartz.withParams({
 });
 
 const statusStyles: Record<ProductionStatus, string> = {
-  Planned: "border-slate-200 bg-slate-100 text-slate-700",
-  Ready: "border-emerald-200 bg-emerald-100 text-emerald-800",
-  "In Progress": "border-blue-200 bg-blue-100 text-blue-800",
-  Blocked: "border-amber-200 bg-amber-100 text-amber-900",
-  "QC Pending": "border-cyan-200 bg-cyan-100 text-cyan-800",
-  Complete: "border-violet-200 bg-violet-100 text-violet-800",
+  Planned: "border-slate-200 bg-slate-100 text-slate-700 dark:border-slate-400/30 dark:bg-slate-400/15 dark:text-slate-200",
+  Ready: "border-emerald-200 bg-emerald-100 text-emerald-800 dark:border-emerald-400/30 dark:bg-emerald-400/15 dark:text-emerald-200",
+  "In Progress": "border-blue-200 bg-blue-100 text-blue-800 dark:border-blue-400/30 dark:bg-blue-400/15 dark:text-blue-200",
+  Blocked: "border-amber-200 bg-amber-100 text-amber-900 dark:border-amber-400/30 dark:bg-amber-400/15 dark:text-amber-100",
+  "QC Pending": "border-cyan-200 bg-cyan-100 text-cyan-800 dark:border-cyan-400/30 dark:bg-cyan-400/15 dark:text-cyan-200",
+  Complete: "border-violet-200 bg-violet-100 text-violet-800 dark:border-violet-400/30 dark:bg-violet-400/15 dark:text-violet-200",
 };
 
 function StatusBadge({ status }: { status: ProductionStatus }) {
@@ -278,10 +278,10 @@ function formatDate(value: string | null) {
 function QualityFailureCallout({ failure }: { failure: QualityFailureSummary | null }) {
   if (!failure) return null;
   return (
-    <section className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-rose-950">
+    <section className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-rose-950 dark:border-rose-400/30 dark:bg-rose-400/10 dark:text-rose-50">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h3 className="text-xs font-bold uppercase tracking-[.14em] text-rose-800">Previous QC failure</h3>
-        <p className="text-xs text-rose-700">{failure.rejectedQuantity ? `${failure.rejectedQuantity} rejected · ` : ""}{formatDate(failure.reviewedAt)}{failure.reviewedBy ? ` · ${failure.reviewedBy}` : ""}</p>
+        <h3 className="text-xs font-bold uppercase tracking-[.14em] text-rose-800 dark:text-rose-300">Previous QC failure</h3>
+        <p className="text-xs text-rose-700 dark:text-rose-300">{failure.rejectedQuantity ? `${failure.rejectedQuantity} rejected · ` : ""}{formatDate(failure.reviewedAt)}{failure.reviewedBy ? ` · ${failure.reviewedBy}` : ""}</p>
       </div>
       <p className="mt-2 whitespace-pre-wrap text-sm leading-6">{failure.notes || "No failure reason was recorded."}</p>
     </section>
@@ -591,10 +591,10 @@ function ProductionOverview({
         </div>
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
           {[
-            { label: "Requirements", value: summary.total, icon: PackageCheck, tone: "text-slate-700 bg-slate-100" },
-            { label: "In progress", value: summary.active, icon: Clock3, tone: "text-blue-700 bg-blue-50" },
-            { label: "Attention", value: summary.attention, icon: TriangleAlert, tone: "text-amber-800 bg-amber-50" },
-            { label: "Complete", value: summary.complete, icon: Check, tone: "text-violet-700 bg-violet-50" },
+            { label: "Requirements", value: summary.total, icon: PackageCheck, tone: "text-slate-700 bg-slate-100 dark:text-slate-200 dark:bg-slate-400/15" },
+            { label: "In progress", value: summary.active, icon: Clock3, tone: "text-blue-700 bg-blue-50 dark:text-blue-300 dark:bg-blue-400/15" },
+            { label: "Attention", value: summary.attention, icon: TriangleAlert, tone: "text-amber-800 bg-amber-50 dark:text-amber-300 dark:bg-amber-400/15" },
+            { label: "Complete", value: summary.complete, icon: Check, tone: "text-violet-700 bg-violet-50 dark:text-violet-300 dark:bg-violet-400/15" },
           ].map(({ label, value, icon: Icon, tone }) => (
             <div key={label} className="flex min-w-32 items-center gap-3 rounded-xl border bg-card px-3 py-2.5 shadow-sm">
               <div className={cn("grid size-8 place-items-center rounded-lg", tone)}><Icon className="size-4" /></div>
@@ -704,7 +704,7 @@ function ProductionOverview({
           <DialogHeader><DialogTitle>Change part locations</DialogTitle><DialogDescription>Set one location for {selectedParts.length} selected part requirements. This applies to all quantities and operations of each requirement.</DialogDescription></DialogHeader>
           <StorageLocationSelect showUnavailableOnRobot value={moveLocation} onChange={setMoveLocation} emptyLabel="Choose a location" disabled={locationMutation.isPending} allowOnRobot={selectedParts.length > 0 && blockedParts.length === 0} />
           {blockedParts.length > 0 && <p className="max-h-40 overflow-y-auto text-sm text-muted-foreground">On Robot requires passed QC and completed finishing: {blockedParts.map((part) => `${part.partNumber} (${[part.effectiveQcResult !== "passed" ? "QC required" : "", !part.finishingComplete ? "finishing required" : ""].filter(Boolean).join(", ")})`).join("; ")}.</p>}
-          {selectedParts.some((part) => !visibleIds.includes(part.requirementId!)) && <p className="text-sm text-amber-700">Includes selected parts hidden by the current filters.</p>}
+          {selectedParts.some((part) => !visibleIds.includes(part.requirementId!)) && <p className="text-sm text-amber-700 dark:text-amber-300">Includes selected parts hidden by the current filters.</p>}
           <DialogFooter><Button variant="outline" disabled={locationMutation.isPending} onClick={() => setLocationDialogOpen(false)}>Cancel</Button><Button disabled={!moveLocation || !selectedParts.length || locationMutation.isPending || (moveLocation === "On Robot" && blockedParts.length > 0)} onClick={() => locationMutation.mutate()}>{locationMutation.isPending && <LoaderCircle className="animate-spin" />}Set location</Button></DialogFooter>
         </DialogContent>
       </Dialog>
@@ -717,8 +717,8 @@ function ProductionOverview({
                   <StatusBadge status={selectedRequirement.status} /><ObsoleteBadge obsolete={selectedRequirement.obsolete} /><HiddenBadge hidden={selectedRequirement.hidden} />
                   <Badge variant="outline">{selectedRequirement.requirementStatus}</Badge>
                   <Badge variant="outline" className={cn(
-                    selectedRequirement.effectiveQcResult === "passed" && "border-emerald-200 bg-emerald-50 text-emerald-800",
-                    selectedRequirement.effectiveQcResult === "failed" && "border-rose-200 bg-rose-50 text-rose-800",
+                    selectedRequirement.effectiveQcResult === "passed" && "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-400/30 dark:bg-emerald-400/15 dark:text-emerald-200",
+                    selectedRequirement.effectiveQcResult === "failed" && "border-rose-200 bg-rose-50 text-rose-800 dark:border-rose-400/30 dark:bg-rose-400/15 dark:text-rose-200",
                   )}>
                     {selectedRequirement.effectiveQcResult === "passed" ? "QC passed" : selectedRequirement.effectiveQcResult === "failed" ? "QC failed" : "QC pending"}
                   </Badge>
@@ -1554,8 +1554,8 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
               className={cn(
                 "hidden items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium sm:flex",
                 realtimeStatus === "subscribed"
-                  ? "border-emerald-200 bg-emerald-50 text-emerald-800"
-                  : "border-amber-200 bg-amber-50 text-amber-800",
+                  ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-400/30 dark:bg-emerald-400/15 dark:text-emerald-200"
+                  : "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-400/30 dark:bg-amber-400/15 dark:text-amber-200",
               )}
               title={realtimeStatus === "subscribed" ? "Changes refresh automatically" : "Realtime unavailable; use the refresh button"}
             >
@@ -1616,11 +1616,11 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
           </div>
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
             {[
-              { label: "Ready", value: stats.ready, icon: CircleDot, tone: "text-emerald-700 bg-emerald-50" },
-              { label: "Planned", value: stats.planned, icon: ListChecks, tone: "text-slate-700 bg-slate-100" },
-              { label: "In progress", value: stats.active, icon: Clock3, tone: "text-blue-700 bg-blue-50" },
-              { label: "Attention", value: stats.attention, icon: TriangleAlert, tone: "text-amber-800 bg-amber-50" },
-              { label: "Complete", value: stats.complete, icon: Check, tone: "text-violet-700 bg-violet-50" },
+              { label: "Ready", value: stats.ready, icon: CircleDot, tone: "text-emerald-700 bg-emerald-50 dark:text-emerald-300 dark:bg-emerald-400/15" },
+              { label: "Planned", value: stats.planned, icon: ListChecks, tone: "text-slate-700 bg-slate-100 dark:text-slate-200 dark:bg-slate-400/15" },
+              { label: "In progress", value: stats.active, icon: Clock3, tone: "text-blue-700 bg-blue-50 dark:text-blue-300 dark:bg-blue-400/15" },
+              { label: "Attention", value: stats.attention, icon: TriangleAlert, tone: "text-amber-800 bg-amber-50 dark:text-amber-300 dark:bg-amber-400/15" },
+              { label: "Complete", value: stats.complete, icon: Check, tone: "text-violet-700 bg-violet-50 dark:text-violet-300 dark:bg-violet-400/15" },
             ].map(({ label, value, icon: Icon, tone }) => (
               <div key={label} className="flex min-w-32 items-center gap-3 rounded-xl border bg-card px-3 py-2.5 shadow-sm">
                 <div className={cn("grid size-8 place-items-center rounded-lg", tone)}><Icon className="size-4" /></div>
@@ -1636,7 +1636,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
               <div className="flex w-full overflow-x-auto rounded-lg bg-muted p-1 sm:w-auto">
                 {([{ id: "available", label: "Available" }, { id: "mine", label: "My work" }, { id: "all", label: "All operations" }] as const).map((item) => (
                   <Button key={item.id} size="sm" variant="ghost" onClick={() => changeQueueView(item.id)} className={cn("min-w-fit", view === item.id && "bg-card text-foreground shadow-sm hover:bg-card")}>
-                    {item.label}{item.id === "available" && <span className="ml-1 rounded bg-emerald-100 px-1.5 text-[10px] font-bold text-emerald-800">{stats.ready}</span>}
+                    {item.label}{item.id === "available" && <span className="ml-1 rounded bg-emerald-100 px-1.5 text-[10px] font-bold text-emerald-800 dark:bg-emerald-400/20 dark:text-emerald-200">{stats.ready}</span>}
                   </Button>
                 ))}
               </div>
@@ -1921,7 +1921,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                 {isPrintingOperation(selected) && selectedOtherClaimants.length > 0 && <Button size="lg" className="h-11 bg-emerald-600 hover:bg-emerald-700" onClick={() => requestQuantityAction("complete", selected.claimedQuantity, true)} disabled={mutation.isPending || !workAllowed(selected)}><Check /> Complete all claimed prints</Button>}
                 {selectedAllocation.claimed > 0 && <Button variant="outline" onClick={() => requestQuantityAction("release", selectedAllocation.claimed)} disabled={mutation.isPending || !workAllowed(selected)}><RotateCcw /> Release claim</Button>}
                 {selectedAllocation.completed > 0 && <Button variant="outline" onClick={() => requestQuantityAction("undo_complete", selectedAllocation.completed)} disabled={mutation.isPending || !workAllowed(selected)}><RotateCcw /> Undo completion</Button>}
-                {selected.status === "Complete" && <div className="flex items-center justify-center gap-2 rounded-xl bg-emerald-50 p-3 text-sm font-semibold text-emerald-800"><Check className="size-4" /> {selected.workType === "CAM" ? "CAM completed" : `${selected.completedQuantity} of ${selected.taskQuantity} completed`} by {selected.machinist || "machinist"}</div>}
+                {selected.status === "Complete" && <div className="flex items-center justify-center gap-2 rounded-xl bg-emerald-50 p-3 text-sm font-semibold text-emerald-800 dark:bg-emerald-400/15 dark:text-emerald-200"><Check className="size-4" /> {selected.workType === "CAM" ? "CAM completed" : `${selected.completedQuantity} of ${selected.taskQuantity} completed`} by {selected.machinist || "machinist"}</div>}
                 <Button variant="outline" onClick={() => setSelectedId(null)}>Close</Button>
               </SheetFooter>
             </>
@@ -2043,7 +2043,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
           </DialogHeader>
           <div className="my-2 space-y-2">
             <p className="text-xs text-muted-foreground">Only work you have claimed is released; other machinists&rsquo; claims on the same operations stay untouched.</p>
-            {selectedReleaseItems.some(({ operation }) => !visibleOperationIds.has(operation.id)) && <p className="text-xs text-amber-700">Includes selected operations hidden by the current filters.</p>}
+            {selectedReleaseItems.some(({ operation }) => !visibleOperationIds.has(operation.id)) && <p className="text-xs text-amber-700 dark:text-amber-300">Includes selected operations hidden by the current filters.</p>}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setBulkReleaseDialogOpen(false)} disabled={bulkReleaseMutation.isPending}>Cancel</Button>
@@ -2071,7 +2071,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
             <div className="my-5 space-y-3">
               <StorageLocationSelect value={bulkMoveLocation} onChange={setBulkMoveLocation} emptyLabel="Choose a location" disabled={bulkLocationMutation.isPending} allowOnRobot={selectedLocationOperations.length > 0 && selectedLocationOperations.every((operation) => !operation.obsolete && operation.activeInBom && canUseOnRobotLocation(operation.effectiveQcResult === "passed", operation.finishingComplete))} />
               <p className="text-xs text-muted-foreground">Location applies to all quantities and operations of each selected part requirement.</p>
-              {selectedLocationOperations.some((operation) => !visibleOperationIds.has(operation.id)) && <p className="text-xs text-amber-700">Includes selected operations hidden by the current filters.</p>}
+              {selectedLocationOperations.some((operation) => !visibleOperationIds.has(operation.id)) && <p className="text-xs text-amber-700 dark:text-amber-300">Includes selected operations hidden by the current filters.</p>}
             </div>
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => setBulkLocationDialogOpen(false)} disabled={bulkLocationMutation.isPending}>Cancel</Button>
@@ -2111,7 +2111,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
               <div className="rounded-xl border bg-muted/30 p-3 text-sm">
                 <p className="font-semibold">{bulkWorkUnits} {bulkWorkUnits === 1 ? "work unit" : "work units"} total</p>
                 <p className="mt-1 text-muted-foreground">Across {bulkItems.length} selected {bulkItems.length === 1 ? "operation" : "operations"}.</p>
-                {hiddenBulkCount > 0 && <p className="mt-1 text-amber-700">Includes {hiddenBulkCount} selected operations hidden by the current filters.</p>}
+                {hiddenBulkCount > 0 && <p className="mt-1 text-amber-700 dark:text-amber-300">Includes {hiddenBulkCount} selected operations hidden by the current filters.</p>}
               </div>
               {bulkLocationCount > 0 && (
                 <div className="space-y-2">
