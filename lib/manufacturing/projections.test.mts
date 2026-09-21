@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { projectFinishing, projectOperations } from "./projections.ts";
+import { projectFinishing, projectOperations, projectProduction } from "./projections.ts";
 
 const requirement = {
   id: 2,
@@ -33,6 +33,23 @@ const operation = {
   "Active in Routing": true,
 };
 const part = { id: 3, Material: "Aluminum" };
+test("production stays pending until required powder coating completes, including post-finishing inserts", () => {
+  const coatedRequirement = { ...requirement, Finishing: { value: "Black" }, "QC Outcome": { value: "Passed" } };
+  const completedOperation = { ...operation, Status: { value: "Complete" } };
+  const [pendingQc] = projectOperations([completedOperation], [coatedRequirement], [part]);
+  assert.equal(projectProduction([pendingQc])[0].status, "QC Pending");
+  const passed = { ...pendingQc, effectiveQcResult: "passed" as const };
+  assert.equal(projectProduction([passed])[0].status, "Finishing Pending");
+  assert.equal(projectProduction([{ ...passed, status: "In Progress" }])[0].status, "In Progress");
+  const inserts = { ...passed, id: 5, machine: "Threaded Insert", status: "Planned" as const };
+  assert.equal(projectProduction([passed, inserts])[0].status, "Finishing Pending");
+
+  const finished = projectOperations([completedOperation], [{ ...coatedRequirement, Status: { value: "Complete" } }], [part])
+    .map(row => ({ ...row, effectiveQcResult: "passed" as const }));
+  assert.equal(projectProduction(finished)[0].status, "Complete");
+  assert.equal(projectProduction([...finished, { ...inserts, finishingComplete: true, status: "Ready" }])[0].status, "Ready");
+  assert.equal(projectProduction([{ ...passed, finishingRequired: false }])[0].status, "Complete");
+});
 const finishing = {
   id: 4,
   "Production Key": "root|part",
