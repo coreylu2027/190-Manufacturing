@@ -733,7 +733,7 @@ function ProductionOverview({
 
               <div className="detail-sections p-6"><div className="detail-columns space-y-6">
                 <ObsoleteWarning obsolete={selectedRequirement.obsolete} onRobot={selectedRequirement.storageLocation === "On Robot"} />
-                {selectedRequirement.requirementId !== null && <RequirementObsoletion key={selectedRequirement.requirementId} requirementId={selectedRequirement.requirementId} state={selectedRequirement} />}
+                {selectedRequirement.requirementId !== null && <RequirementObsoletion key={`obsoletion:${selectedRequirement.requirementId}`} requirementId={selectedRequirement.requirementId} state={selectedRequirement} />}
                 {canForceQc && selectedRequirement.requirementId !== null && <RequirementVisibility key={`visibility:${selectedRequirement.requirementId}`} requirementId={selectedRequirement.requirementId} state={selectedRequirement} />}
                 {selectedRequirement.operations[0] && (
                   <section>
@@ -792,7 +792,7 @@ function ProductionOverview({
 
                 {selectedRequirement.requirementId !== null && (
                   <ProductionRequirementNotes
-                    key={selectedRequirement.requirementId}
+                    key={`notes:${selectedRequirement.requirementId}`}
                     requirementId={selectedRequirement.requirementId}
                     notes={selectedRequirement.productionNotes}
                   />
@@ -819,7 +819,7 @@ function ProductionOverview({
                     <h3 className="text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Quality review</h3>
                     {canForceQc && !selectedRequirement.obsolete && selectedRequirement.requirementId !== null && selectedRequirement.activeInBom && selectedRequirement.effectiveQcResult !== "passed" && hasUnfinishedQcPrerequisites(selectedRequirement.operations) && (
                       <ForceQcButton
-                        key={selectedRequirement.requirementId}
+                        key={`force-qc:${selectedRequirement.requirementId}`}
                         requirementId={selectedRequirement.requirementId}
                         label={selectedRequirement.partNumber}
                         storageLocation={selectedRequirement.storageLocation}
@@ -1870,7 +1870,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
 
                 {selected.requirementId && (
                   <ProductionRequirementNotes
-                    key={selected.requirementId}
+                    key={`notes:${selected.requirementId}`}
                     requirementId={selected.requirementId}
                     notes={selected.productionNotes}
                     compact
