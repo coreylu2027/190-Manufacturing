@@ -71,16 +71,18 @@ function PassedQcQuantityChoice({ from, to, onRobot, value, onChange, disabled }
   onChange: (value: PassedQcQuantityMode) => void; disabled?: boolean;
 }) {
   const difference = Math.abs(to - from);
-  const parts = (quantity: number) => `${quantity} part${quantity === 1 ? "" : "s"}`;
+  const one = difference === 1;
+  const made = `${from} ${from === 1 ? "was" : "were"} made`;
   const options: Array<{ value: PassedQcQuantityMode; title: string; description: string; unavailable?: string }> = [
     { value: "approved", title: `QC approved ${to}`,
-      description: `The correct quantity was already made and approved. Completed counts change to ${to} and QC stays passed.${to > from ? ` The ${parts(difference)} the records missed are credited to you.` : ""}` },
+      description: `The correct quantity was already made and approved. Completed counts change to ${to} and QC stays passed.${to > from
+        ? one ? " The part the records missed is credited to you." : ` The ${difference} parts the records missed are credited to you.` : ""}` },
     to > from
-      ? { value: "made", title: `Only ${from} were made`,
-        description: `Completed work stays at ${from}. Manufacturing reopens for ${parts(difference)} more, then QC reviews the batch again.`,
+      ? { value: "made", title: `Only ${made}`,
+        description: `Completed work stays at ${from}. Manufacturing reopens for ${difference} more ${one ? "part" : "parts"}, then QC reviews the batch again.`,
         unavailable: onRobot ? "Move the part off the robot first." : undefined }
-      : { value: "made", title: `${from} were made`,
-        description: `Completed work stays at ${from} and QC stays passed. The ${parts(difference)} no longer needed will be thrown away.` },
+      : { value: "made", title: made,
+        description: `Completed work stays at ${from} and QC stays passed. ${one ? "The extra part" : `The ${difference} extra parts`} will be thrown away.` },
   ];
   return (
     <div role="radiogroup" aria-label="Passed QC quantity" className="rounded-xl border border-amber-200 bg-amber-50/60 p-3 dark:border-amber-400/30 dark:bg-amber-400/10">
