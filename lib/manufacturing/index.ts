@@ -28,6 +28,10 @@ export async function readEngineeringOverrideState(requirementId: number) {
   return writer().readEngineeringOverrideState(requirementId);
 }
 
+export async function readRequirementHistory(requirementId: number) {
+  return writer().readRequirementHistory(requirementId);
+}
+
 export async function readEngineeringCorrections() {
   return writer().readEngineeringCorrections();
 }

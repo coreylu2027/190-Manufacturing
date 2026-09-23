@@ -59,6 +59,7 @@ import { EngineeringOverrides } from "@/components/engineering-override-editor";
 import { NotificationInbox } from "@/components/notification-inbox";
 import { ProductionRequirementNotes } from "@/components/production-requirement-notes";
 import { QualityControlDashboard } from "@/components/quality-control-dashboard";
+import { RequirementHistory } from "@/components/requirement-history";
 import { StorageLocationEditor, StorageLocationSelect } from "@/components/storage-location-editor";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -886,6 +887,8 @@ function ProductionOverview({
                     ))}
                   </div>
                 </section>
+
+                {selectedRequirement.requirementId !== null && <RequirementHistory key={`history:${selectedRequirement.requirementId}`} requirementId={selectedRequirement.requirementId} />}
               </div></div>
 
               <SheetFooter className="sticky bottom-0 border-t bg-card/95 p-4 backdrop-blur"><Button variant="outline" onClick={() => setSelectedRequirementKey(null)}>Close</Button></SheetFooter>
@@ -1948,6 +1951,8 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                     ))}
                   </div>
                 </section>
+
+                {selected.requirementId && <RequirementHistory key={`history:${selected.requirementId}`} requirementId={selected.requirementId} />}
               </div></div>
 
               <SheetFooter className="sticky bottom-0 border-t bg-card/95 p-4 backdrop-blur">

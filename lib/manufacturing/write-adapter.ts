@@ -8,6 +8,7 @@ import { ROBOT_LOCATION, canUseOnRobotLocation, isStorageLocation, isPrintingOpe
 import { notificationPartContext as resolvePartContext } from "./identity.ts";
 import { EngineeringOverrideError, planEngineeringOverrides } from "./engineering-override-plan.ts";
 import type { EngineeringCorrection, EngineeringOverrideFields, EngineeringOverrideState, OverrideFileKind } from "../engineering-overrides.ts";
+import type { RequirementHistoryPayload } from "../requirement-history.ts";
 
 const STALE_OVERRIDE_MESSAGE = "Onshape data or another adjustment changed. Review the latest values and try again.";
 
@@ -377,6 +378,9 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     },
     readEngineeringOverrideState(requirementId: number) {
       return rpc<EngineeringOverrideState>("manufacturing_engineering_override_state", { p_requirement_id: requirementId });
+    },
+    readRequirementHistory(requirementId: number) {
+      return rpc<RequirementHistoryPayload | null>("manufacturing_requirement_history", { p_requirement_id: requirementId });
     },
     readEngineeringCorrections() {
       return rpc<EngineeringCorrection[]>("manufacturing_engineering_correction_list", {});

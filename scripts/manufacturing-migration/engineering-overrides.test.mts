@@ -41,6 +41,7 @@ await install("supabase/migrations/20260918162451_requirement_obsoletion.sql");
 await install("supabase/migrations/20260919223625_hide_obsolete_requirements.sql");
 await install("supabase/migrations/20260922190000_admin_engineering_overrides.sql");
 await install("supabase/migrations/20260923040000_passed_qc_quantity_corrections.sql");
+await install("supabase/migrations/20260923170000_requirement_history.sql");
 
 const ADMIN = { id: "00000000-0000-4000-8000-000000000190", name: "Alex A." };
 const MACHINIST = "00000000-0000-4000-8000-000000000191";
@@ -57,6 +58,7 @@ const SIGNATURES: Record<string, string[]> = {
   manufacturing_write_state: [],
   manufacturing_engineering_correction_list: [],
   manufacturing_engineering_override_state: ["p_requirement_id:bigint"],
+  manufacturing_requirement_history: ["p_requirement_id:bigint"],
   manufacturing_apply_engineering_overrides: ["p_request_id:uuid", "p_actor:uuid", "p_expected:text", "p_override_token:text",
     "p_requirement_id:bigint", "p_overrides:jsonb", "p_changes:jsonb", "p_inserts:jsonb", "p_reason:text", "p_result:jsonb"],
   manufacturing_set_attachment_override: ["p_request_id:uuid", "p_actor:uuid", "p_override_token:text", "p_requirement_id:bigint",
@@ -504,4 +506,32 @@ test("replacement STEPs resolve their own registered preview and stop when the f
     "manufacturing_register_override_preview(bigint,text,text,text,text,bigint,text,text,text,timestamptz)"]) {
     assert.equal((await sql<{ allowed: boolean }>(`select has_function_privilege('authenticated','public.${signature}','execute') allowed`))[0].allowed, false);
   }
+});
+
+test("requirement history lists shop writes, corrections, and QC reviews for only that requirement", async () => {
+  // A fresh part: part-level corrections appear on every requirement for that part.
+  const part = (await sql<{ id: number }>("insert into manufacturing.parts(id,part_number,name,last_synced_at) values(90,'P-H','Hinge',now()) returning id"))[0].id;
+  const { id } = await requirement({ quantity: 2, part });
+  const other = await requirement({ quantity: 1, part });
+  await adapter.applyEngineeringOverrides(id, { quantity: { value: 3 } }, (await state(id)).token, "Mirror part missing", ADMIN);
+  await adapter.applyEngineeringOverrides(other.id, { quantity: { value: 5 } }, (await state(other.id)).token, "", ADMIN);
+  const [operation] = await ops(id);
+  const write = (await sql<{ state: { token: string } }>("select public.manufacturing_write_state() state"))[0].state;
+  await sql(`select public.manufacturing_commit($1::uuid,$2::uuid,'claim',$3,$4::jsonb,null,null)`, [crypto.randomUUID(), MACHINIST, write.token,
+    JSON.stringify([{ entity: "operations", id: operation.id, patch: { status: "In Progress", claimed_quantity: 1,
+      quantity_ledger: JSON.stringify([{ userId: MACHINIST, name: "Sam M.", claimed: 1, completed: 0 }]) } }])]);
+  await sql(`insert into public.quality_control(production_requirement_id,result,notes,reviewed_by,reviewed_at)
+    values($1,'failed','Burr on edge',$2,now())`, [id, ADMIN.id]);
+
+  const history = await adapter.readRequirementHistory(id);
+  assert.ok(history);
+  assert.deepEqual(history.writes.map((entry) => [entry.action, entry.actor]), [["claim", "Sam M."], ["engineering_override", "Alex A."]]);
+  const claim = history.writes[0].rows.find((row) => row.entity === "operations")!;
+  assert.deepEqual([claim.operationNumber, claim.machine, claim.changes.claimed_quantity], ["OP1", "Milling Machine", [0, 1]]);
+  assert.ok(!("updated_at" in claim.changes));
+  assert.deepEqual(history.writes[1].corrections.map((correction) => [correction.field, correction.action, correction.value, correction.reason]),
+    [["required_quantity", "set", 3, "Mirror part missing"]]);
+  assert.deepEqual(history.reviews.map((review) => [review.result, review.reviewer, review.notes]), [["failed", "Alex A.", "Burr on edge"]]);
+  assert.equal(await adapter.readRequirementHistory(999_999), null);
+  assert.equal((await sql<{ allowed: boolean }>("select has_function_privilege('authenticated','public.manufacturing_requirement_history(bigint,integer)','execute') allowed"))[0].allowed, false);
 });
