@@ -181,6 +181,12 @@ async function applyFabricationAction(id: number, action: FabricationAction, act
     if (requirementStatus !== "Ready for Finishing" || assignedMachinist) throw new Error("This finishing job is not available to claim");
     nextMachinist = actor.name;
     await patchRow(FINISHING, id, { Machinist: nextMachinist });
+  } else if (action === "steal") {
+    if (requirementStatus !== "Ready for Finishing" || !assignedMachinist || isAssignedActor) {
+      throw new Error("Only unfinished finishing jobs claimed by someone else can be stolen");
+    }
+    nextMachinist = actor.name;
+    await patchRow(FINISHING, id, { Machinist: nextMachinist });
   } else if (action === "release") {
     if (requirementStatus !== "Ready for Finishing" || !isAssignedActor) throw new Error("Only the assigned machinist can release this job");
     nextMachinist = "";
@@ -218,6 +224,7 @@ async function applyFabricationAction(id: number, action: FabricationAction, act
     status: action === "complete" ? "Complete" : fabricationStatus(nextRequirementStatus, nextMachinist),
     requirementStatus: nextRequirementStatus,
     machinist: nextMachinist,
+    displacedMachinist: action === "steal" ? assignedMachinist : null,
     notificationContext: {
       requirementId,
       ...notificationPartContext(input, requirementId),

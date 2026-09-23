@@ -95,6 +95,7 @@ export function createSupabaseManufacturingAdapter(config: AdapterConfig) {
             "Location Updated At": row.location_updated_at ?? null,
             "Obsolete": row.obsolete ?? false,
             "Hidden": row.hidden ?? false,
+            "Off The Shelf": row.off_the_shelf ?? false,
             "Visibility Version": row.visibility_version ?? 0,
             "Obsoletion Version": row.obsoletion_version ?? 0,
             "Obsoletion Changed At": row.obsoletion_changed_at ?? null,

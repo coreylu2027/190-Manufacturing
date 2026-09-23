@@ -169,3 +169,12 @@ test("requirement projections include independent location and lifecycle details
   assert.equal(projectProduction(completed.map(row => ({ ...row, workType: "CAM" as const })))[0].status, "Complete");
   assert.notEqual(projectProduction(completed.map(row => ({ ...row, effectiveQcResult: "failed" as const })))[0].status, "QC Pending");
 });
+
+test("off-the-shelf requirements keep their retired routes visible with an Off the Shelf production status", () => {
+  const bought = { ...requirement, "Off The Shelf": true, "Active in BOM": true };
+  const [op] = projectOperations([{ ...operation, "Active in Routing": false }], [bought], [part]);
+  assert.equal(op.offTheShelf, true);
+  assert.equal(op.activeInRouting, false);
+  assert.equal(projectProduction([op])[0].status, "Off the Shelf");
+  assert.equal(projectOperations([{ ...operation, "Active in Routing": false }], [{ ...requirement, "Active in BOM": true }], [part]).length, 0);
+});

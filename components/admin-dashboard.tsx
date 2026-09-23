@@ -7,6 +7,7 @@ import { Clock3, Search, ShieldCheck, SlidersHorizontal, UserCheck, Users } from
 import { useCallback, useMemo, useState } from "react";
 import { toast } from "sonner";
 
+import { EngineeringCorrectionsReport } from "@/components/engineering-corrections-report";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -283,6 +284,7 @@ export function AdminDashboard() {
           </>
         )}
       </div>
+      <EngineeringCorrectionsReport />
     </section>
   );
 }

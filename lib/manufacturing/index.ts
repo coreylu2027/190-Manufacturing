@@ -4,6 +4,7 @@ import { manufacturingSupabaseConfig } from "./config";
 import { createSupabaseWriteAdapter } from "./write-adapter";
 import type { FabricationAction, OperationPatch, OperationQuantityAction, QualityResult } from "../types";
 import type { StorageLocation } from "../storage-locations";
+import type { EngineeringOverrideFields, OverrideFileKind } from "../engineering-overrides";
 
 type Actor = { id: string; name: string };
 
@@ -21,6 +22,22 @@ export async function setRequirementObsolete(requirementId: number, obsolete: bo
 
 export async function setRequirementHidden(requirementId: number, hidden: boolean, expectedVersion: number, actor: Actor) {
   return writer().setRequirementHidden(requirementId, hidden, expectedVersion, actor);
+}
+
+export async function readEngineeringOverrideState(requirementId: number) {
+  return writer().readEngineeringOverrideState(requirementId);
+}
+
+export async function readEngineeringCorrections() {
+  return writer().readEngineeringCorrections();
+}
+
+export async function applyEngineeringOverrides(requirementId: number, fields: EngineeringOverrideFields, expectedToken: string, reason: string, actor: Actor) {
+  return writer().applyEngineeringOverrides(requirementId, fields, expectedToken, reason, actor);
+}
+
+export async function setAttachmentOverride(requirementId: number, kind: OverrideFileKind, file: { name: string; sha256: string; byteSize: number } | null, expectedToken: string, reason: string, actor: Actor) {
+  return writer().setAttachmentOverride(requirementId, kind, file, expectedToken, reason, actor);
 }
 
 export async function getOperations() {

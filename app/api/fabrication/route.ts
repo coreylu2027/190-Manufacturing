@@ -17,7 +17,7 @@ export async function GET() {
   try {
     const { version, snapshot } = await getCurrentManufacturingSnapshot();
     return NextResponse.json({
-      jobs: snapshot.jobs.filter((job) => !job.hidden),
+      jobs: snapshot.jobs.filter((job) => !job.hidden && !job.offTheShelf),
       dataVersion: version,
       syncedAt: new Date().toISOString(),
       user,

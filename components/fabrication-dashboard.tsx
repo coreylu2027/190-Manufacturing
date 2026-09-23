@@ -43,6 +43,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ProductionRequirementNotes } from "@/components/production-requirement-notes";
+import { EngineeringOverrides } from "@/components/engineering-override-editor";
 import { StorageLocationEditor, StorageLocationSelect } from "@/components/storage-location-editor";
 import { isShopName } from "@/lib/profile-name";
 import { canUseOnRobotLocation, type StorageLocation } from "@/lib/storage-locations";
@@ -104,12 +105,12 @@ function FinishCell({ value }: { value: string }) {
   return <div className="flex h-full items-center gap-2 font-medium"><span className={cn("size-2.5 rounded-full border border-black/10", swatch)} />{value}</div>;
 }
 
-function ActionCell({ data, onOpen }: { data?: FabricationJob; onOpen: (job: FabricationJob) => void }) {
+function ActionCell({ data, onOpen, userName }: { data?: FabricationJob; userName: string; onOpen: (job: FabricationJob) => void }) {
   if (!data) return null;
   return (
     <div className="flex h-full items-center justify-end">
-      <Button size="sm" variant={!data.obsolete && data.active && data.status === "Ready" ? "default" : "ghost"} onClick={() => onOpen(data)}>
-        {!data.obsolete && data.active && data.status === "Ready" ? "Claim" : "Open"}<ChevronRight />
+      <Button size="sm" variant={!data.obsolete && data.active && data.status === "Ready" ? "default" : isStealable(data, userName) ? "destructive" : "ghost"} onClick={() => onOpen(data)}>
+        {!data.obsolete && data.active && data.status === "Ready" ? "Claim" : isStealable(data, userName) ? "Steal" : "Open"}<ChevronRight />
       </Button>
     </div>
   );
@@ -131,14 +132,19 @@ function ownedBy(job: FabricationJob, userName: string) {
   return Boolean(job.machinist) && job.machinist.toLocaleLowerCase() === userName.toLocaleLowerCase();
 }
 
+function isStealable(job: FabricationJob, userName: string) {
+  return !job.obsolete && job.active && job.status === "In Progress" && Boolean(job.machinist) && !ownedBy(job, userName);
+}
+
 const actionCopy: Record<FabricationAction, { success: string }> = {
+  steal: { success: "Finishing job taken over" },
   claim: { success: "Finishing job claimed" },
   release: { success: "Finishing job released" },
   complete: { success: "Finishing marked complete" },
   undo_complete: { success: "Completion undone" },
 };
 
-const inverseAction: Record<FabricationAction, FabricationAction> = {
+const inverseAction: Record<Exclude<FabricationAction, "steal">, Exclude<FabricationAction, "steal">> = {
   claim: "release",
   release: "claim",
   complete: "undo_complete",
@@ -160,6 +166,7 @@ export function FabricationDashboard({
   const [bulkIds, setBulkIds] = useState<number[]>([]);
   const [bulkDialog, setBulkDialog] = useState<"claim" | "complete" | "release" | "location" | null>(null);
   const [bulkLocation, setBulkLocation] = useState<StorageLocation | null>(null);
+  const [stealDialogOpen, setStealDialogOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const query = useQuery({ queryKey: ["fabrication"], queryFn: fetchFabrication });
   const jobs = useMemo(() => query.data?.jobs ?? [], [query.data?.jobs]);
@@ -183,12 +190,19 @@ export function FabricationDashboard({
         ...current,
         jobs: current.jobs.map((job) => job.id === variables.id ? { ...job, ...data.updated } : job),
       } : current);
+      if (variables.patch.action === "steal") {
+        setStealDialogOpen(false);
+        toast.success(actionCopy.steal.success);
+        if (data.notificationWarning) toast.warning(data.notificationWarning);
+        return;
+      }
+      const undoAction = inverseAction[variables.patch.action];
       toast.success(actionCopy[variables.patch.action].success, variables.suppressUndo ? undefined : {
         action: {
           label: "Undo",
           onClick: () => mutation.mutate({
             id: variables.id,
-            patch: { action: inverseAction[variables.patch.action] },
+            patch: { action: undoAction },
             suppressUndo: true,
           }),
         },
@@ -206,6 +220,7 @@ export function FabricationDashboard({
       toast.info("Set your first name and last initial before recording work");
       return;
     }
+    if (action === "steal") { setStealDialogOpen(true); return; }
     mutation.mutate({ id: selected.id, patch: { action } });
   };
 
@@ -214,7 +229,7 @@ export function FabricationDashboard({
     const term = search.trim().toLocaleLowerCase();
     return jobs.filter((job) => {
       if (color !== "all" && job.color !== color) return false;
-      if (view === "available" && (job.obsolete || !job.active || job.status !== "Ready")) return false;
+      if (view === "available" && (job.obsolete || !job.active || (job.status !== "Ready" && !isStealable(job, userName)))) return false;
       if (view === "mine" && !(ownedBy(job, userName) && job.status === "In Progress")) return false;
       if (term && ![job.partNumber, job.partName, job.assemblyNumber, job.documentName, job.color, job.productionNotes, job.qcNotes, job.lastQualityFailure?.notes, job.machinist, job.storageLocation].join(" ").toLocaleLowerCase().includes(term)) return false;
       return true;
@@ -283,7 +298,7 @@ export function FabricationDashboard({
     complete: jobs.filter((job) => job.status === "Complete").length,
   }), [jobs]);
 
-  const openJob = (job: FabricationJob) => setSelectedId(job.id);
+  const openJob = (job: FabricationJob) => { setStealDialogOpen(false); setSelectedId(job.id); };
   const columnDefs = useMemo<ColDef<FabricationJob>[]>(() => [
     { field: "partNumber", equals: () => false, cellRenderer: PartNumberCell, cellRendererParams: { suppressMouseEventHandling: () => true }, headerName: "PART", minWidth: 155, pinned: "left", cellClass: "font-mono font-semibold" },
     { field: "partName", headerName: "DESCRIPTION", minWidth: 230, flex: 1 },
@@ -294,8 +309,8 @@ export function FabricationDashboard({
     { field: "qcNotes", headerName: "QC NOTES", minWidth: 240, flex: 1, cellRenderer: QcNotesCell },
     { field: "status", headerName: "STATUS", minWidth: 145, cellRenderer: StatusCell },
     { field: "machinist", headerName: "MACHINIST", minWidth: 180, valueFormatter: ({ value }) => value || "—" },
-    { headerName: "", width: 102, pinned: "right", sortable: false, filter: false, resizable: false, cellRenderer: ActionCell, cellRendererParams: { onOpen: openJob } },
-  ], []);
+    { headerName: "", width: 102, pinned: "right", sortable: false, filter: false, resizable: false, cellRenderer: ActionCell, cellRendererParams: { onOpen: openJob, userName } },
+  ], [userName]);
 
   return (
     <section className="mx-auto max-w-[1800px] px-4 py-5 md:px-7 md:py-7">
@@ -456,6 +471,17 @@ export function FabricationDashboard({
                   notes={selected.productionNotes}
                 />
 
+                {user?.role === "admin" && user.approved && (
+                  <EngineeringOverrides
+                    key={`engineering:${selected.requirementId}`}
+                    requirementId={selected.requirementId}
+                    partNumber={selected.partNumber}
+                    obsolete={selected.obsolete}
+                    activeInBom={selected.active}
+                    compact
+                  />
+                )}
+
                 <section>
                   <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">QC inspection notes</h3>
                   <p className={cn("whitespace-pre-wrap rounded-xl border p-4 text-sm leading-6", selected.qcNotes ? "bg-emerald-50/60 text-foreground dark:bg-emerald-400/10" : "border-dashed bg-muted/30 text-muted-foreground")}>
@@ -505,6 +531,7 @@ export function FabricationDashboard({
               </div></div>
 
               <SheetFooter className="sticky bottom-0 border-t bg-card/95 p-4 backdrop-blur">
+                {isStealable(selected, userName) && <Button size="lg" variant="destructive" onClick={() => runAction("steal")} disabled={bulkBusy}><TriangleAlert /> Steal finishing job</Button>}
                 {selected.status === "Ready" && <Button size="lg" className="h-11" onClick={() => runAction("claim")} disabled={mutation.isPending || selected.obsolete || !selected.active}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <CircleDot />} Claim finishing job</Button>}
                 {selected.status === "In Progress" && ownedBy(selected, userName) && <Button size="lg" className="h-11 bg-emerald-600 hover:bg-emerald-700" onClick={() => runAction("complete")} disabled={mutation.isPending || selected.obsolete || !selected.active}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <Check />} Mark complete</Button>}
                 {selected.status === "In Progress" && ownedBy(selected, userName) && <Button variant="outline" onClick={() => runAction("release")} disabled={mutation.isPending || selected.obsolete || !selected.active}><RotateCcw /> Release claim</Button>}
@@ -517,6 +544,20 @@ export function FabricationDashboard({
           )}
         </SheetContent>
       </Sheet>
+      <Dialog open={stealDialogOpen && Boolean(selected)} onOpenChange={setStealDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Steal this finishing job?</DialogTitle>
+            <DialogDescription>This transfers finishing for {selected?.partNumber} ({selected?.quantity} parts) from {selected?.machinist} to you. The previous machinist will be notified when their account can be identified.</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setStealDialogOpen(false)}>Cancel</Button>
+            <Button variant="destructive" disabled={bulkBusy || !selected || !isStealable(selected, userName)} onClick={() => selected && mutation.mutate({ id: selected.id, patch: { action: "steal", confirmed: true } })}>
+              {mutation.isPending && <LoaderCircle className="animate-spin" />} Yes, steal finishing job
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }

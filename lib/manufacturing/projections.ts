@@ -210,7 +210,7 @@ export function projectOperations(operationRows: SourceRow[], requirementRows: S
 
   const activeRequirements = new Set(parsedOperations.filter((operation) => operation.activeInRouting).map((operation) => operation.requirementId));
   const canonicalOperations = deduplicateOperations(parsedOperations.filter((operation) => operation.activeInRouting
-    || !activeRequirements.has(operation.requirementId) && (operation.obsolete || operation.obsoletionVersion > 0)));
+    || !activeRequirements.has(operation.requirementId) && (operation.obsolete || operation.obsoletionVersion > 0 || operation.offTheShelf)));
   const camByTarget = new Map(canonicalOperations
     .filter((operation) => operation.workType === "CAM" && operation.requirementId)
     .map((operation) => [`${operation.requirementId}|${operation.operationNumber}`, operation]));

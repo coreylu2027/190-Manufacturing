@@ -6,6 +6,10 @@ import type { FabricationAction, OperationPatch, OperationQuantityAction, Qualit
 import { ROBOT_LOCATION, canUseOnRobotLocation, isStorageLocation, isPrintingOperation, type StorageLocation } from "../storage-locations.ts";
 
 import { notificationPartContext as resolvePartContext } from "./identity.ts";
+import { EngineeringOverrideError, planEngineeringOverrides } from "./engineering-override-plan.ts";
+import type { EngineeringCorrection, EngineeringOverrideFields, EngineeringOverrideState, OverrideFileKind } from "../engineering-overrides.ts";
+
+const STALE_OVERRIDE_MESSAGE = "Onshape data or another adjustment changed. Review the latest values and try again.";
 
 export class ManufacturingWriteError extends Error {
   status: number;
@@ -115,6 +119,15 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     if (row.obsolete) throw new ManufacturingWriteError("This requirement is obsolete. Do not manufacture or install it.", 409);
     if (!row.active_in_bom) throw new ManufacturingWriteError("This requirement is inactive in the BOM", 409);
     return row;
+  }
+  /** Adds the part and assembly rows that the write-state snapshot omits. */
+  async function withIdentityRows(state: WriteState) {
+    const reader = createSupabaseManufacturingAdapter(config);
+    const [parts, assemblies] = await Promise.all([
+      state.rows.parts ?? reader.readEntity("parts"),
+      state.rows.assemblies ?? reader.readEntity("assemblies"),
+    ]);
+    return { ...state.rows, parts, assemblies };
   }
   function notificationPartContext(state: WriteState, requirementId: number) {
     requirement(state, requirementId);
@@ -237,7 +250,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       return transact(actor, "cam_handoff", async (plan, state) => { operation(state, id); return plan.updateCamHandoff(id, patch); });
     },
     applyFabricationAction(id: number, action: FabricationAction, actor: Actor) {
-      return transact(actor, `finishing_${action}`, (plan, state) => {
+      return transact(actor, action === "steal" ? "steal" : `finishing_${action}`, (plan, state) => {
         const finishing = state.rows.finishing.find((candidate) => candidate.id === id);
         if (!finishing?.active) throw new ManufacturingWriteError("This finishing job is no longer active", 409);
         assertWorkAllowed(state, Number(finishing.requirement_id));
@@ -361,6 +374,57 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       type Result = { requirementId: number; hidden: boolean; visibilityVersion: number };
       try { return await rpc<Result>("manufacturing_set_requirement_hidden", body); }
       catch (error) { if (error instanceof ManufacturingWriteError) throw error; return rpc<Result>("manufacturing_set_requirement_hidden", body); }
+    },
+    readEngineeringOverrideState(requirementId: number) {
+      return rpc<EngineeringOverrideState>("manufacturing_engineering_override_state", { p_requirement_id: requirementId });
+    },
+    readEngineeringCorrections() {
+      return rpc<EngineeringCorrection[]>("manufacturing_engineering_correction_list", {});
+    },
+    async applyEngineeringOverrides(requirementId: number, fields: EngineeringOverrideFields, expectedToken: string, reason: string, actor: Actor) {
+      if (!UUID_PATTERN.test(actor.id) || !actor.name.trim()) throw new ManufacturingWriteError("An authenticated manufacturing actor is required", 401);
+      const [state, overrideState] = await Promise.all([
+        rpc<WriteState>("manufacturing_write_state"),
+        rpc<EngineeringOverrideState>("manufacturing_engineering_override_state", { p_requirement_id: requirementId }),
+      ]);
+      if (overrideState.token !== expectedToken) throw new ManufacturingWriteError(STALE_OVERRIDE_MESSAGE, 409);
+      const rows = await withIdentityRows(state);
+      let plan: ReturnType<typeof planEngineeringOverrides>;
+      try { plan = planEngineeringOverrides({ rows, state: overrideState, requirementId, fields }); }
+      catch (error) {
+        if (error instanceof EngineeringOverrideError) throw new ManufacturingWriteError(error.message, error.status);
+        throw error;
+      }
+      if (!plan.overrides.length && !plan.changes.length && !plan.inserts.length) throw new ManufacturingWriteError("Nothing to change", 400);
+      const result = {
+        requirementId,
+        changes: plan.summary,
+        requirementStatus: plan.requirementStatus,
+        notificationContext: {
+          ...notificationPartContext({ ...state, rows }, requirementId),
+          ...(plan.partName ? { partName: plan.partName } : {}),
+          routingChanged: plan.routingChanged,
+        },
+      };
+      const body = { p_request_id: crypto.randomUUID(), p_actor: actor.id, p_expected: state.token, p_override_token: overrideState.token,
+        p_requirement_id: requirementId, p_overrides: plan.overrides, p_changes: plan.changes, p_inserts: plan.inserts,
+        p_reason: reason.trim(), p_result: result };
+      try { return await rpc<typeof result>("manufacturing_apply_engineering_overrides", body); }
+      catch (error) { if (error instanceof ManufacturingWriteError) throw error; return rpc<typeof result>("manufacturing_apply_engineering_overrides", body); }
+    },
+    async setAttachmentOverride(requirementId: number, kind: OverrideFileKind, file: { name: string; sha256: string; byteSize: number } | null,
+      expectedToken: string, reason: string, actor: Actor) {
+      if (!UUID_PATTERN.test(actor.id) || !actor.name.trim()) throw new ManufacturingWriteError("An authenticated manufacturing actor is required", 401);
+      const state = await rpc<WriteState>("manufacturing_write_state");
+      const rows = await withIdentityRows(state);
+      requirement(state, requirementId);
+      const body = { p_request_id: crypto.randomUUID(), p_actor: actor.id, p_override_token: expectedToken, p_requirement_id: requirementId,
+        p_kind: kind, p_file: file && { original_name: file.name, sha256: file.sha256, byte_size: file.byteSize }, p_reason: reason.trim() };
+      type Result = { requirementId: number; kind: OverrideFileKind; file: { name: string; sha256: string; byte_size: number } | null };
+      let result: Result;
+      try { result = await rpc<Result>("manufacturing_set_attachment_override", body); }
+      catch (error) { if (error instanceof ManufacturingWriteError) throw error; result = await rpc<Result>("manufacturing_set_attachment_override", body); }
+      return { ...result, notificationContext: notificationPartContext({ ...state, rows }, requirementId) };
     },
     updatePassedQualityNotes(requirementId: number, notes: string, actor: Actor) {
       const reviewedAt = new Date().toISOString();

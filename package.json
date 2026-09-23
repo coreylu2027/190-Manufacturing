@@ -17,7 +17,8 @@
     "manufacturing:verify-attachments": "node --experimental-strip-types --env-file=.env.local scripts/manufacturing-migration/verify-attachments.mts",
     "manufacturing:generate-previews": "node --experimental-strip-types --env-file=.env.local scripts/manufacturing-migration/generate-part-previews.mts",
     "manufacturing:test-assembly-previews": "node --experimental-strip-types --test scripts/manufacturing-migration/assembly-glb.test.mjs",
-    "manufacturing:test-obsoletion": "node scripts/manufacturing-migration/obsoletion.test.mjs"
+    "manufacturing:test-obsoletion": "node scripts/manufacturing-migration/obsoletion.test.mjs",
+    "manufacturing:test-overrides": "node --experimental-strip-types --test scripts/manufacturing-migration/engineering-overrides.test.mts"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

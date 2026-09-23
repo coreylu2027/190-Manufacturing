@@ -55,6 +55,7 @@ import { AdminDashboard } from "@/components/admin-dashboard";
 import { ExpandableText } from "@/components/expandable-text";
 import { FabricationDashboard } from "@/components/fabrication-dashboard";
 import { ManufacturingFileLink } from "@/components/manufacturing-file-link";
+import { EngineeringOverrides } from "@/components/engineering-override-editor";
 import { NotificationInbox } from "@/components/notification-inbox";
 import { ProductionRequirementNotes } from "@/components/production-requirement-notes";
 import { QualityControlDashboard } from "@/components/quality-control-dashboard";
@@ -209,6 +210,7 @@ const statusStyles: Record<ProductionStatus, string> = {
   Blocked: "border-amber-200 bg-amber-100 text-amber-900 dark:border-amber-400/30 dark:bg-amber-400/15 dark:text-amber-100",
   "QC Pending": "border-cyan-200 bg-cyan-100 text-cyan-800 dark:border-cyan-400/30 dark:bg-cyan-400/15 dark:text-cyan-200",
   "Finishing Pending": "border-orange-200 bg-orange-100 text-orange-800 dark:border-orange-400/30 dark:bg-orange-400/15 dark:text-orange-200",
+  "Off the Shelf": "border-teal-200 bg-teal-50 text-teal-800 dark:border-teal-400/30 dark:bg-teal-400/15 dark:text-teal-200",
   Complete: "border-violet-200 bg-violet-100 text-violet-800 dark:border-violet-400/30 dark:bg-violet-400/15 dark:text-violet-200",
 };
 
@@ -422,6 +424,7 @@ function ProductionOverview({
           key,
           obsolete: first.obsolete,
           hidden: first.hidden,
+          offTheShelf: first.offTheShelf,
           visibilityVersion: first.visibilityVersion,
           obsoletionVersion: first.obsoletionVersion,
           obsoletionChangedAt: first.obsoletionChangedAt,
@@ -619,7 +622,7 @@ function ProductionOverview({
             </div>
             <Select value={status} onValueChange={(value) => setStatus((value ?? "all") as "all" | "Obsolete" | ProductionStatus)}>
               <SelectTrigger className="h-9 w-full bg-card xl:w-48"><SlidersHorizontal className="text-muted-foreground" /><SelectValue placeholder="All statuses" /></SelectTrigger>
-              <SelectContent><SelectItem value="all">All statuses</SelectItem><SelectItem value="Obsolete">Obsolete</SelectItem>{(["Planned", "Ready", "In Progress", "Blocked", "QC Pending", "Finishing Pending", "Complete"] as ProductionStatus[]).map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
+              <SelectContent><SelectItem value="all">All statuses</SelectItem><SelectItem value="Obsolete">Obsolete</SelectItem>{(["Planned", "Ready", "In Progress", "Blocked", "QC Pending", "Finishing Pending", "Complete", "Off the Shelf"] as ProductionStatus[]).map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
             </Select>
             <Select value={sourceDocument} onValueChange={(value) => setSourceDocument(value ?? "all")}>
               <SelectTrigger className="h-9 w-full bg-card xl:w-56"><FileText className="text-muted-foreground" /><SelectValue placeholder="All source documents" /></SelectTrigger>
@@ -774,6 +777,16 @@ function ProductionOverview({
                     ))}
                   </div>
                 </section>
+
+                {canForceQc && selectedRequirement.requirementId !== null && (
+                  <EngineeringOverrides
+                    key={`engineering:${selectedRequirement.requirementId}`}
+                    requirementId={selectedRequirement.requirementId}
+                    partNumber={selectedRequirement.partNumber}
+                    obsolete={selectedRequirement.obsolete}
+                    activeInBom={selectedRequirement.activeInBom}
+                  />
+                )}
 
                 <QualityFailureCallout failure={selectedRequirement.lastQualityFailure} />
 
@@ -1267,7 +1280,8 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
     onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to update profile"),
   });
 
-  const operations = useMemo(() => (query.data?.operations ?? []).filter((operation) => !operation.hidden), [query.data?.operations]);
+  // Off-the-shelf parts appear only in Production; they have no work to claim.
+  const operations = useMemo(() => (query.data?.operations ?? []).filter((operation) => !operation.hidden && !operation.offTheShelf), [query.data?.operations]);
   const selected = selectedId === null ? null : operations.find((operation) => operation.id === selectedId) ?? null;
   const selectedCamHandoff = selected?.workType === "CAM" ? {
     operationId: selected.id,
@@ -1765,11 +1779,21 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                         aria-label={`Select ${operation.partNumber} ${operationLabel(operation)}`}
                         onCheckedChange={(nextChecked) => setBulkSelectedIds((current) => nextChecked ? [...new Set([...current, operation.id])] : current.filter((id) => id !== operation.id))}
                       />
-                      <button onClick={() => openOperation(operation)} className="min-w-0 flex-1 text-left">
+                      <div
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => openOperation(operation)}
+                        onKeyDown={(event) => {
+                          if (event.key !== "Enter" && event.key !== " ") return;
+                          event.preventDefault();
+                          openOperation(operation);
+                        }}
+                        className="min-w-0 flex-1 cursor-pointer rounded-sm text-left focus-visible:outline-2 focus-visible:outline-primary"
+                      >
                         <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary"><CopyPartNumber partNumber={operation.partNumber} /> <ObsoleteBadge obsolete={operation.obsolete} /></p><h3 className="mt-1 font-semibold">{operation.partName}</h3></div><StatusBadge status={operation.status} /></div>
                         <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground"><span>Rev {operation.revision ?? "—"}</span><span>{operationLabel(operation)}</span><Badge variant="outline">{operation.workType}</Badge><span className="flex items-center gap-1"><Wrench className="size-3" />{operation.machine}</span><span>{operation.completedQuantity}/{operation.taskQuantity} done</span><span>{operation.availableQuantity} available</span></div>
                         <p className="mt-2 text-xs text-muted-foreground">Location: {operation.storageLocation ?? "Not recorded"}</p>
-                      </button>
+                      </div>
                     </article>
                   );
                 })}
@@ -1849,6 +1873,17 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                     key={selected.requirementId}
                     requirementId={selected.requirementId}
                     notes={selected.productionNotes}
+                    compact
+                  />
+                )}
+
+                {query.data?.user?.role === "admin" && query.data.user.approved && selected.requirementId && (
+                  <EngineeringOverrides
+                    key={`engineering:${selected.requirementId}`}
+                    requirementId={selected.requirementId}
+                    partNumber={selected.partNumber}
+                    obsolete={selected.obsolete}
+                    activeInBom={selected.activeInBom}
                     compact
                   />
                 )}

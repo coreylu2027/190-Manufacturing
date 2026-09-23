@@ -14,7 +14,7 @@ export type UserRole = "machinist" | "admin";
 export type OperationWorkType = "Manufacturing" | "CAM";
 export type OperationQuantityAction = "claim" | "release" | "complete" | "undo_complete";
 export type OperationAction = OperationQuantityAction | "steal";
-export type FabricationAction = "claim" | "release" | "complete" | "undo_complete";
+export type FabricationAction = "claim" | "release" | "complete" | "undo_complete" | "steal";
 
 export interface OperationAllocation {
   userId: string;
@@ -50,6 +50,8 @@ export interface QualityLocationFields {
 
 export interface ObsoletionFields {
   hidden: boolean;
+  /** Bought rather than made: routing and finishing are retired. */
+  offTheShelf: boolean;
   visibilityVersion: number;
   obsolete: boolean;
   obsoletionVersion: number;
@@ -153,6 +155,7 @@ export interface FabricationResponse {
 
 export interface FabricationActionPatch {
   action: FabricationAction;
+  confirmed?: true;
 }
 
 export interface OperationPatch {

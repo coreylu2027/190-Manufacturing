@@ -868,3 +868,33 @@ test("visibility writes validate obsolete/version and retry the identical transa
   const denied=harness(state,()=>Response.json({code:"42501"},{status:403}));
   await assert.rejects(denied.adapter.setRequirementHidden(20,true,0,ACTOR),error=>error instanceof ManufacturingWriteError && error.status===403);
 });
+
+test("finishing takeover atomically transfers only unfinished assignment", async () => {
+  const state = fixture({ requirement: { Status: { value: "Ready for Finishing" }, Finishing: { value: "Black" } }, finishing: { Machinist: "Blake B." } });
+  const { adapter, commits } = harness(state);
+  const result = await adapter.applyFabricationAction(30, "steal", ACTOR);
+  assert.equal(result.machinist, ACTOR.name);
+  assert.equal(result.displacedMachinist, "Blake B.");
+  assert.equal(result.status, "In Progress");
+  assert.equal(result.requirementStatus, "Ready for Finishing");
+  assert.equal(commits.length, 1);
+  assert.equal(commits[0].p_action, "steal");
+  assert.deepEqual(commits[0].p_changes, [{ entity: "finishing", id: 30, patch: { machinist: ACTOR.name } }]);
+});
+
+for (const scenario of [
+  { name: "unclaimed", status: "Ready for Finishing", machinist: "" },
+  { name: "own claim", status: "Ready for Finishing", machinist: "alex a." },
+  { name: "complete", status: "Complete", machinist: "Blake B." },
+  { name: "upstream", status: "Ready for QC", machinist: "Blake B." },
+  { name: "inactive", status: "Ready for Finishing", machinist: "Blake B.", inactive: true },
+  { name: "obsolete", status: "Ready for Finishing", machinist: "Blake B.", obsolete: true },
+]) {
+  test(`finishing takeover rejects ${scenario.name} jobs without writing`, async () => {
+    const state = fixture({ requirement: { Status: { value: scenario.status } }, finishing: { Machinist: scenario.machinist, Active: !scenario.inactive } });
+    if (scenario.obsolete) state.rows.requirements[0].obsolete = true;
+    const { adapter, commits } = harness(state);
+    await assert.rejects(adapter.applyFabricationAction(30, "steal", ACTOR));
+    assert.equal(commits.length, 0);
+  });
+}
