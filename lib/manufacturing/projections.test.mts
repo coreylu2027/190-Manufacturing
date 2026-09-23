@@ -178,3 +178,23 @@ test("off-the-shelf requirements keep their retired routes visible with an Off t
   assert.equal(projectProduction([op])[0].status, "Off the Shelf");
   assert.equal(projectOperations([{ ...operation, "Active in Routing": false }], [{ ...requirement, "Active in BOM": true }], [part]).length, 0);
 });
+
+test("imported subassembly parts report the document of the root assembly they were synced through", () => {
+  const assemblies = [{ id: 10, "Assembly Number": "A-ROOT" }, { id: 11, "Assembly Number": "A-ROLLER" }, { id: 12, "Assembly Number": "A-OTHER" }];
+  const row = (id: number, assembly: number, document: string, extra: Record<string, unknown> = {}) => ({
+    ...requirement, id, Assembly: [{ id: assembly }], "Source Root": assembly === 12 ? "A-OTHER" : "A-ROOT",
+    "Source Document": document, "Active in BOM": true, ...extra,
+  });
+  const requirements = [
+    row(20, 10, "A-26C-0004"), row(21, 10, "A-26C-0004"), row(22, 10, "Imported bracket"),
+    row(23, 10, "Retired document", { Obsolete: true }), row(24, 10, "Retired document", { Obsolete: true }),
+    row(25, 11, "Configurable Roller"),
+    // A root whose only direct part is inactive still resolves.
+    row(26, 12, "A-26C-0009", { "Active in BOM": false }),
+  ];
+  const operations = requirements.map((item) => ({ ...operation, id: item.id, Operation: `op-${item.id}`, "Production Requirement": [{ id: item.id }] }));
+  const byRequirement = new Map(projectOperations(operations, requirements, [part], [], assemblies).map((op) => [op.requirementId, op]));
+  assert.deepEqual([byRequirement.get(25)?.documentName, byRequirement.get(25)?.syncedFromDocument], ["Configurable Roller", "A-26C-0004"]);
+  assert.equal(byRequirement.get(22)?.syncedFromDocument, "A-26C-0004");
+  assert.equal(byRequirement.get(26)?.syncedFromDocument, "A-26C-0009");
+});

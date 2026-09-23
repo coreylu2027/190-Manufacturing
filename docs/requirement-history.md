@@ -1,4 +1,4 @@
-# Part history
+# Part history and source document progress
 
 ## History
 
@@ -24,6 +24,23 @@ are shown.
 them, and `GET /api/requirements/[id]/history` serves them to approved users.
 The timeline refreshes with the rest of the manufacturing data after each write.
 
+## Progress by source document
+
+The Production page's **Progress by source document** panel groups active
+requirements by the document they were **synced from** and shows each status as
+a share of a bar. The percentage counts complete parts out of those the shop
+makes: off-the-shelf parts are shown but not counted, and obsolete requirements
+are excluded. Hidden requirements follow the page's **Show hidden** setting.
+Selecting a document filters the parts list, as does the **Synced from** filter.
+
+"Synced from" differs from a part's source document for imported subassemblies.
+A configurable roller's parts report the Configurable Roller document, but they
+were synced through a root assembly such as A-190B-261131 in A-26C-0004. The
+sync records only the root assembly (`source_root`), so the projection takes
+the root's document to be the most common source document among the root
+assembly's own direct parts, preferring active ones. The parts list shows it in
+a **Synced from** column, and the detail panels show it beside the source root.
+
 ## Installation
 
 Apply `supabase/migrations/20260923170000_requirement_history.sql`. It adds one
@@ -32,6 +49,7 @@ change any rows.
 
 ## Verification
 
-- `npm test` includes `lib/requirement-history.test.mts`.
+- `npm test` includes `lib/requirement-history.test.mts` and
+  `lib/document-progress.test.mts`.
 - `npm run manufacturing:test-overrides` checks the SQL function in PGlite: scope
   to one requirement, part-level corrections, QC reviews, and permissions.

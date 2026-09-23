@@ -50,6 +50,37 @@ function sourceDocumentName(requirement: SourceRow | undefined): string | null {
     || null;
 }
 
+/**
+ * The Onshape document each root assembly lives in, keyed by root assembly
+ * number. The sync records only the root (Source Root). The root assembly's own
+ * parts report its document; parts of imported subassemblies (a configurable
+ * roller, say) report the subassembly's document instead. So the root's
+ * document is the most common one among its direct parts, preferring active ones.
+ */
+function syncedFromDocuments(requirementRows: SourceRow[], assemblies: Map<number, SourceRow>) {
+  const tallies = [new Map<string, Map<string, number>>(), new Map<string, Map<string, number>>()];
+  for (const requirement of requirementRows) {
+    const root = textValue(requirement["Source Root"]);
+    const document = sourceDocumentName(requirement);
+    const assembly = assemblies.get(linkedId(requirement.Assembly) ?? -1);
+    if (!root || !document || String(assembly?.["Assembly Number"] ?? "").trim() !== root) continue;
+    const current = requirement["Active in BOM"] !== false && requirement.Obsolete !== true;
+    for (const tally of current ? tallies : tallies.slice(1)) {
+      const documents = tally.get(root) ?? new Map<string, number>();
+      documents.set(document, (documents.get(document) ?? 0) + 1);
+      tally.set(root, documents);
+    }
+  }
+  const result = new Map<string, string>();
+  for (const tally of tallies) {
+    for (const [root, documents] of tally) {
+      if (result.has(root)) continue;
+      result.set(root, [...documents].sort(([left, a], [right, b]) => b - a || left.localeCompare(right))[0][0]);
+    }
+  }
+  return result;
+}
+
 function revisionName(requirement: SourceRow | undefined, part: SourceRow | undefined): string | null {
   for (const value of [requirement?.["Required Part Revision"], part?.Revision]) {
     if (typeof value === "number") return String(value);
@@ -123,6 +154,7 @@ export function projectOperations(operationRows: SourceRow[], requirementRows: S
   const parts = new Map(partRows.map((row) => [row.id, row]));
   const assemblies = new Map(assemblyRows.map((row) => [row.id, row]));
   const files = attachmentIndex(attachments);
+  const rootDocuments = syncedFromDocuments(requirementRows, assemblies);
 
   const parsedOperations = operationRows.map((row) => {
     const requirementId = linkedId(row["Production Requirement"]);
@@ -162,6 +194,7 @@ export function projectOperations(operationRows: SourceRow[], requirementRows: S
       ...parsed,
       revision: revisionName(requirement, part),
       documentName: sourceDocumentName(requirement),
+      syncedFromDocument: rootDocuments.get(textValue(requirement?.["Source Root"])) ?? null,
       sourceRoot: textValue(requirement?.["Source Root"]) || null,
       sourceAssemblyRevision: textValue(requirement?.["Source Assembly Revision"]) || null,
       requiredPartRevision: textValue(requirement?.["Required Part Revision"]) || null,

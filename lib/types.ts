@@ -71,6 +71,8 @@ export interface ManufacturingOperation extends QualityLocationFields, Obsoletio
   partName: string;
   assemblyNumber: string;
   documentName: string | null;
+  /** The document of the root assembly this was synced through, which differs from documentName for imported subassemblies. */
+  syncedFromDocument: string | null;
   sourceRoot: string | null;
   sourceAssemblyRevision: string | null;
   requiredPartRevision: string | null;
