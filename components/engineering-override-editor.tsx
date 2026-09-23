@@ -15,9 +15,10 @@ import {
   CORRECTION_FIELD_LABELS, FINISH_COLORS, MACHINE_NAMES, MAX_DESCRIPTION_LENGTH, MAX_MATERIAL_LENGTH, MAX_NAME_LENGTH,
   MAX_OVERRIDE_FILE_BYTES, MAX_OVERRIDE_REASON_LENGTH, ROUTING_FIELDS, normalizeFinishColor, routingError,
   type EngineeringOverrideFields, type EngineeringOverrideRow, type EngineeringOverrideState, type FinishColor, type OverrideField,
-  type OverrideFileKind, type Routing,
+  type OverrideFileKind, type PassedQcQuantityMode, type Routing,
 } from "@/lib/engineering-overrides";
 import { createClient } from "@/lib/supabase/client";
+import { cn } from "@/lib/utils";
 
 const NO_MACHINE = "__none";
 const MANUFACTURING_QUERY_KEYS = ["operations", "cam", "fabrication", "qc", "admin", "engineering-corrections"] as const;
@@ -64,9 +65,50 @@ function MachineSelect({ value, onChange, disabled, label }: { value: string | n
   );
 }
 
+/** How a quantity correction treats parts QC already passed. */
+function PassedQcQuantityChoice({ from, to, onRobot, value, onChange, disabled }: {
+  from: number; to: number; onRobot: boolean; value: PassedQcQuantityMode | null;
+  onChange: (value: PassedQcQuantityMode) => void; disabled?: boolean;
+}) {
+  const difference = Math.abs(to - from);
+  const parts = (quantity: number) => `${quantity} part${quantity === 1 ? "" : "s"}`;
+  const options: Array<{ value: PassedQcQuantityMode; title: string; description: string; unavailable?: string }> = [
+    { value: "approved", title: `QC approved ${to}`,
+      description: `The correct quantity was already made and approved. Completed counts change to ${to} and QC stays passed.${to > from ? ` The ${parts(difference)} the records missed are credited to you.` : ""}` },
+    to > from
+      ? { value: "made", title: `Only ${from} were made`,
+        description: `Completed work stays at ${from}. Manufacturing reopens for ${parts(difference)} more, then QC reviews the batch again.`,
+        unavailable: onRobot ? "Move the part off the robot first." : undefined }
+      : { value: "made", title: `${from} were made`,
+        description: `Completed work stays at ${from} and QC stays passed. The ${parts(difference)} no longer needed will be thrown away.` },
+  ];
+  return (
+    <div role="radiogroup" aria-label="Passed QC quantity" className="rounded-xl border border-amber-200 bg-amber-50/60 p-3 dark:border-amber-400/30 dark:bg-amber-400/10">
+      <p className="text-sm font-semibold">This part already passed QC for {from}. What happened on the shop floor?</p>
+      <div className="mt-2 grid gap-2 sm:grid-cols-2">
+        {options.map((option) => (
+          <label key={option.value} className={cn("rounded-lg border p-3 text-sm transition focus-within:ring-2 focus-within:ring-ring",
+            option.unavailable || disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer hover:border-primary/50",
+            value === option.value ? "border-primary bg-primary/5" : "bg-background")}>
+            <span className="flex items-center gap-2 font-semibold">
+              <input type="radio" name="passed-qc-quantity" value={option.value} checked={value === option.value}
+                disabled={disabled || Boolean(option.unavailable)} onChange={() => onChange(option.value)} className="size-4 accent-primary" />
+              {option.title}
+            </span>
+            <span className="mt-1 block text-xs text-muted-foreground">{option.description}</span>
+            {option.unavailable && <span className="mt-1 block text-xs font-semibold text-destructive">{option.unavailable}</span>}
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 interface Draft {
   quantity: string; name: string; description: string; material: string; finishing: FinishColor; routing: Routing;
   offTheShelf: boolean; reason: string;
+  /** Chosen when the quantity changes after QC passed. */
+  passedQcQuantity: PassedQcQuantityMode | null;
 }
 
 function draftFrom(state: EngineeringOverrideState): Draft {
@@ -80,13 +122,17 @@ function draftFrom(state: EngineeringOverrideState): Draft {
     routing: ROUTING_FIELDS.map((field) => requirement[field] || null) as Routing,
     offTheShelf: requirement.off_the_shelf,
     reason: "",
+    passedQcQuantity: null,
   };
 }
 
 function changedFields(state: EngineeringOverrideState, draft: Draft): EngineeringOverrideFields {
   const initial = draftFrom(state);
   const fields: EngineeringOverrideFields = {};
-  if (draft.quantity.trim() !== initial.quantity) fields.quantity = { value: Number(draft.quantity) };
+  if (draft.quantity.trim() !== initial.quantity) {
+    fields.quantity = { value: Number(draft.quantity) };
+    if (draft.passedQcQuantity) fields.passedQcQuantity = draft.passedQcQuantity;
+  }
   if (draft.name.trim() !== initial.name.trim()) fields.name = { value: draft.name.trim() };
   if (draft.description.trim() !== initial.description.trim()) fields.description = { value: draft.description.trim() || null };
   if (draft.material.trim() !== initial.material.trim()) fields.material = { value: draft.material.trim() || null };
@@ -196,6 +242,10 @@ export function EngineeringOverrides({ requirementId, partNumber, obsolete, acti
   const quantityProblem = draft && !/^\d+$/.test(draft.quantity.trim()) ? "Enter a whole number" : null;
   const nameProblem = draft && !draft.name.trim() ? "Enter a part name" : null;
   const dirty = Boolean(state && draft && Object.keys(changedFields(state, draft)).length);
+  const syncedQuantity = Number(state?.requirement?.required_quantity ?? 0);
+  const passedQcQuantityChange = Boolean(state?.requirement?.qc_outcome === "Passed" && draft && !quantityProblem
+    && Number(draft.quantity) >= 1 && Number(draft.quantity) !== syncedQuantity);
+  const passedQcQuantityProblem = passedQcQuantityChange && !draft!.passedQcQuantity;
   const sourcingChanged = Boolean(state && draft && draft.offTheShelf !== state.requirement?.off_the_shelf);
   // Routing and finishing only apply to manufactured parts, and change separately from sourcing.
   const routingEditable = requirementEditable && Boolean(draft && state) && !state!.requirement!.off_the_shelf && !sourcingChanged;
@@ -281,9 +331,9 @@ export function EngineeringOverrides({ requirementId, partNumber, obsolete, acti
                   <label className="block text-sm">
                     <span className="font-semibold">Quantity</span>
                     <Input className="mt-1.5" inputMode="numeric" value={draft.quantity} disabled={busy || !requirementEditable}
-                      onChange={(event) => setDraft({ ...draft, quantity: event.currentTarget.value })} aria-invalid={Boolean(quantityProblem)} />
+                      onChange={(event) => setDraft({ ...draft, quantity: event.currentTarget.value, passedQcQuantity: null })} aria-invalid={Boolean(quantityProblem)} />
                     <OverrideMeta override={overrideFor(state, "required_quantity")} disabled={busy || !requirementEditable}
-                      onRevert={() => setDraft({ ...draft, quantity: String(overrideFor(state, "required_quantity")!.synced_value) })} />
+                      onRevert={() => setDraft({ ...draft, quantity: String(overrideFor(state, "required_quantity")!.synced_value), passedQcQuantity: null })} />
                   </label>
                   <label className="block text-sm">
                     <span className="font-semibold">Finishing color</span>
@@ -295,6 +345,9 @@ export function EngineeringOverrides({ requirementId, partNumber, obsolete, acti
                       onRevert={() => setDraft({ ...draft, finishing: normalizeFinishColor(overrideFor(state, "finishing")!.synced_value) })} />
                   </label>
                 </div>
+                {passedQcQuantityChange && <PassedQcQuantityChoice from={syncedQuantity} to={Number(draft.quantity)}
+                  onRobot={state.requirement?.part_location === "On Robot"} value={draft.passedQcQuantity} disabled={busy}
+                  onChange={(passedQcQuantity) => setDraft({ ...draft, passedQcQuantity })} />}
               </fieldset>
 
               <fieldset>
@@ -357,7 +410,7 @@ export function EngineeringOverrides({ requirementId, partNumber, obsolete, acti
           )}
           <DialogFooter>
             <Button variant="outline" disabled={busy} onClick={() => setOpen(false)}>Close</Button>
-            <Button disabled={busy || !dirty || Boolean(routingProblem) || Boolean(quantityProblem) || Boolean(nameProblem)} onClick={() => { setError(""); save.mutate(); }}>
+            <Button disabled={busy || !dirty || Boolean(routingProblem) || Boolean(quantityProblem) || Boolean(nameProblem) || passedQcQuantityProblem} onClick={() => { setError(""); save.mutate(); }}>
               {save.isPending && <LoaderCircle className="animate-spin" />}Save corrections
             </Button>
           </DialogFooter>

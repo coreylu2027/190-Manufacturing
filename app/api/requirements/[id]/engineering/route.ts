@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getAppUser } from "@/lib/auth";
-import { FINISH_COLORS, MACHINE_NAMES, MAX_DESCRIPTION_LENGTH, MAX_MATERIAL_LENGTH, MAX_NAME_LENGTH, MAX_OVERRIDE_QUANTITY, MAX_OVERRIDE_REASON_LENGTH } from "@/lib/engineering-overrides";
+import { FINISH_COLORS, MACHINE_NAMES, MAX_DESCRIPTION_LENGTH, MAX_MATERIAL_LENGTH, MAX_NAME_LENGTH, MAX_OVERRIDE_QUANTITY, MAX_OVERRIDE_REASON_LENGTH, PASSED_QC_QUANTITY_MODES } from "@/lib/engineering-overrides";
 import { applyEngineeringOverrides, readEngineeringOverrideState } from "@/lib/manufacturing";
 import { ManufacturingWriteError } from "@/lib/manufacturing/write-adapter";
 import { scheduleSlackManufacturingEvent } from "@/lib/slack-notifications";
@@ -18,6 +18,7 @@ const schema = z.object({
   reason: z.string().max(MAX_OVERRIDE_REASON_LENGTH).default(""),
   fields: z.object({
     quantity: edit(z.number().int().min(1).max(MAX_OVERRIDE_QUANTITY)).optional(),
+    passedQcQuantity: z.enum(PASSED_QC_QUANTITY_MODES).optional(),
     material: edit(z.string().max(MAX_MATERIAL_LENGTH).nullable()).optional(),
     name: edit(z.string().trim().min(1).max(MAX_NAME_LENGTH)).optional(),
     description: edit(z.string().max(MAX_DESCRIPTION_LENGTH).nullable()).optional(),

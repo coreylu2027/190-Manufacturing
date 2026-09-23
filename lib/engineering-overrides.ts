@@ -41,8 +41,17 @@ export const MAX_OVERRIDE_REASON_LENGTH = 1_000;
 export const MAX_OVERRIDE_FILE_BYTES = 50 * 1024 * 1024;
 
 export type FieldEdit<T> = { value: T } | { revert: true };
+/**
+ * How a quantity change treats a part that already passed QC:
+ * - `approved`: the corrected quantity was made and approved; pre-QC completed counts are rewritten to match.
+ * - `made`: the original quantity was made. Extras are discarded; a shortfall reopens work and QC for the extra parts.
+ */
+export const PASSED_QC_QUANTITY_MODES = ["approved", "made"] as const;
+export type PassedQcQuantityMode = (typeof PASSED_QC_QUANTITY_MODES)[number];
 export interface EngineeringOverrideFields {
   quantity?: FieldEdit<number>;
+  /** Required when the quantity changes on a part with a passed QC review. */
+  passedQcQuantity?: PassedQcQuantityMode;
   material?: FieldEdit<string | null>;
   name?: FieldEdit<string>;
   description?: FieldEdit<string | null>;
@@ -97,6 +106,8 @@ export interface EngineeringOverrideState {
     off_the_shelf: boolean;
     off_the_shelf_changed_by: string | null;
     off_the_shelf_changed_at: string | null;
+    qc_outcome: string | null;
+    part_location: string | null;
   } | null;
   part: { id: number; part_number: string | null; name: string | null; description: string | null; material: string | null } | null;
   overrides: EngineeringOverrideRow[];

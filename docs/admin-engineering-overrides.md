@@ -66,12 +66,34 @@ work:
 - a routing stage with claims, completions, or In Progress status cannot be
   changed or removed; nor can a claimed CAM task;
 - switching between CNC machines after CAM is complete requires reopening CAM;
-- pre-QC routing changes and quantity increases require undoing a passed QC;
+- pre-QC routing changes require undoing a passed QC;
 - a quantity cannot drop below an operation's claimed-plus-completed total while
   claims remain; completed stages reopen or complete to match the new quantity;
+- changing the quantity of a part that passed QC requires choosing what happened
+  (see below);
 - adding finishing is blocked after threaded-insert work starts or while the
   part is On Robot, and removing it is blocked while the job is claimed; and
 - obsolete or inactive requirements accept only part-level corrections.
+
+### Quantity changes after QC passed
+
+The editor asks which of these happened:
+
+- **QC approved the corrected quantity.** The records were wrong. Every pre-QC
+  operation's completed count (and quantity ledger) is set to the new quantity
+  and QC stays passed. Parts the records missed are credited to the correcting
+  admin, like Force QC; removed parts come off the most recent credit first.
+  Refused while a pre-QC operation has claims.
+- **The original quantity was made.** Completed counts are kept. For a smaller
+  quantity, QC stays passed and the extras are thrown away. For a larger one,
+  every stage reopens for the extra parts, the QC outcome resets to Not
+  Inspected, and post-QC work and finishing wait for the new review. Refused
+  while the part is On Robot, finishing is claimed, or post-QC work is claimed.
+
+`20260923040000_passed_qc_quantity_corrections.sql` lets the apply RPC rewrite
+completed counts only alongside a quantity override on a passed part: pre-QC,
+active, unclaimed manufacturing rows whose ledger totals match, ending Complete
+at the corrected quantity. It keeps `operation_allocations` in step.
 
 `public.manufacturing_apply_engineering_overrides` independently checks the
 approved admin, write switch, request ID, manufacturing snapshot token, and a
@@ -108,7 +130,8 @@ replacement invalidates its preview until the command runs again.
 
 ## Installation
 
-Apply `supabase/migrations/20260922190000_admin_engineering_overrides.sql` after
+Apply `supabase/migrations/20260922190000_admin_engineering_overrides.sql`, then
+`20260923040000_passed_qc_quantity_corrections.sql`, after
 the engineering-sync API, routing initializer, obsoletion, visibility, and part
 preview migrations. It adds tables, functions, one requirement column, and a
 sync trigger; it does not modify existing manufacturing rows or enable writes.

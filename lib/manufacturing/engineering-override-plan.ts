@@ -6,6 +6,7 @@ import {
   MAX_DESCRIPTION_LENGTH, MAX_MATERIAL_LENGTH, MAX_NAME_LENGTH, MAX_OVERRIDE_QUANTITY, ROUTING_FIELDS, normalizeFinishColor, routingError,
   type EngineeringOverrideFields, type EngineeringOverrideState, type FinishColor, type OverrideField, type Routing,
 } from "../engineering-overrides.ts";
+import type { OperationAllocation } from "../types.ts";
 import type { NormalizedRow } from "./model.ts";
 
 export class EngineeringOverrideError extends Error {
@@ -27,7 +28,7 @@ export interface OverrideChangeSummary { field: string; from: string; to: string
 const PATCHABLE: Record<OverrideRowChange["entity"], readonly string[]> = {
   requirements: ["required_quantity", "finishing", ...ROUTING_FIELDS, "status", "qc_outcome", "off_the_shelf"],
   parts: ["material", "name", "description"],
-  operations: ["machine", "active_in_routing", "status", "completed_at"],
+  operations: ["machine", "active_in_routing", "status", "completed_at", "completed_quantity", "quantity_ledger", "machinist"],
   finishing: ["color", "required_quantity", "active"],
 };
 
@@ -45,11 +46,48 @@ const hasWork = (row: Row) => targetMachineHasStarted({
 });
 const display = (value: unknown) => value === null || value === undefined || value === "" ? "—" : String(value);
 
-export function planEngineeringOverrides({ rows, state, requirementId, fields, now = new Date().toISOString() }: {
+/** A completed operation's ledger; legacy rows without one are attributed to their machinist. */
+function completedLedger(row: Row): OperationAllocation[] {
+  let ledger: unknown = [];
+  try { ledger = JSON.parse(String(row.quantity_ledger ?? "") || "[]"); } catch { /* validated below */ }
+  const valid = Array.isArray(ledger) && ledger.every((item) => item && typeof item === "object" && item.userId && item.name
+    && Number.isSafeInteger(item.claimed) && item.claimed >= 0 && Number.isSafeInteger(item.completed) && item.completed >= 0);
+  const allocations = valid ? (ledger as OperationAllocation[]).filter((item) => item.claimed + item.completed > 0) : [];
+  const completed = count(row.completed_quantity);
+  if (allocations.length === 0 && completed > 0) {
+    const name = text(row.machinist) ?? "Legacy assignment";
+    return [{ userId: `legacy:${name.toLocaleLowerCase()}`, name, claimed: 0, completed }];
+  }
+  if (!valid || allocations.reduce((sum, item) => sum + item.completed, 0) !== completed) {
+    throw new EngineeringOverrideError(`${row.operation_number} has an inconsistent quantity ledger; reconcile it before correcting the approved quantity`);
+  }
+  return allocations.map((item) => ({ ...item }));
+}
+/** Removes completed parts from the most recent allocations first, like a QC rejection. */
+function subtractCompleted(allocations: OperationAllocation[], quantity: number) {
+  let remaining = quantity;
+  for (let index = allocations.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    const removed = Math.min(allocations[index].completed, remaining);
+    allocations[index].completed -= removed;
+    remaining -= removed;
+  }
+  return allocations.filter((allocation) => allocation.claimed + allocation.completed > 0);
+}
+/** Credits parts the records missed to the correcting admin, like Force QC. */
+function creditCompleted(allocations: OperationAllocation[], actor: { id: string; name: string }, quantity: number) {
+  const credit = allocations.find((allocation) => allocation.userId === actor.id);
+  if (credit) Object.assign(credit, { name: actor.name, completed: credit.completed + quantity });
+  else allocations.push({ userId: actor.id, name: actor.name, claimed: 0, completed: quantity });
+  return allocations;
+}
+
+export function planEngineeringOverrides({ rows, state, requirementId, fields, actor, now = new Date().toISOString() }: {
   rows: Record<string, NormalizedRow[] | undefined>;
   state: EngineeringOverrideState;
   requirementId: number;
   fields: EngineeringOverrideFields;
+  /** Credited for parts added by an `approved` passed-QC quantity correction. */
+  actor: { id: string; name: string };
   now?: string;
 }) {
   const sourceRequirement = rows.requirements?.find((row) => row.id === requirementId);
@@ -107,7 +145,7 @@ export function planEngineeringOverrides({ rows, state, requirementId, fields, n
       ? "Change off-the-shelf status separately from routing and finishing"
       : "Switch this part back to manufactured before changing its routing or finishing");
   }
-  const qcPassed = requirement.qc_outcome === "Passed";
+  let qcPassed = requirement.qc_outcome === "Passed";
   let workflowChanged = false;
   let finishingNewlyRequired = false;
   const productionKey = String(requirement.production_key ?? "");
@@ -216,8 +254,34 @@ export function planEngineeringOverrides({ rows, state, requirementId, fields, n
       (value) => value === null || value === undefined ? null : Number(value));
     if (target !== undefined && !same(target, requirement.required_quantity)) {
       const quantity = Number(target);
-      if (qcPassed && quantity > count(requirement.required_quantity)) {
-        throw new EngineeringOverrideError("Undo the passed QC review before increasing the quantity");
+      const previous = count(requirement.required_quantity);
+      const mode = qcPassed ? fields.passedQcQuantity : undefined;
+      if (qcPassed && !mode) {
+        throw new EngineeringOverrideError("This part passed QC. Choose whether QC approved the corrected quantity or the original quantity was made.", 400);
+      }
+      if (mode === "approved") {
+        // The records were wrong: the corrected quantity was made and passed QC.
+        for (const row of activeOperations().filter((candidate) => !isCam(candidate) && !requiresPassedQc(String(candidate.machine ?? "")))) {
+          const ledger = completedLedger(row);
+          const completed = count(row.completed_quantity);
+          if (count(row.claimed_quantity) > 0) throw new EngineeringOverrideError(`${row.operation_number} has claimed work. Release it before correcting the approved quantity.`);
+          if (completed === quantity) continue;
+          const allocations = completed > quantity ? subtractCompleted(ledger, completed - quantity) : creditCompleted(ledger, actor, quantity - completed);
+          Object.assign(row, { completed_quantity: quantity, quantity_ledger: JSON.stringify(allocations),
+            machinist: allocations.map((allocation) => quantity > 1 ? `${allocation.name} (${allocation.completed})` : allocation.name).join(", ") });
+        }
+        summary.push({ field: "QC approved quantity", from: String(previous), to: String(quantity) });
+      } else if (mode === "made" && quantity > previous) {
+        // The original parts stand; the extra parts need manufacturing and a fresh QC review.
+        if (requirement.part_location === "On Robot") throw new EngineeringOverrideError("Move the part off the robot before adding parts that need QC");
+        if (finishingRows.some((row) => row.active && text(row.machinist))) throw new EngineeringOverrideError("Release the finishing claim before adding parts");
+        const claimedPostQc = activeOperations().find((row) => !isCam(row) && requiresPassedQc(String(row.machine ?? "")) && count(row.claimed_quantity) > 0);
+        if (claimedPostQc) throw new EngineeringOverrideError(`${claimedPostQc.operation_number} (${claimedPostQc.machine}) is claimed. Release it before adding parts.`);
+        qcPassed = false;
+        requirement.qc_outcome = "Not Inspected";
+        summary.push({ field: "QC", from: "Passed", to: `Reopened for ${quantity - previous} more` });
+      } else if (mode === "made" && quantity < previous) {
+        summary.push({ field: "QC", from: "Passed", to: `Kept; discard ${previous - quantity} extra` });
       }
       for (const row of activeOperations().filter((candidate) => !isCam(candidate))) {
         const claimed = count(row.claimed_quantity);

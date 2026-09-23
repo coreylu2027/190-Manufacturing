@@ -40,6 +40,7 @@ await install("supabase/migrations/20260911033920_initialize_synced_routing.sql"
 await install("supabase/migrations/20260918162451_requirement_obsoletion.sql");
 await install("supabase/migrations/20260919223625_hide_obsolete_requirements.sql");
 await install("supabase/migrations/20260922190000_admin_engineering_overrides.sql");
+await install("supabase/migrations/20260923040000_passed_qc_quantity_corrections.sql");
 
 const ADMIN = { id: "00000000-0000-4000-8000-000000000190", name: "Alex A." };
 const MACHINIST = "00000000-0000-4000-8000-000000000191";
@@ -229,7 +230,79 @@ test("quantity changes protect claims and passed QC, and completed stages follow
 
   const passed = await requirement({ quantity: 2, qc: "Passed", status: "Complete" });
   await assert.rejects(adapter.applyEngineeringOverrides(passed.id, { quantity: { value: 3 } }, (await state(passed.id)).token, "", ADMIN),
-    /Undo the passed QC review before increasing/);
+    /Choose whether QC approved the corrected quantity/);
+});
+
+/** A part whose every operation is complete for `quantity` parts, made by the machinist and passed by QC. */
+async function passedPart(options: { quantity: number; machines?: string[]; finishing?: string; status?: string }) {
+  const created = await requirement({ ...options, qc: "Passed", status: options.status ?? "Complete" });
+  await sql(`update manufacturing.operations set status='Complete', completed_at=now(), completed_quantity=$2, quantity_ledger=$3,
+    machinist='Sam M.' where requirement_id=$1`,
+  [created.id, options.quantity, JSON.stringify([{ userId: MACHINIST, name: "Sam M.", claimed: 0, completed: options.quantity }])]);
+  return created;
+}
+const ledgers = async (id: number) => (await ops(id)).map((operation) => JSON.parse(String(operation.quantity_ledger))
+  .map((allocation: { name: string; completed: number }) => `${allocation.name}:${allocation.completed}`).join(","));
+
+test("after QC, 'approved' rewrites completed counts to the corrected quantity and keeps the pass", async () => {
+  const { id } = await passedPart({ quantity: 2, machines: ["Milling Machine", "Tapping"] });
+  const result = await adapter.applyEngineeringOverrides(id, { quantity: { value: 3 }, passedQcQuantity: "approved" },
+    (await state(id)).token, "Shop made three", ADMIN);
+  assert.ok(result.changes.some((change) => change.field === "QC approved quantity" && change.from === "2" && change.to === "3"));
+  let rows = await ops(id);
+  assert.deepEqual(rows.map((operation) => [operation.status, Number(operation.completed_quantity)]), [["Complete", 3], ["Complete", 3]]);
+  assert.deepEqual(await ledgers(id), ["Sam M.:2,Alex A.:1", "Sam M.:2,Alex A.:1"]);
+  assert.equal(rows[0].machinist, "Sam M. (2), Alex A. (1)");
+  assert.deepEqual((await sql("select display_name, completed from manufacturing.operation_allocations where operation_id=$1 order by ordinal", [rows[0].id]))
+    .map((allocation) => `${allocation.display_name}:${Number(allocation.completed)}`), ["Sam M.:2", "Alex A.:1"]);
+  assert.deepEqual([(await row("requirements", id)).qc_outcome, (await row("requirements", id)).status], ["Passed", "Complete"]);
+
+  // Decreasing removes the most recent credit first.
+  await adapter.applyEngineeringOverrides(id, { quantity: { value: 1 }, passedQcQuantity: "approved" }, (await state(id)).token, "", ADMIN);
+  rows = await ops(id);
+  assert.deepEqual(rows.map((operation) => Number(operation.completed_quantity)), [1, 1]);
+  assert.deepEqual(await ledgers(id), ["Sam M.:1", "Sam M.:1"]);
+  assert.equal((await row("requirements", id)).qc_outcome, "Passed");
+});
+
+test("after QC, 'made' keeps completed counts: extras are discarded, and a shortfall reopens work and QC", async () => {
+  const fewer = await passedPart({ quantity: 3 });
+  await adapter.applyEngineeringOverrides(fewer.id, { quantity: { value: 2 }, passedQcQuantity: "made" }, (await state(fewer.id)).token, "", ADMIN);
+  assert.deepEqual((await ops(fewer.id)).map((operation) => [operation.status, Number(operation.completed_quantity)]), [["Complete", 3]]);
+  assert.deepEqual([(await row("requirements", fewer.id)).qc_outcome, Number((await row("requirements", fewer.id)).required_quantity)], ["Passed", 2]);
+
+  const more = await passedPart({ quantity: 2, machines: ["Milling Machine", "Tapping", "Threaded Insert"], finishing: "Red" });
+  await sql("update manufacturing.requirements set part_location='On Robot' where id=$1", [more.id]);
+  await assert.rejects(adapter.applyEngineeringOverrides(more.id, { quantity: { value: 4 }, passedQcQuantity: "made" }, (await state(more.id)).token, "", ADMIN),
+    /off the robot/);
+  await sql("update manufacturing.requirements set part_location='Shelf 1' where id=$1", [more.id]);
+  const result = await adapter.applyEngineeringOverrides(more.id, { quantity: { value: 4 }, passedQcQuantity: "made" }, (await state(more.id)).token, "", ADMIN);
+  assert.ok(result.changes.some((change) => change.field === "QC" && /2 more/.test(change.to)));
+  const rows = await ops(more.id);
+  assert.deepEqual(rows.map((operation) => [operation.machine, operation.status, Number(operation.completed_quantity)]),
+    [["Milling Machine", "Ready", 2], ["Tapping", "Planned", 2], ["Threaded Insert", "Planned", 2]]);
+  assert.deepEqual(await ledgers(more.id), ["Sam M.:2", "Sam M.:2", "Sam M.:2"]);
+  const updated = await row("requirements", more.id);
+  assert.deepEqual([updated.qc_outcome, updated.status], ["Not Inspected", "Ready for Manufacturing"]);
+  assert.equal(Number((await sql("select required_quantity from manufacturing.finishing where requirement_id=$1", [more.id]))[0].required_quantity), 4);
+});
+
+test("the RPC only rewrites completed counts for a passed-QC quantity correction", async () => {
+  const { id } = await passedPart({ quantity: 2 });
+  const [operation] = await ops(id);
+  const write = (await sql<{ state: { token: string } }>("select public.manufacturing_write_state() state"))[0].state;
+  const ledger = JSON.stringify([{ userId: MACHINIST, name: "Sam M.", claimed: 0, completed: 5 }]);
+  const token = (await state(id)).token;
+  const call = (overrides: unknown[], changes: unknown[]) => sql(`select public.manufacturing_apply_engineering_overrides(
+      $1::uuid,$2::uuid,$3,$4,$5,$6::jsonb,$7::jsonb,'[]'::jsonb,'',null) result`,
+  [crypto.randomUUID(), ADMIN.id, write.token, token, id, JSON.stringify(overrides), JSON.stringify(changes)]);
+  await assert.rejects(call([], [{ entity: "operations", id: operation.id, patch: { completed_quantity: 5, quantity_ledger: ledger } }]),
+    /only follow a passed-QC quantity correction/);
+  const quantity = [{ entity: "requirements", row_id: id, field: "required_quantity", action: "set", value: 4 }];
+  await assert.rejects(call(quantity, [{ entity: "requirements", id, patch: { required_quantity: 4 } },
+    { entity: "operations", id: operation.id, patch: { completed_quantity: 5, quantity_ledger: ledger } }]), /must match the corrected quantity/);
+  await assert.rejects(call(quantity, [{ entity: "requirements", id, patch: { required_quantity: 4 } },
+    { entity: "operations", id: operation.id, patch: { completed_quantity: 4, quantity_ledger: ledger } }]), /Allocation totals/);
 });
 
 test("adding finishing after QC routes the part to finishing; removing a claimed job is blocked", async () => {

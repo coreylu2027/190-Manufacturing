@@ -390,7 +390,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       if (overrideState.token !== expectedToken) throw new ManufacturingWriteError(STALE_OVERRIDE_MESSAGE, 409);
       const rows = await withIdentityRows(state);
       let plan: ReturnType<typeof planEngineeringOverrides>;
-      try { plan = planEngineeringOverrides({ rows, state: overrideState, requirementId, fields }); }
+      try { plan = planEngineeringOverrides({ rows, state: overrideState, requirementId, fields, actor }); }
       catch (error) {
         if (error instanceof EngineeringOverrideError) throw new ManufacturingWriteError(error.message, error.status);
         throw error;
