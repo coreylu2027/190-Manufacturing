@@ -122,3 +122,13 @@ test("webhook delivery skips missing configuration and rejects non-Slack URLs", 
     error: "SLACK_WEBHOOK_URL is not a valid Slack incoming webhook URL",
   });
 });
+
+test("Onshape correction alerts list changes, escape text, and warn when what to make changed", () => {
+  const base = { type: "engineering_corrected" as const, actorName: "Alex A.", requirementId: 20, partNumber: "P-1", partName: "Fixture <plate>", assemblyNumber: "A-1" };
+  const routed = formatSlackManufacturingEvent({ ...base, changes: ["Quantity: 4 → 2", "OP1: Lathe → Haas CNC"], reason: "BOM <double> count", routingChanged: true });
+  assert.match(routed.text, /Onshape data corrected: P-1/);
+  const blocks = JSON.stringify(routed.blocks);
+  for (const pattern of [/Quantity: 4 → 2; OP1: Lathe → Haas CNC/, /Check the routing and quantity/, /BOM &lt;double&gt; count/, /Fixture &lt;plate&gt;/, /Requirement #20/]) assert.match(blocks, pattern);
+  const material = formatSlackManufacturingEvent({ ...base, changes: ["Material: 6061 → 7075"] });
+  assert.doesNotMatch(JSON.stringify(material.blocks), /Check the routing|Reason/);
+});

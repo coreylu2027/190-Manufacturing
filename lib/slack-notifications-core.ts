@@ -61,6 +61,14 @@ export type SlackManufacturingEvent =
       changedFields: string[];
     })
   | (SlackPartContext & {
+      type: "engineering_corrected";
+      actorName: string;
+      changes: string[];
+      reason?: string;
+      /** What the shop should make changed (quantity, routing, finishing, or sourcing). */
+      routingChanged?: boolean;
+    })
+  | (SlackPartContext & {
       type: "admin_override";
       actorName: string;
       operationNumber: string;
@@ -218,6 +226,20 @@ export function formatSlackManufacturingEvent(event: SlackManufacturingEvent): S
       text: `CAM handoff edited: ${event.partNumber} — ${event.partName}; ${event.operationNumber}`,
       blocks: [
         { type: "section", text: { type: "mrkdwn", text: `*📝 CAM handoff edited*\n*${partLabel(event)}*\n${escapeMrkdwn(event.actorName)} updated ${fields} for *CAM ${escapeMrkdwn(event.operationNumber)} · ${escapeMrkdwn(event.machine)}*.` } },
+        { type: "context", elements: [{ type: "mrkdwn", text: context }] },
+      ],
+    };
+  }
+
+  if (event.type === "engineering_corrected") {
+    const changes = event.changes.length ? event.changes.map(escapeMrkdwn).join("; ") : "engineering data updated";
+    const reason = event.reason ? truncate(event.reason, MAX_NOTES_LENGTH) : "";
+    const guidance = event.routingChanged ? "\n*What to make changed. Check the routing and quantity before starting work.*" : "";
+    const reasonLine = reason ? `\n*Reason:* ${escapeMrkdwn(reason)}` : "";
+    return {
+      text: `Onshape data corrected: ${event.partNumber} — ${event.partName}; ${event.changes.join("; ")}`,
+      blocks: [
+        { type: "section", text: { type: "mrkdwn", text: `*🛠️ Onshape data corrected*\n*${partLabel(event)}*\n${escapeMrkdwn(event.actorName)} corrected: ${changes}.${guidance}${reasonLine}` } },
         { type: "context", elements: [{ type: "mrkdwn", text: context }] },
       ],
     };

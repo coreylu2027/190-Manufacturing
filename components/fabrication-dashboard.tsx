@@ -43,6 +43,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ProductionRequirementNotes } from "@/components/production-requirement-notes";
+import { EngineeringOverrides } from "@/components/engineering-override-editor";
 import { StorageLocationEditor, StorageLocationSelect } from "@/components/storage-location-editor";
 import { isShopName } from "@/lib/profile-name";
 import { canUseOnRobotLocation, type StorageLocation } from "@/lib/storage-locations";
@@ -79,11 +80,11 @@ const gridTheme = themeQuartz.withParams({
 });
 
 const statusStyles: Record<OperationStatus, string> = {
-  Planned: "border-slate-200 bg-slate-100 text-slate-700",
-  Ready: "border-emerald-200 bg-emerald-100 text-emerald-800",
-  "In Progress": "border-blue-200 bg-blue-100 text-blue-800",
-  Blocked: "border-amber-200 bg-amber-100 text-amber-900",
-  Complete: "border-violet-200 bg-violet-100 text-violet-800",
+  Planned: "border-slate-200 bg-slate-100 text-slate-700 dark:border-slate-400/30 dark:bg-slate-400/15 dark:text-slate-200",
+  Ready: "border-emerald-200 bg-emerald-100 text-emerald-800 dark:border-emerald-400/30 dark:bg-emerald-400/15 dark:text-emerald-200",
+  "In Progress": "border-blue-200 bg-blue-100 text-blue-800 dark:border-blue-400/30 dark:bg-blue-400/15 dark:text-blue-200",
+  Blocked: "border-amber-200 bg-amber-100 text-amber-900 dark:border-amber-400/30 dark:bg-amber-400/15 dark:text-amber-100",
+  Complete: "border-violet-200 bg-violet-100 text-violet-800 dark:border-violet-400/30 dark:bg-violet-400/15 dark:text-violet-200",
 };
 
 function StatusBadge({ status }: { status: OperationStatus }) {
@@ -104,12 +105,12 @@ function FinishCell({ value }: { value: string }) {
   return <div className="flex h-full items-center gap-2 font-medium"><span className={cn("size-2.5 rounded-full border border-black/10", swatch)} />{value}</div>;
 }
 
-function ActionCell({ data, onOpen }: { data?: FabricationJob; onOpen: (job: FabricationJob) => void }) {
+function ActionCell({ data, onOpen, userName }: { data?: FabricationJob; userName: string; onOpen: (job: FabricationJob) => void }) {
   if (!data) return null;
   return (
     <div className="flex h-full items-center justify-end">
-      <Button size="sm" variant={!data.obsolete && data.active && data.status === "Ready" ? "default" : "ghost"} onClick={() => onOpen(data)}>
-        {!data.obsolete && data.active && data.status === "Ready" ? "Claim" : "Open"}<ChevronRight />
+      <Button size="sm" variant={!data.obsolete && data.active && data.status === "Ready" ? "default" : isStealable(data, userName) ? "destructive" : "ghost"} onClick={() => onOpen(data)}>
+        {!data.obsolete && data.active && data.status === "Ready" ? "Claim" : isStealable(data, userName) ? "Steal" : "Open"}<ChevronRight />
       </Button>
     </div>
   );
@@ -131,14 +132,19 @@ function ownedBy(job: FabricationJob, userName: string) {
   return Boolean(job.machinist) && job.machinist.toLocaleLowerCase() === userName.toLocaleLowerCase();
 }
 
+function isStealable(job: FabricationJob, userName: string) {
+  return !job.obsolete && job.active && job.status === "In Progress" && Boolean(job.machinist) && !ownedBy(job, userName);
+}
+
 const actionCopy: Record<FabricationAction, { success: string }> = {
+  steal: { success: "Finishing job taken over" },
   claim: { success: "Finishing job claimed" },
   release: { success: "Finishing job released" },
   complete: { success: "Finishing marked complete" },
   undo_complete: { success: "Completion undone" },
 };
 
-const inverseAction: Record<FabricationAction, FabricationAction> = {
+const inverseAction: Record<Exclude<FabricationAction, "steal">, Exclude<FabricationAction, "steal">> = {
   claim: "release",
   release: "claim",
   complete: "undo_complete",
@@ -160,6 +166,7 @@ export function FabricationDashboard({
   const [bulkIds, setBulkIds] = useState<number[]>([]);
   const [bulkDialog, setBulkDialog] = useState<"claim" | "complete" | "release" | "location" | null>(null);
   const [bulkLocation, setBulkLocation] = useState<StorageLocation | null>(null);
+  const [stealDialogOpen, setStealDialogOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const query = useQuery({ queryKey: ["fabrication"], queryFn: fetchFabrication });
   const jobs = useMemo(() => query.data?.jobs ?? [], [query.data?.jobs]);
@@ -183,12 +190,19 @@ export function FabricationDashboard({
         ...current,
         jobs: current.jobs.map((job) => job.id === variables.id ? { ...job, ...data.updated } : job),
       } : current);
+      if (variables.patch.action === "steal") {
+        setStealDialogOpen(false);
+        toast.success(actionCopy.steal.success);
+        if (data.notificationWarning) toast.warning(data.notificationWarning);
+        return;
+      }
+      const undoAction = inverseAction[variables.patch.action];
       toast.success(actionCopy[variables.patch.action].success, variables.suppressUndo ? undefined : {
         action: {
           label: "Undo",
           onClick: () => mutation.mutate({
             id: variables.id,
-            patch: { action: inverseAction[variables.patch.action] },
+            patch: { action: undoAction },
             suppressUndo: true,
           }),
         },
@@ -206,6 +220,7 @@ export function FabricationDashboard({
       toast.info("Set your first name and last initial before recording work");
       return;
     }
+    if (action === "steal") { setStealDialogOpen(true); return; }
     mutation.mutate({ id: selected.id, patch: { action } });
   };
 
@@ -214,7 +229,7 @@ export function FabricationDashboard({
     const term = search.trim().toLocaleLowerCase();
     return jobs.filter((job) => {
       if (color !== "all" && job.color !== color) return false;
-      if (view === "available" && (job.obsolete || !job.active || job.status !== "Ready")) return false;
+      if (view === "available" && (job.obsolete || !job.active || (job.status !== "Ready" && !isStealable(job, userName)))) return false;
       if (view === "mine" && !(ownedBy(job, userName) && job.status === "In Progress")) return false;
       if (term && ![job.partNumber, job.partName, job.assemblyNumber, job.documentName, job.color, job.productionNotes, job.qcNotes, job.lastQualityFailure?.notes, job.machinist, job.storageLocation].join(" ").toLocaleLowerCase().includes(term)) return false;
       return true;
@@ -283,7 +298,7 @@ export function FabricationDashboard({
     complete: jobs.filter((job) => job.status === "Complete").length,
   }), [jobs]);
 
-  const openJob = (job: FabricationJob) => setSelectedId(job.id);
+  const openJob = (job: FabricationJob) => { setStealDialogOpen(false); setSelectedId(job.id); };
   const columnDefs = useMemo<ColDef<FabricationJob>[]>(() => [
     { field: "partNumber", equals: () => false, cellRenderer: PartNumberCell, cellRendererParams: { suppressMouseEventHandling: () => true }, headerName: "PART", minWidth: 155, pinned: "left", cellClass: "font-mono font-semibold" },
     { field: "partName", headerName: "DESCRIPTION", minWidth: 230, flex: 1 },
@@ -294,8 +309,8 @@ export function FabricationDashboard({
     { field: "qcNotes", headerName: "QC NOTES", minWidth: 240, flex: 1, cellRenderer: QcNotesCell },
     { field: "status", headerName: "STATUS", minWidth: 145, cellRenderer: StatusCell },
     { field: "machinist", headerName: "MACHINIST", minWidth: 180, valueFormatter: ({ value }) => value || "—" },
-    { headerName: "", width: 102, pinned: "right", sortable: false, filter: false, resizable: false, cellRenderer: ActionCell, cellRendererParams: { onOpen: openJob } },
-  ], []);
+    { headerName: "", width: 102, pinned: "right", sortable: false, filter: false, resizable: false, cellRenderer: ActionCell, cellRendererParams: { onOpen: openJob, userName } },
+  ], [userName]);
 
   return (
     <section className="mx-auto max-w-[1800px] px-4 py-5 md:px-7 md:py-7">
@@ -307,10 +322,10 @@ export function FabricationDashboard({
         </div>
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
           {[
-            { label: "Ready", value: stats.ready, icon: CircleDot, tone: "text-emerald-700 bg-emerald-50" },
-            { label: "In progress", value: stats.active, icon: Timer, tone: "text-blue-700 bg-blue-50" },
-            { label: "Upstream", value: stats.waiting, icon: TriangleAlert, tone: "text-amber-800 bg-amber-50" },
-            { label: "Complete", value: stats.complete, icon: Check, tone: "text-violet-700 bg-violet-50" },
+            { label: "Ready", value: stats.ready, icon: CircleDot, tone: "text-emerald-700 bg-emerald-50 dark:text-emerald-300 dark:bg-emerald-400/15" },
+            { label: "In progress", value: stats.active, icon: Timer, tone: "text-blue-700 bg-blue-50 dark:text-blue-300 dark:bg-blue-400/15" },
+            { label: "Upstream", value: stats.waiting, icon: TriangleAlert, tone: "text-amber-800 bg-amber-50 dark:text-amber-300 dark:bg-amber-400/15" },
+            { label: "Complete", value: stats.complete, icon: Check, tone: "text-violet-700 bg-violet-50 dark:text-violet-300 dark:bg-violet-400/15" },
           ].map(({ label, value, icon: Icon, tone }) => (
             <div key={label} className="flex min-w-32 items-center gap-3 rounded-xl border bg-card px-3 py-2.5 shadow-sm">
               <div className={cn("grid size-8 place-items-center rounded-lg", tone)}><Icon className="size-4" /></div>
@@ -326,7 +341,7 @@ export function FabricationDashboard({
             <div className="flex w-full overflow-x-auto rounded-lg bg-muted p-1 sm:w-auto">
               {([{ id: "available", label: "Available" }, { id: "mine", label: "My work" }, { id: "all", label: "All finishing" }] as const).map((item) => (
                 <Button key={item.id} size="sm" variant="ghost" onClick={() => setView(item.id)} className={cn("min-w-fit", view === item.id && "bg-card text-foreground shadow-sm hover:bg-card")}>
-                  {item.label}{item.id === "available" && <span className="ml-1 rounded bg-emerald-100 px-1.5 text-[10px] font-bold text-emerald-800">{stats.ready}</span>}
+                  {item.label}{item.id === "available" && <span className="ml-1 rounded bg-emerald-100 px-1.5 text-[10px] font-bold text-emerald-800 dark:bg-emerald-400/20 dark:text-emerald-200">{stats.ready}</span>}
                 </Button>
               ))}
             </div>
@@ -411,7 +426,7 @@ export function FabricationDashboard({
         <DialogContent>
           <DialogHeader><DialogTitle>{bulkDialog === "location" ? "Bulk set location" : bulkDialog === "release" ? "Bulk release claim" : bulkDialog === "complete" ? "Bulk complete finishing" : "Bulk claim finishing"}</DialogTitle><DialogDescription>{bulkDialog === "location" ? locationJobs.length : dialogJobs.length} selected {bulkDialog === "location" ? "part requirements" : "finishing jobs"}. Applies to the full quantity of each job.</DialogDescription></DialogHeader>
           <ul className="max-h-48 space-y-1 overflow-y-auto text-sm">{dialogJobs.map((job) => <li key={job.id}><CopyPartNumber partNumber={job.partNumber} /> · {job.color} · Qty {job.quantity}</li>)}</ul>
-          {dialogJobs.some((job) => !filtered.some((row) => row.id === job.id)) && <p className="text-xs text-amber-700">Includes selected jobs hidden by the current filters.</p>}
+          {dialogJobs.some((job) => !filtered.some((row) => row.id === job.id)) && <p className="text-xs text-amber-700 dark:text-amber-300">Includes selected jobs hidden by the current filters.</p>}
           {bulkDialog === "release" && <p className="text-xs text-muted-foreground">Only your active claims are released; other selected jobs are skipped.</p>}
           {bulkDialog === "location" && <><StorageLocationSelect value={bulkLocation} onChange={setBulkLocation} disabled={bulkBusy} emptyLabel="Choose a location" allowOnRobot={allowOnRobot} />{!allowOnRobot && <p className="text-xs text-muted-foreground">On Robot requires active parts with passed QC and completed finishing.</p>}</>}
           <DialogFooter><Button variant="outline" disabled={bulkMutation.isPending} onClick={() => setBulkDialog(null)}>Cancel</Button><Button disabled={bulkBusy || !dialogJobs.length || !user?.approved || (bulkDialog === "location" && (!bulkLocation || bulkLocation === "On Robot" && !allowOnRobot))} onClick={() => { if (bulkDialog) bulkMutation.mutate({ action: bulkDialog, targets: bulkDialog === "location" ? locationJobs : dialogJobs, location: bulkLocation }); }}>{bulkMutation.isPending && <LoaderCircle className="animate-spin" />}{bulkDialog === "location" ? "Set location" : bulkDialog === "release" ? "Release claims" : bulkDialog === "complete" ? "Mark complete" : "Claim jobs"}</Button></DialogFooter>
@@ -456,9 +471,20 @@ export function FabricationDashboard({
                   notes={selected.productionNotes}
                 />
 
+                {user?.role === "admin" && user.approved && (
+                  <EngineeringOverrides
+                    key={`engineering:${selected.requirementId}`}
+                    requirementId={selected.requirementId}
+                    partNumber={selected.partNumber}
+                    obsolete={selected.obsolete}
+                    activeInBom={selected.active}
+                    compact
+                  />
+                )}
+
                 <section>
                   <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">QC inspection notes</h3>
-                  <p className={cn("whitespace-pre-wrap rounded-xl border p-4 text-sm leading-6", selected.qcNotes ? "bg-emerald-50/60 text-foreground" : "border-dashed bg-muted/30 text-muted-foreground")}>
+                  <p className={cn("whitespace-pre-wrap rounded-xl border p-4 text-sm leading-6", selected.qcNotes ? "bg-emerald-50/60 text-foreground dark:bg-emerald-400/10" : "border-dashed bg-muted/30 text-muted-foreground")}>
                     {selected.qcNotes || "No inspection notes were recorded."}
                   </p>
                 </section>
@@ -505,18 +531,33 @@ export function FabricationDashboard({
               </div></div>
 
               <SheetFooter className="sticky bottom-0 border-t bg-card/95 p-4 backdrop-blur">
+                {isStealable(selected, userName) && <Button size="lg" variant="destructive" onClick={() => runAction("steal")} disabled={bulkBusy}><TriangleAlert /> Steal finishing job</Button>}
                 {selected.status === "Ready" && <Button size="lg" className="h-11" onClick={() => runAction("claim")} disabled={mutation.isPending || selected.obsolete || !selected.active}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <CircleDot />} Claim finishing job</Button>}
                 {selected.status === "In Progress" && ownedBy(selected, userName) && <Button size="lg" className="h-11 bg-emerald-600 hover:bg-emerald-700" onClick={() => runAction("complete")} disabled={mutation.isPending || selected.obsolete || !selected.active}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <Check />} Mark complete</Button>}
                 {selected.status === "In Progress" && ownedBy(selected, userName) && <Button variant="outline" onClick={() => runAction("release")} disabled={mutation.isPending || selected.obsolete || !selected.active}><RotateCcw /> Release claim</Button>}
                 {selected.status === "Complete" && ownedBy(selected, userName) && <Button variant="outline" onClick={() => runAction("undo_complete")} disabled={mutation.isPending || selected.obsolete || !selected.active}><RotateCcw /> Undo completion</Button>}
-                {selected.status === "Complete" && <div className="flex items-center justify-center gap-2 rounded-xl bg-emerald-50 p-3 text-sm font-semibold text-emerald-800"><Check className="size-4" /> {selected.quantity} finished by {selected.machinist || "machinist"}</div>}
-                {selected.status === "Planned" && <div className="flex items-center justify-center gap-2 rounded-xl bg-slate-100 p-3 text-sm font-semibold text-slate-700"><PackageCheck className="size-4" /> Waiting on manufacturing and QC</div>}
+                {selected.status === "Complete" && <div className="flex items-center justify-center gap-2 rounded-xl bg-emerald-50 p-3 text-sm font-semibold text-emerald-800 dark:bg-emerald-400/15 dark:text-emerald-200"><Check className="size-4" /> {selected.quantity} finished by {selected.machinist || "machinist"}</div>}
+                {selected.status === "Planned" && <div className="flex items-center justify-center gap-2 rounded-xl bg-slate-100 p-3 text-sm font-semibold text-slate-700 dark:bg-slate-400/15 dark:text-slate-200"><PackageCheck className="size-4" /> Waiting on manufacturing and QC</div>}
                 <Button variant="outline" onClick={() => setSelectedId(null)}>Close</Button>
               </SheetFooter>
             </>
           )}
         </SheetContent>
       </Sheet>
+      <Dialog open={stealDialogOpen && Boolean(selected)} onOpenChange={setStealDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Steal this finishing job?</DialogTitle>
+            <DialogDescription>This transfers finishing for {selected?.partNumber} ({selected?.quantity} parts) from {selected?.machinist} to you. The previous machinist will be notified when their account can be identified.</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setStealDialogOpen(false)}>Cancel</Button>
+            <Button variant="destructive" disabled={bulkBusy || !selected || !isStealable(selected, userName)} onClick={() => selected && mutation.mutate({ id: selected.id, patch: { action: "steal", confirmed: true } })}>
+              {mutation.isPending && <LoaderCircle className="animate-spin" />} Yes, steal finishing job
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }

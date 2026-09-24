@@ -18,7 +18,9 @@ const TESSELLATION = {
 };
 
 interface PreviewSource {
-  attachment_id: number;
+  /** Exactly one identifies the source: a synced attachment or an admin replacement. */
+  attachment_id?: number;
+  override_id?: number;
   part_id: number;
   original_name: string;
   byte_size: number;
@@ -51,7 +53,7 @@ function parseSources(value: unknown): PreviewSource[] {
   return value.map((item, index) => {
     if (!item || typeof item !== "object") throw new Error(`Invalid preview source ${index + 1}`);
     const source = item as Record<string, unknown>;
-    if (!Number.isSafeInteger(source.attachment_id) || !Number.isSafeInteger(source.part_id)
+    if (Number.isSafeInteger(source.attachment_id) === Number.isSafeInteger(source.override_id) || !Number.isSafeInteger(source.part_id)
       || typeof source.original_name !== "string" || !source.original_name
       || !Number.isSafeInteger(source.byte_size) || Number(source.byte_size) <= 0
       || !isHash(source.sha256) || source.storage_bucket !== BUCKET
@@ -90,6 +92,8 @@ function retryDelay(attempt: number) {
 const apply = process.argv.includes("--apply");
 const force = process.argv.includes("--force");
 const missingOnly = process.argv.includes("--missing-only");
+// Replacement STEPs uploaded by admins get their own previews; this skips the synced catalog.
+const overridesOnly = process.argv.includes("--overrides-only");
 if (missingOnly && force) throw new Error("--missing-only cannot be combined with --force");
 const limitArgument = process.argv.find((argument) => argument.startsWith("--limit="));
 const limit = limitArgument ? Number(limitArgument.slice("--limit=".length)) : Number.POSITIVE_INFINITY;
@@ -137,9 +141,13 @@ const { data: originalManifest, error: originalManifestError } = missingOnly
   ? await supabase.rpc("manufacturing_preview_manifest")
   : { data: [], error: null };
 if (originalManifestError || !Array.isArray(originalManifest)) throw new Error("Unable to snapshot existing preview metadata");
-const sources = parseSources(sourceData).filter((source) => !missingOnly
-  || inventory!.some((part) => part.id === source.part_id && !part.has_preview)).slice(0, limit);
-console.log(`Selected ${sources.length} STEP sources${missingOnly ? " without existing previews" : ""}`);
+const { data: overrideData, error: overrideError } = await supabase.rpc("manufacturing_override_step_preview_sources");
+if (overrideError) throw new Error(`Unable to load replacement STEP preview sources: ${overrideError.message}`);
+const syncedSources = overridesOnly ? [] : parseSources(sourceData).filter((source) => !missingOnly
+  || inventory!.some((part) => part.id === source.part_id && !part.has_preview));
+const overrideSources = parseSources(overrideData).filter((source) => !missingOnly || !currentPreviewMetadata(source));
+const sources = [...syncedSources, ...overrideSources].slice(0, limit);
+console.log(`Selected ${sources.length} STEP sources (${overrideSources.length} replacements)${missingOnly ? " without existing previews" : ""}`);
 const occt = await createOpenCascadeImporter();
 let generated = 0;
 let skipped = 0;
@@ -205,13 +213,15 @@ for (const [index, source] of sources.entries()) {
   inspectGlb(verifiedBytes);
 
   // Recheck after conversion/upload so a preview added during this run is preserved.
-  if (missingOnly && !(await previewInventory()).some((part) => part.id === source.part_id && !part.has_preview)) {
+  if (missingOnly && source.attachment_id !== undefined
+    && !(await previewInventory()).some((part) => part.id === source.part_id && !part.has_preview)) {
     skipped += 1;
     console.log(`[${index + 1}/${sources.length}] Existing preview preserved: ${source.original_name}`);
     continue;
   }
-  const { error: registerError } = await supabase.rpc("manufacturing_register_part_preview", {
-    p_source_attachment_id: source.attachment_id,
+  const { error: registerError } = await supabase.rpc(
+    source.override_id === undefined ? "manufacturing_register_part_preview" : "manufacturing_register_override_preview", {
+    ...(source.override_id === undefined ? { p_source_attachment_id: source.attachment_id } : { p_override_id: source.override_id }),
     p_source_sha256: source.sha256,
     p_generator: GENERATOR,
     p_generator_version: GENERATOR_VERSION,
@@ -246,6 +256,7 @@ console.log(JSON.stringify({
   skipped,
   generated_bytes: totalBytes,
   registered_previews: manifest.length,
+  replacement_sources: overrideSources.length,
   bucket: BUCKET,
   public: false,
 }, null, 2));

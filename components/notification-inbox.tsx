@@ -144,7 +144,7 @@ export function NotificationInbox({ userId }: { userId: string | null }) {
         {current && (
           <>
             <DialogHeader>
-              <div className="mb-1 grid size-10 place-items-center rounded-full bg-amber-100 text-amber-800"><BellRing className="size-5" /></div>
+              <div className="mb-1 grid size-10 place-items-center rounded-full bg-amber-100 text-amber-800 dark:bg-amber-400/15 dark:text-amber-300"><BellRing className="size-5" /></div>
               <DialogTitle>{current.title}</DialogTitle>
               <DialogDescription>{current.message}</DialogDescription>
             </DialogHeader>

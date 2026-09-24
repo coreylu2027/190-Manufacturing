@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { projectFinishing, projectOperations } from "./projections.ts";
+import { projectFinishing, projectOperations, projectProduction } from "./projections.ts";
 
 const requirement = {
   id: 2,
@@ -33,6 +33,23 @@ const operation = {
   "Active in Routing": true,
 };
 const part = { id: 3, Material: "Aluminum" };
+test("production stays pending until required powder coating completes, including post-finishing inserts", () => {
+  const coatedRequirement = { ...requirement, Finishing: { value: "Black" }, "QC Outcome": { value: "Passed" } };
+  const completedOperation = { ...operation, Status: { value: "Complete" } };
+  const [pendingQc] = projectOperations([completedOperation], [coatedRequirement], [part]);
+  assert.equal(projectProduction([pendingQc])[0].status, "QC Pending");
+  const passed = { ...pendingQc, effectiveQcResult: "passed" as const };
+  assert.equal(projectProduction([passed])[0].status, "Finishing Pending");
+  assert.equal(projectProduction([{ ...passed, status: "In Progress" }])[0].status, "In Progress");
+  const inserts = { ...passed, id: 5, machine: "Threaded Insert", status: "Planned" as const };
+  assert.equal(projectProduction([passed, inserts])[0].status, "Finishing Pending");
+
+  const finished = projectOperations([completedOperation], [{ ...coatedRequirement, Status: { value: "Complete" } }], [part])
+    .map(row => ({ ...row, effectiveQcResult: "passed" as const }));
+  assert.equal(projectProduction(finished)[0].status, "Complete");
+  assert.equal(projectProduction([...finished, { ...inserts, finishingComplete: true, status: "Ready" }])[0].status, "Ready");
+  assert.equal(projectProduction([{ ...passed, finishingRequired: false }])[0].status, "Complete");
+});
 const finishing = {
   id: 4,
   "Production Key": "root|part",
@@ -151,4 +168,33 @@ test("requirement projections include independent location and lifecycle details
   assert.equal(projectProduction(completed.map(row => ({ ...row, status: "In Progress" as const })))[0].status, "In Progress");
   assert.equal(projectProduction(completed.map(row => ({ ...row, workType: "CAM" as const })))[0].status, "Complete");
   assert.notEqual(projectProduction(completed.map(row => ({ ...row, effectiveQcResult: "failed" as const })))[0].status, "QC Pending");
+});
+
+test("off-the-shelf requirements keep their retired routes visible with an Off the Shelf production status", () => {
+  const bought = { ...requirement, "Off The Shelf": true, "Active in BOM": true };
+  const [op] = projectOperations([{ ...operation, "Active in Routing": false }], [bought], [part]);
+  assert.equal(op.offTheShelf, true);
+  assert.equal(op.activeInRouting, false);
+  assert.equal(projectProduction([op])[0].status, "Off the Shelf");
+  assert.equal(projectOperations([{ ...operation, "Active in Routing": false }], [{ ...requirement, "Active in BOM": true }], [part]).length, 0);
+});
+
+test("imported subassembly parts report the document of the root assembly they were synced through", () => {
+  const assemblies = [{ id: 10, "Assembly Number": "A-ROOT" }, { id: 11, "Assembly Number": "A-ROLLER" }, { id: 12, "Assembly Number": "A-OTHER" }];
+  const row = (id: number, assembly: number, document: string, extra: Record<string, unknown> = {}) => ({
+    ...requirement, id, Assembly: [{ id: assembly }], "Source Root": assembly === 12 ? "A-OTHER" : "A-ROOT",
+    "Source Document": document, "Active in BOM": true, ...extra,
+  });
+  const requirements = [
+    row(20, 10, "A-26C-0004"), row(21, 10, "A-26C-0004"), row(22, 10, "Imported bracket"),
+    row(23, 10, "Retired document", { Obsolete: true }), row(24, 10, "Retired document", { Obsolete: true }),
+    row(25, 11, "Configurable Roller"),
+    // A root whose only direct part is inactive still resolves.
+    row(26, 12, "A-26C-0009", { "Active in BOM": false }),
+  ];
+  const operations = requirements.map((item) => ({ ...operation, id: item.id, Operation: `op-${item.id}`, "Production Requirement": [{ id: item.id }] }));
+  const byRequirement = new Map(projectOperations(operations, requirements, [part], [], assemblies).map((op) => [op.requirementId, op]));
+  assert.deepEqual([byRequirement.get(25)?.documentName, byRequirement.get(25)?.syncedFromDocument], ["Configurable Roller", "A-26C-0004"]);
+  assert.equal(byRequirement.get(22)?.syncedFromDocument, "A-26C-0004");
+  assert.equal(byRequirement.get(26)?.syncedFromDocument, "A-26C-0009");
 });

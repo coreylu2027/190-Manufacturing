@@ -45,6 +45,8 @@ export interface WorkflowContext {
   qcPassed: boolean;
   finishingRequired: boolean;
   finishingComplete: boolean;
+  /** See `isPostQcOperation`; omitted or null keeps the default QC point. */
+  qcAfterOperation?: number | null;
 }
 
 const DOWNSTREAM_REQUIREMENT_STATUSES = new Set(["Ready for Finishing", "Complete"]);
@@ -113,6 +115,18 @@ export function requiresPassedQc(machine: string) {
   return (POST_QC_MACHINES as readonly string[]).some((name) => name.toLocaleLowerCase() === machine.trim().toLocaleLowerCase());
 }
 
+export const QC_POINT_OPERATIONS = [1, 2, 3, 4] as const;
+
+/**
+ * Whether a manufacturing operation waits for the QC pass (and any finishing).
+ * By default (`qcAfterOperation` null) QC and finishing come after every
+ * operation except threaded inserts. A requirement can instead place them after
+ * OP N: OP1..OPN are inspected, and later operations follow QC and finishing.
+ */
+export function isPostQcOperation(operation: { machine: string; operationNumber: string }, qcAfterOperation: number | null | undefined) {
+  return qcAfterOperation == null ? requiresPassedQc(operation.machine) : operationIndex(operation.operationNumber) > qcAfterOperation;
+}
+
 /** The next unfinished task in route order, respecting QC and finishing gates. */
 export function nextWorkflowAction(operations: readonly WorkflowOperation[], context: WorkflowContext): {
   label: string;
@@ -127,11 +141,11 @@ export function nextWorkflowAction(operations: readonly WorkflowOperation[], con
     const next = cam ?? operation;
     return { label: `${cam ? "CAM for " : ""}${operation.operationNumber} · ${operation.machine}`, operationId: next.id };
   };
-  const preQc = manufacturing.find((operation) => !requiresPassedQc(operation.machine) && operation.status !== "Complete");
+  const preQc = manufacturing.find((operation) => !isPostQcOperation(operation, context.qcAfterOperation) && operation.status !== "Complete");
   if (preQc) return nextOperation(preQc);
   if (!context.qcPassed) return { label: "QC" };
   if (context.finishingRequired && !context.finishingComplete) return { label: "Finishing" };
-  const postQc = manufacturing.find((operation) => requiresPassedQc(operation.machine) && operation.status !== "Complete");
+  const postQc = manufacturing.find((operation) => isPostQcOperation(operation, context.qcAfterOperation) && operation.status !== "Complete");
   if (postQc) return nextOperation(postQc);
   return { label: "All work complete" };
 }
@@ -173,8 +187,8 @@ export function planRequirementWorkflow(
   const manufacturing = active
     .filter((operation) => operation.workType === "Manufacturing")
     .sort((a, b) => operationIndex(a.operationNumber) - operationIndex(b.operationNumber));
-  const preQcManufacturing = manufacturing.filter((operation) => !requiresPassedQc(operation.machine));
-  const postQcManufacturing = manufacturing.filter((operation) => requiresPassedQc(operation.machine));
+  const preQcManufacturing = manufacturing.filter((operation) => !isPostQcOperation(operation, context?.qcAfterOperation));
+  const postQcManufacturing = manufacturing.filter((operation) => isPostQcOperation(operation, context?.qcAfterOperation));
   const camTasks = active.filter((operation) => operation.workType === "CAM");
   const operationPatches: WorkflowStatusPatch[] = [];
   const projectedStatuses = new Map(active.map((operation) => [operation.id, operation.status]));

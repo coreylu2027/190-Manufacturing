@@ -2,7 +2,7 @@ import { requirementStatus } from "../production-status.ts";
 import { projectObsoletion } from "../obsoletion.ts";
 import { requirementIdentity } from "./identity.ts";
 // Pure projections from normalized manufacturing rows and the Supabase attachment catalog.
-import { deduplicateOperations, requiresPassedQc } from "../manufacturing-workflow.ts";
+import { deduplicateOperations, isPostQcOperation } from "../manufacturing-workflow.ts";
 import type { ManufacturingOperation, FabricationJob, OperationWorkType, OperationStatus, OperationAllocation } from "../types.ts";
 import { projectQualityControl, qualityMetadataByRequirement, type QualityReviewRow } from "../quality-control.ts";
 import { isStorageLocation } from "../storage-locations.ts";
@@ -48,6 +48,42 @@ function sourceDocumentName(requirement: SourceRow | undefined): string | null {
   if (!requirement) return null;
   return textValue(requirement["Source Document"])
     || null;
+}
+
+/**
+ * The Onshape document each root assembly lives in, keyed by root assembly
+ * number. The sync records only the root (Source Root). The root assembly's own
+ * parts report its document; parts of imported subassemblies (a configurable
+ * roller, say) report the subassembly's document instead. So the root's
+ * document is the most common one among its direct parts, preferring active ones.
+ */
+function syncedFromDocuments(requirementRows: SourceRow[], assemblies: Map<number, SourceRow>) {
+  const tallies = [new Map<string, Map<string, number>>(), new Map<string, Map<string, number>>()];
+  for (const requirement of requirementRows) {
+    const root = textValue(requirement["Source Root"]);
+    const document = sourceDocumentName(requirement);
+    const assembly = assemblies.get(linkedId(requirement.Assembly) ?? -1);
+    if (!root || !document || String(assembly?.["Assembly Number"] ?? "").trim() !== root) continue;
+    const current = requirement["Active in BOM"] !== false && requirement.Obsolete !== true;
+    for (const tally of current ? tallies : tallies.slice(1)) {
+      const documents = tally.get(root) ?? new Map<string, number>();
+      documents.set(document, (documents.get(document) ?? 0) + 1);
+      tally.set(root, documents);
+    }
+  }
+  const result = new Map<string, string>();
+  for (const tally of tallies) {
+    for (const [root, documents] of tally) {
+      if (result.has(root)) continue;
+      result.set(root, [...documents].sort(([left, a], [right, b]) => b - a || left.localeCompare(right))[0][0]);
+    }
+  }
+  return result;
+}
+
+function qcPoint(requirement: SourceRow | undefined): number | null {
+  const value = requirement?.["QC After Operation"];
+  return value === null || value === undefined || value === "" ? null : Number(value);
 }
 
 function revisionName(requirement: SourceRow | undefined, part: SourceRow | undefined): string | null {
@@ -123,6 +159,7 @@ export function projectOperations(operationRows: SourceRow[], requirementRows: S
   const parts = new Map(partRows.map((row) => [row.id, row]));
   const assemblies = new Map(assemblyRows.map((row) => [row.id, row]));
   const files = attachmentIndex(attachments);
+  const rootDocuments = syncedFromDocuments(requirementRows, assemblies);
 
   const parsedOperations = operationRows.map((row) => {
     const requirementId = linkedId(row["Production Requirement"]);
@@ -141,7 +178,8 @@ export function projectOperations(operationRows: SourceRow[], requirementRows: S
     const finishingComplete = !finishingRequired
       || selectValue(requirement?.["QC Outcome"]) === "Passed"
         && !["Ready for QC", "Ready for Finishing"].includes(requirementStatus);
-    const waitingForQcOrFinishing = requiresPassedQc(machine)
+    const qcAfterOperation = qcPoint(requirement);
+    const waitingForQcOrFinishing = operationWorkType(row) === "Manufacturing" && isPostQcOperation({ machine, operationNumber }, qcAfterOperation)
       && (selectValue(requirement?.["QC Outcome"]) !== "Passed"
         || Boolean(finishing && finishing !== "None" && selectValue(requirement?.Status) === "Ready for Finishing"));
     const status = waitingForQcOrFinishing && ["Planned", "Ready"].includes(storedStatus)
@@ -162,6 +200,8 @@ export function projectOperations(operationRows: SourceRow[], requirementRows: S
       ...parsed,
       revision: revisionName(requirement, part),
       documentName: sourceDocumentName(requirement),
+      syncedFromDocument: rootDocuments.get(textValue(requirement?.["Source Root"])) ?? null,
+      qcAfterOperation,
       sourceRoot: textValue(requirement?.["Source Root"]) || null,
       sourceAssemblyRevision: textValue(requirement?.["Source Assembly Revision"]) || null,
       requiredPartRevision: textValue(requirement?.["Required Part Revision"]) || null,
@@ -210,7 +250,7 @@ export function projectOperations(operationRows: SourceRow[], requirementRows: S
 
   const activeRequirements = new Set(parsedOperations.filter((operation) => operation.activeInRouting).map((operation) => operation.requirementId));
   const canonicalOperations = deduplicateOperations(parsedOperations.filter((operation) => operation.activeInRouting
-    || !activeRequirements.has(operation.requirementId) && (operation.obsolete || operation.obsoletionVersion > 0)));
+    || !activeRequirements.has(operation.requirementId) && (operation.obsolete || operation.obsoletionVersion > 0 || operation.offTheShelf)));
   const camByTarget = new Map(canonicalOperations
     .filter((operation) => operation.workType === "CAM" && operation.requirementId)
     .map((operation) => [`${operation.requirementId}|${operation.operationNumber}`, operation]));
@@ -246,7 +286,8 @@ export function projectFinishing(
   const requirementsWithPostQcWork = new Set(operationRows.filter((row) =>
     Boolean(row["Active in Routing"])
     && operationWorkType(row) === "Manufacturing"
-    && requiresPassedQc(selectValue(row.Machine)),
+    && isPostQcOperation({ machine: selectValue(row.Machine), operationNumber: selectValue(row["Operation Number"], "OP1") },
+      qcPoint(requirements.get(linkedId(row["Production Requirement"]) ?? -1))),
   ).flatMap((row) => {
     const requirementId = linkedId(row["Production Requirement"]);
     return requirementId ? [requirementId] : [];

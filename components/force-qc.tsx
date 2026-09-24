@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import type { ManufacturingOperation, OperationsResponse } from "@/lib/types";
 import type { createWritePlan } from "@/lib/manufacturing/write-plan";
-import { requiresPassedQc } from "@/lib/manufacturing-workflow";
+import { isPostQcOperation } from "@/lib/manufacturing-workflow";
 
 type Preview = Awaited<ReturnType<ReturnType<typeof createWritePlan>["previewForceQuality"]>> & { token: string };
 type ForceQcButtonProps = Pick<ManufacturingOperation, "storageLocation" | "locationUpdatedBy" | "locationUpdatedAt"> & {
@@ -20,7 +20,7 @@ type ForceQcButtonProps = Pick<ManufacturingOperation, "storageLocation" | "loca
 
 export function hasUnfinishedQcPrerequisites(operations: ManufacturingOperation[]) {
   const active = operations.filter(op => op.activeInRouting);
-  const preQc = active.filter(op => op.workType === "Manufacturing" && !requiresPassedQc(op.machine));
+  const preQc = active.filter(op => op.workType === "Manufacturing" && !isPostQcOperation(op, op.qcAfterOperation));
   return preQc.length > 0 && active.some(op => op.status !== "Complete" && (preQc.includes(op)
     || op.workType === "CAM" && preQc.some(target => target.operationNumber === op.operationNumber)));
 }
