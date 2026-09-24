@@ -400,6 +400,11 @@ export function QualityControlDashboard() {
 
   const bulkSelected = items.filter((item) => bulkIds.includes(item.requirementId));
   const bulkEligible = bulkSelected.filter(canBulkPass);
+  // Refreshes can mark submitted requirements passed before the batch finishes.
+  // Keep the dialog tied to the submitted batch until its results are reported.
+  const bulkDialogReviews = bulkReviewMutation.isPending
+    ? bulkReviewMutation.variables ?? []
+    : bulkEligible.map((item) => ({ item, notes: draftNotes[item.requirementId] ?? item.notes }));
   const visibleBulkIds = filtered.filter(canBulkPass).map((item) => item.requirementId);
   const bulkBusy = reviewIsPending || undoReviewIsPending || notesArePending;
 
@@ -638,17 +643,17 @@ export function QualityControlDashboard() {
       <Dialog open={bulkDialogOpen} onOpenChange={(open) => { if (!bulkReviewMutation.isPending) setBulkDialogOpen(open); }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Pass QC for {bulkEligible.length} requirements?</DialogTitle>
-            <DialogDescription>Confirm that you inspected all quantities of each listed part. Each requirement will pass QC using its own inspection notes.</DialogDescription>
+            <DialogTitle>{bulkReviewMutation.isPending ? `Passing QC for ${bulkDialogReviews.length} requirements…` : `Pass QC for ${bulkDialogReviews.length} requirements?`}</DialogTitle>
+            <DialogDescription>{bulkReviewMutation.isPending ? "Recording QC passes. Results will appear when the batch finishes." : "Confirm that you inspected all quantities of each listed part. Each requirement will pass QC using its own inspection notes."}</DialogDescription>
           </DialogHeader>
           <ul className="max-h-60 space-y-2 overflow-y-auto text-sm">
-            {bulkEligible.map((item) => <li key={item.requirementId}><CopyPartNumber partNumber={item.operations[0].partNumber} /> · Qty {item.operations[0].quantity}<p className="whitespace-pre-wrap text-xs text-muted-foreground">{(draftNotes[item.requirementId] ?? item.notes) || "No inspection notes"}</p></li>)}
+            {bulkDialogReviews.map(({ item, notes }) => <li key={item.requirementId}><CopyPartNumber partNumber={item.operations[0].partNumber} /> · Qty {item.operations[0].quantity}<p className="whitespace-pre-wrap text-xs text-muted-foreground">{notes || "No inspection notes"}</p></li>)}
           </ul>
-          {bulkSelected.some((item) => !filtered.some((row) => row.requirementId === item.requirementId)) && <p className="text-sm text-amber-700 dark:text-amber-300">Includes selected parts hidden by the current filters.</p>}
-          {bulkSelected.length > bulkEligible.length && <p className="text-sm text-amber-700 dark:text-amber-300">{bulkSelected.length - bulkEligible.length} selected requirements are no longer eligible and will be skipped.</p>}
+          {!bulkReviewMutation.isPending && bulkSelected.some((item) => !filtered.some((row) => row.requirementId === item.requirementId)) && <p className="text-sm text-amber-700 dark:text-amber-300">Includes selected parts hidden by the current filters.</p>}
+          {!bulkReviewMutation.isPending && bulkSelected.length > bulkEligible.length && <p className="text-sm text-amber-700 dark:text-amber-300">{bulkSelected.length - bulkEligible.length} selected requirements are no longer eligible and will be skipped.</p>}
           <DialogFooter>
             <Button variant="outline" disabled={bulkReviewMutation.isPending} onClick={() => setBulkDialogOpen(false)}>Cancel</Button>
-            <Button disabled={bulkBusy || !bulkEligible.length} onClick={() => bulkReviewMutation.mutate(bulkEligible.map((item) => ({ item, notes: draftNotes[item.requirementId] ?? item.notes })))}>{bulkReviewMutation.isPending ? <LoaderCircle className="animate-spin" /> : <Check />}Pass QC</Button>
+            <Button disabled={bulkBusy || !bulkEligible.length} onClick={() => bulkReviewMutation.mutate(bulkDialogReviews)}>{bulkReviewMutation.isPending ? <><LoaderCircle className="animate-spin" />Passing QC…</> : <><Check />Pass QC</>}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
