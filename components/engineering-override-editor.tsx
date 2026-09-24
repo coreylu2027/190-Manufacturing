@@ -17,10 +17,13 @@ import {
   type EngineeringOverrideFields, type EngineeringOverrideRow, type EngineeringOverrideState, type FinishColor, type OverrideField,
   type OverrideFileKind, type PassedQcQuantityMode, type Routing,
 } from "@/lib/engineering-overrides";
+import { QC_POINT_OPERATIONS, isPostQcOperation } from "@/lib/manufacturing-workflow";
 import { createClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
 
 const NO_MACHINE = "__none";
+const DEFAULT_QC_POINT = "default";
+const DEFAULT_QC_POINT_LABEL = "After all operations except threaded inserts";
 const MANUFACTURING_QUERY_KEYS = ["operations", "cam", "fabrication", "qc", "admin", "engineering-corrections"] as const;
 const FILE_KINDS: Array<{ kind: OverrideFileKind; label: string; accept: string; icon: typeof FileText }> = [
   { kind: "drawing-pdf", label: "Drawing PDF", accept: ".pdf,application/pdf", icon: FileText },
@@ -109,6 +112,8 @@ function PassedQcQuantityChoice({ from, to, onRobot, value, onChange, disabled }
 interface Draft {
   quantity: string; name: string; description: string; material: string; finishing: FinishColor; routing: Routing;
   offTheShelf: boolean; reason: string;
+  /** QC and finishing happen after this operation; null is the default. */
+  qcAfterOperation: number | null;
   /** Chosen when the quantity changes after QC passed. */
   passedQcQuantity: PassedQcQuantityMode | null;
 }
@@ -123,6 +128,7 @@ function draftFrom(state: EngineeringOverrideState): Draft {
     finishing: normalizeFinishColor(requirement.finishing),
     routing: ROUTING_FIELDS.map((field) => requirement[field] || null) as Routing,
     offTheShelf: requirement.off_the_shelf,
+    qcAfterOperation: requirement.qc_after_operation ?? null,
     reason: "",
     passedQcQuantity: null,
   };
@@ -141,7 +147,20 @@ function changedFields(state: EngineeringOverrideState, draft: Draft): Engineeri
   if (draft.finishing !== initial.finishing) fields.finishing = { value: draft.finishing };
   if (JSON.stringify(draft.routing) !== JSON.stringify(initial.routing)) fields.routing = { value: draft.routing };
   if (draft.offTheShelf !== initial.offTheShelf) fields.offTheShelf = { value: draft.offTheShelf };
+  if (draft.qcAfterOperation !== initial.qcAfterOperation) fields.qcAfterOperation = { value: draft.qcAfterOperation };
   return fields;
+}
+
+/** "OP1 Haas CNC → QC → Finishing → OP2 Tapping" for the draft routing and QC point. */
+function workflowOrder(routing: Routing, qcAfterOperation: number | null, finishing: FinishColor) {
+  const stages = routing.flatMap((machine, index) => machine ? [{ machine, operationNumber: `OP${index + 1}` }] : []);
+  const label = (stage: (typeof stages)[number]) => `${stage.operationNumber} ${stage.machine}`;
+  return [
+    ...stages.filter((stage) => !isPostQcOperation(stage, qcAfterOperation)).map(label),
+    "QC",
+    ...(finishing === "None" ? [] : [`Finishing (${finishing})`]),
+    ...stages.filter((stage) => isPostQcOperation(stage, qcAfterOperation)).map(label),
+  ].join(" → ");
 }
 
 /** Admin-only summary and editor for correcting data delivered by the Onshape sync. */
@@ -155,6 +174,7 @@ export function EngineeringOverrides({ requirementId, partNumber, obsolete, acti
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<Draft | null>(null);
+  const [draftState, setDraftState] = useState<EngineeringOverrideState | null>(null);
   const [error, setError] = useState("");
   const [uploading, setUploading] = useState<OverrideFileKind | null>(null);
   const fileInputs = useRef<Partial<Record<OverrideFileKind, HTMLInputElement | null>>>({});
@@ -163,7 +183,16 @@ export function EngineeringOverrides({ requirementId, partNumber, obsolete, acti
     queryKey,
     queryFn: () => requestJson<EngineeringOverrideState>(`/api/requirements/${requirementId}/engineering`),
   });
-  const state = query.data;
+  // Keep the values and CAS token the user actually opened together. A refetch
+  // must not silently turn untouched draft fields into edits against newer data.
+  const state = open ? draftState : query.data;
+  const draftIsStale = Boolean(open && draftState && query.data && draftState.token !== query.data.token);
+
+  function loadDraft(latest: EngineeringOverrideState) {
+    setDraftState(latest);
+    setDraft(draftFrom(latest));
+    setError("");
+  }
 
   async function refresh() {
     await Promise.all([
@@ -234,13 +263,18 @@ export function EngineeringOverrides({ requirementId, partNumber, obsolete, acti
   const adjustments = state ? [
     ...(state.requirement?.off_the_shelf ? [{ key: "off_the_shelf", label: "Off-the-shelf", value: "Bought, not manufactured",
       synced: "Manufactured", by: state.requirement.off_the_shelf_changed_by ?? "Admin" }] : []),
+    ...(state.requirement?.qc_after_operation != null ? [{ key: "qc_after_operation", label: CORRECTION_FIELD_LABELS.qc_after_operation,
+      value: `After OP${state.requirement.qc_after_operation}`, synced: DEFAULT_QC_POINT_LABEL, by: "Admin" }] : []),
     ...state.overrides.map((row) => ({ key: row.field, label: CORRECTION_FIELD_LABELS[row.field], value: display(row.value), synced: display(row.synced_value), by: row.updated_by_name })),
     ...state.file_overrides.map((row) => ({ key: row.kind, label: CORRECTION_FIELD_LABELS[row.kind], value: row.name,
       synced: state.files.find((file) => file.kind === row.kind)?.name ?? "none", by: row.updated_by_name })),
   ] : [];
   const requirementEditable = !obsolete && activeInBom;
   const busy = save.isPending || uploading !== null;
-  const routingProblem = draft ? routingError(draft.routing) : null;
+  const routingProblem = draft && state && changedFields(state, draft).routing ? routingError(draft.routing) : null;
+  const routedStages = draft ? draft.routing.filter(Boolean).length : 0;
+  const qcPassed = state?.requirement?.qc_outcome === "Passed";
+  const qcPointProblem = draft?.qcAfterOperation != null && draft.qcAfterOperation > routedStages ? `The routing has no OP${draft.qcAfterOperation}` : null;
   const quantityProblem = draft && !/^\d+$/.test(draft.quantity.trim()) ? "Enter a whole number" : null;
   const nameProblem = draft && !draft.name.trim() ? "Enter a part name" : null;
   const dirty = Boolean(state && draft && Object.keys(changedFields(state, draft)).length);
@@ -259,7 +293,7 @@ export function EngineeringOverrides({ requirementId, partNumber, obsolete, acti
           <h3 className="text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Onshape data corrections</h3>
           {!compact && <p className="mt-1 text-xs text-muted-foreground">Adjustments persist across syncs until reverted or until Onshape matches them.</p>}
         </div>
-        <Button size="sm" variant="outline" disabled={!state?.requirement} onClick={() => { if (state) setDraft(draftFrom(state)); setError(""); setOpen(true); }}>
+        <Button size="sm" variant="outline" disabled={!state?.requirement} onClick={() => { if (state) loadDraft(state); setOpen(true); }}>
           <PencilLine /> Correct Onshape data
         </Button>
       </div>
@@ -371,6 +405,27 @@ export function EngineeringOverrides({ requirementId, partNumber, obsolete, acti
                   ))}
                 </div>
                 {routingProblem && <p className="mt-2 text-xs text-destructive">{routingProblem}</p>}
+                <label className="mt-4 block text-sm">
+                  <span className="font-semibold">QC and finishing happen</span>
+                  <Select value={draft.qcAfterOperation === null ? DEFAULT_QC_POINT : String(draft.qcAfterOperation)}
+                    onValueChange={(value) => setDraft({ ...draft, qcAfterOperation: !value || value === DEFAULT_QC_POINT ? null : Number(value) })}
+                    disabled={busy || !routingEditable || qcPassed}>
+                    <SelectTrigger aria-label="When QC and finishing happen" className="mt-1.5 h-9 w-full bg-background">
+                      <SelectValue>{draft.qcAfterOperation === null ? DEFAULT_QC_POINT_LABEL : `After OP${draft.qcAfterOperation}`}</SelectValue>
+                    </SelectTrigger>
+                    <SelectContent align="start">
+                      <SelectItem value={DEFAULT_QC_POINT}>{DEFAULT_QC_POINT_LABEL}</SelectItem>
+                      {QC_POINT_OPERATIONS.filter((operation) => operation <= routedStages || operation === draft.qcAfterOperation).map((operation) => (
+                        <SelectItem key={operation} value={String(operation)}>After OP{operation}{draft.routing[operation - 1] ? ` · ${draft.routing[operation - 1]}` : ""}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <span className="mt-1 block text-xs text-muted-foreground">
+                    {qcPassed ? "Undo the passed QC review to move QC. " : "Operations after this point wait for the QC pass and any finishing. "}
+                    Order: {workflowOrder(draft.routing, draft.qcAfterOperation, draft.finishing)}
+                  </span>
+                  {qcPointProblem && <span className="mt-1 block text-xs text-destructive">{qcPointProblem}</span>}
+                </label>
               </fieldset>
 
               <section>
@@ -408,11 +463,16 @@ export function EngineeringOverrides({ requirementId, partNumber, obsolete, acti
                   placeholder="e.g. BOM counts the left and right bracket twice" className={`${TEXTAREA_CLASS} min-h-20`} />
               </label>
               {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+              {draftIsStale && <div role="alert" className="rounded-lg border p-3 text-sm">
+                <p>Data changed since this editor opened. Reload the latest values before saving; this discards unsaved edits.</p>
+                <Button variant="outline" size="sm" className="mt-2" disabled={busy || query.isFetching}
+                  onClick={() => { if (query.data) loadDraft(query.data); }}>Reload latest values</Button>
+              </div>}
             </div>
           )}
           <DialogFooter>
             <Button variant="outline" disabled={busy} onClick={() => setOpen(false)}>Close</Button>
-            <Button disabled={busy || !dirty || Boolean(routingProblem) || Boolean(quantityProblem) || Boolean(nameProblem) || passedQcQuantityProblem} onClick={() => { setError(""); save.mutate(); }}>
+            <Button disabled={busy || draftIsStale || !dirty || Boolean(routingProblem) || Boolean(quantityProblem) || Boolean(nameProblem) || Boolean(qcPointProblem) || passedQcQuantityProblem} onClick={() => { setError(""); save.mutate(); }}>
               {save.isPending && <LoaderCircle className="animate-spin" />}Save corrections
             </Button>
           </DialogFooter>

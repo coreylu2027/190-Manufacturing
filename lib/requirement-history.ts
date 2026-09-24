@@ -133,6 +133,10 @@ function finishingLine(action: string) {
 function correctionLine(correction: Pick<HistoryCorrection, "field" | "action" | "value" | "syncedValue">) {
   const label = CORRECTION_FIELD_LABELS[correction.field] ?? correction.field;
   if (correction.field === "off_the_shelf") return correction.action === "set" ? "Marked off-the-shelf" : "Switched back to manufactured";
+  if (correction.field === "qc_after_operation") {
+    return correction.action === "set" ? `Moved QC and finishing to after OP${display(correction.value)}`
+      : "Moved QC and finishing back to the default, after all operations except threaded inserts";
+  }
   if (correction.field === "drawing-pdf" || correction.field === "step") {
     const name = (correction.value as { name?: string } | null)?.name;
     return correction.action === "set" ? `${label} replaced with ${name ?? "a new file"}` : `Restored the Onshape ${label}`;

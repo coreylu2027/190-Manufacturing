@@ -2,7 +2,7 @@ import { requirementStatus } from "../production-status.ts";
 import { projectObsoletion } from "../obsoletion.ts";
 import { requirementIdentity } from "./identity.ts";
 // Pure projections from normalized manufacturing rows and the Supabase attachment catalog.
-import { deduplicateOperations, requiresPassedQc } from "../manufacturing-workflow.ts";
+import { deduplicateOperations, isPostQcOperation } from "../manufacturing-workflow.ts";
 import type { ManufacturingOperation, FabricationJob, OperationWorkType, OperationStatus, OperationAllocation } from "../types.ts";
 import { projectQualityControl, qualityMetadataByRequirement, type QualityReviewRow } from "../quality-control.ts";
 import { isStorageLocation } from "../storage-locations.ts";
@@ -79,6 +79,11 @@ function syncedFromDocuments(requirementRows: SourceRow[], assemblies: Map<numbe
     }
   }
   return result;
+}
+
+function qcPoint(requirement: SourceRow | undefined): number | null {
+  const value = requirement?.["QC After Operation"];
+  return value === null || value === undefined || value === "" ? null : Number(value);
 }
 
 function revisionName(requirement: SourceRow | undefined, part: SourceRow | undefined): string | null {
@@ -173,7 +178,8 @@ export function projectOperations(operationRows: SourceRow[], requirementRows: S
     const finishingComplete = !finishingRequired
       || selectValue(requirement?.["QC Outcome"]) === "Passed"
         && !["Ready for QC", "Ready for Finishing"].includes(requirementStatus);
-    const waitingForQcOrFinishing = requiresPassedQc(machine)
+    const qcAfterOperation = qcPoint(requirement);
+    const waitingForQcOrFinishing = operationWorkType(row) === "Manufacturing" && isPostQcOperation({ machine, operationNumber }, qcAfterOperation)
       && (selectValue(requirement?.["QC Outcome"]) !== "Passed"
         || Boolean(finishing && finishing !== "None" && selectValue(requirement?.Status) === "Ready for Finishing"));
     const status = waitingForQcOrFinishing && ["Planned", "Ready"].includes(storedStatus)
@@ -195,6 +201,7 @@ export function projectOperations(operationRows: SourceRow[], requirementRows: S
       revision: revisionName(requirement, part),
       documentName: sourceDocumentName(requirement),
       syncedFromDocument: rootDocuments.get(textValue(requirement?.["Source Root"])) ?? null,
+      qcAfterOperation,
       sourceRoot: textValue(requirement?.["Source Root"]) || null,
       sourceAssemblyRevision: textValue(requirement?.["Source Assembly Revision"]) || null,
       requiredPartRevision: textValue(requirement?.["Required Part Revision"]) || null,
@@ -279,7 +286,8 @@ export function projectFinishing(
   const requirementsWithPostQcWork = new Set(operationRows.filter((row) =>
     Boolean(row["Active in Routing"])
     && operationWorkType(row) === "Manufacturing"
-    && requiresPassedQc(selectValue(row.Machine)),
+    && isPostQcOperation({ machine: selectValue(row.Machine), operationNumber: selectValue(row["Operation Number"], "OP1") },
+      qcPoint(requirements.get(linkedId(row["Production Requirement"]) ?? -1))),
   ).flatMap((row) => {
     const requirementId = linkedId(row["Production Requirement"]);
     return requirementId ? [requirementId] : [];

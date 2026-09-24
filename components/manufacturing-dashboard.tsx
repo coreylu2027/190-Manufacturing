@@ -1095,6 +1095,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
             qcPassed: completed.effectiveQcResult === "passed",
             finishingRequired: completed.finishingRequired,
             finishingComplete: completed.finishingComplete,
+            qcAfterOperation: completed.qcAfterOperation,
           });
           toast.info(next.operationId === variables.id ? `Remaining work: ${next.label}` : `Next: ${next.label}`, {
             id: `next-action-${variables.id}`,

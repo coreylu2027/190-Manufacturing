@@ -96,6 +96,7 @@ export function createSupabaseManufacturingAdapter(config: AdapterConfig) {
             "Obsolete": row.obsolete ?? false,
             "Hidden": row.hidden ?? false,
             "Off The Shelf": row.off_the_shelf ?? false,
+            "QC After Operation": row.qc_after_operation ?? null,
             "Visibility Version": row.visibility_version ?? 0,
             "Obsoletion Version": row.obsoletion_version ?? 0,
             "Obsoletion Changed At": row.obsoletion_changed_at ?? null,

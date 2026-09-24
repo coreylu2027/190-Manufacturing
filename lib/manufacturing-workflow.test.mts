@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   deduplicateOperations,
+  isPostQcOperation,
   nextWorkflowAction,
   planRequirementWorkflow,
   targetMachineHasStarted,
@@ -210,6 +211,30 @@ test("threaded inserts remain planned until QC and finishing release them", () =
     qcPassed: true, finishingRequired: true, finishingComplete: true,
   });
   assert.equal(complete.requirementStatus, "Complete");
+});
+
+test("a configured QC point inspects OP1..OPN and holds later operations for QC and finishing", () => {
+  assert.equal(isPostQcOperation({ machine: "Threaded Insert", operationNumber: "OP3" }, null), true);
+  assert.equal(isPostQcOperation({ machine: "Tapping", operationNumber: "OP2" }, null), false);
+  assert.equal(isPostQcOperation({ machine: "Tapping", operationNumber: "OP2" }, 1), true);
+  assert.equal(isPostQcOperation({ machine: "Threaded Insert", operationNumber: "OP2" }, 2), false);
+
+  const rows = [
+    operation({ id: 1, operationNumber: "OP1", machine: "Haas CNC", status: "Complete" }),
+    operation({ id: 2, operationNumber: "OP2", machine: "Tapping", status: "Ready" }),
+    operation({ id: 3, operationNumber: "OP3", machine: "Threaded Insert", status: "Planned" }),
+  ];
+  const context = { qcPassed: false, finishingRequired: true, finishingComplete: false, qcAfterOperation: 1 };
+  const awaitingQc = planRequirementWorkflow(rows, "Ready for Manufacturing", context);
+  assert.equal(awaitingQc.requirementStatus, "Ready for QC");
+  assert.deepEqual(awaitingQc.operationPatches, [{ id: 2, status: "Planned" }]);
+  assert.equal(nextWorkflowAction(rows.map((row) => ({ ...row, status: row.id === 2 ? "Planned" : row.status })), context).label, "QC");
+
+  const planned = rows.map((row) => ({ ...row, status: row.id === 1 ? row.status : "Planned" as const }));
+  assert.equal(planRequirementWorkflow(planned, "Ready for QC", { ...context, qcPassed: true }).requirementStatus, "Ready for Finishing");
+  const released = planRequirementWorkflow(planned, "Ready for Manufacturing", { ...context, qcPassed: true, finishingComplete: true });
+  assert.equal(released.requirementStatus, "Ready for Manufacturing");
+  assert.deepEqual(released.operationPatches, [{ id: 2, status: "Ready" }]);
 });
 
 test("CAM actions require one task unit while the program path remains optional", () => {

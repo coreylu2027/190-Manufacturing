@@ -1,5 +1,5 @@
 import { createWritePlan } from "./write-plan.ts";
-import { deduplicateOperations, requiresPassedQc } from "../manufacturing-workflow.ts";
+import { deduplicateOperations, isPostQcOperation } from "../manufacturing-workflow.ts";
 import { createSupabaseManufacturingAdapter, supabaseApiHeaders, type AdapterConfig } from "./supabase-adapter.ts";
 import type { NormalizedRow } from "./model.ts";
 import type { FabricationAction, OperationPatch, OperationQuantityAction, QualityResult } from "../types.ts";
@@ -134,6 +134,13 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     requirement(state, requirementId);
     return { ...resolvePartContext(state.rows, requirementId), requirementId };
   }
+  /** A manufacturing operation that waits for its requirement's QC pass; CAM never does. */
+  function afterQc(state: WriteState, row: NormalizedRow) {
+    const qcAfter = state.rows.requirements.find((candidate) => candidate.id === row.requirement_id)?.qc_after_operation;
+    return row.work_type === "Manufacturing" && isPostQcOperation(
+      { machine: String(row.machine ?? ""), operationNumber: String(row.operation_number ?? "OP1") },
+      qcAfter == null ? null : Number(qcAfter));
+  }
   function assertEffectivePassedReview(
     state: WriteState,
     requirementId: number,
@@ -142,7 +149,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     const review = latestReview(state, requirementId);
     const manufacturingOperations = deduplicateOperations(state.rows.operations.filter((row) =>
       row.active_in_routing && row.work_type === "Manufacturing" && row.requirement_id === requirementId
-        && !requiresPassedQc(String(row.machine ?? "")),
+        && !afterQc(state, row),
     ).map((row) => ({
       id: row.id,
       operationKey: String(row.operation_key ?? ""),
@@ -210,8 +217,8 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
           }
           if (handoff.location === ROBOT_LOCATION) throw new ManufacturingWriteError("Move parts onto the robot separately after QC and finishing", 409);
         }
-        if (requiresPassedQc(String(row.machine ?? "")) && ["claim", "complete"].includes(action)) {
-          assertEffectivePassedReview(state, Number(row.requirement_id), "Threaded inserts require a current passed QC review");
+        if (afterQc(state, row) && ["claim", "complete"].includes(action)) {
+          assertEffectivePassedReview(state, Number(row.requirement_id), "Work after QC requires a current passed QC review");
         }
         const result = await plan.applyQuantityAction(id, action, quantity, actor, handoff);
         return { ...result, ...(handoff?.location === undefined ? {} : {
@@ -224,8 +231,8 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     stealOperationClaim(id: number, actor: Actor) {
       return transact(actor, "steal", async (plan, state) => {
         const row = operation(state, id);
-        if (requiresPassedQc(String(row.machine ?? ""))) {
-          assertEffectivePassedReview(state, Number(row.requirement_id), "Threaded inserts require a current passed QC review");
+        if (afterQc(state, row)) {
+          assertEffectivePassedReview(state, Number(row.requirement_id), "Work after QC requires a current passed QC review");
         }
         return plan.stealOperationClaim(id, actor);
       });
@@ -234,7 +241,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       return transact(actor, "patch_operation", async (plan, state) => {
         const row = operation(state, id);
         const requirement = state.rows.requirements.find(r => r.id === row.requirement_id);
-        if (requirement?.qc_outcome === "Passed" && !requiresPassedQc(String(row.machine ?? ""))) {
+        if (requirement?.qc_outcome === "Passed" && !afterQc(state, row)) {
           throw new ManufacturingWriteError("Undo the passed QC review before editing completed work", 409);
         }
         if (patch.status === "Complete" || patch.status === "In Progress" || row.status === "Complete" && patch.status !== undefined) {

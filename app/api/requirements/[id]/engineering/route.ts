@@ -25,6 +25,7 @@ const schema = z.object({
     finishing: edit(z.enum(FINISH_COLORS)).optional(),
     routing: edit(z.tuple([machine, machine, machine, machine])).optional(),
     offTheShelf: z.object({ value: z.boolean() }).strict().optional(),
+    qcAfterOperation: z.object({ value: z.number().int().min(1).max(4).nullable() }).strict().optional(),
   }).strict(),
 }).strict();
 

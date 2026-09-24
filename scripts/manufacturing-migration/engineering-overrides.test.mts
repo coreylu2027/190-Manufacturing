@@ -42,6 +42,7 @@ await install("supabase/migrations/20260919223625_hide_obsolete_requirements.sql
 await install("supabase/migrations/20260922190000_admin_engineering_overrides.sql");
 await install("supabase/migrations/20260923040000_passed_qc_quantity_corrections.sql");
 await install("supabase/migrations/20260923170000_requirement_history.sql");
+await install("supabase/migrations/20260924000000_configurable_qc_point.sql");
 
 const ADMIN = { id: "00000000-0000-4000-8000-000000000190", name: "Alex A." };
 const MACHINIST = "00000000-0000-4000-8000-000000000191";
@@ -207,6 +208,24 @@ test("routing corrections create CAM prerequisites, re-plan readiness, and survi
   assert.equal(rows.find((operation) => operation.work_type === "CAM")?.active_in_routing, false);
   assert.equal(rows.find((operation) => operation.operation_key === `${key}|OP3`)?.active_in_routing, false);
   assert.equal((await state(id)).overrides.length, 0);
+});
+
+test("routing edits and reverts cannot remove the last manufacturing operation", async () => {
+  const { id } = await requirement();
+  const before = await ops(id);
+  await assert.rejects(adapter.applyEngineeringOverrides(id, { routing: { value: [null, null, null, null] } },
+    (await state(id)).token, "", ADMIN), /Keep at least one operation/);
+  assert.deepEqual(await ops(id), before);
+
+  // Onshape can remove the original route while an administrator correction survives.
+  await adapter.applyEngineeringOverrides(id, { routing: { value: ["Lathe", null, null, null] } },
+    (await state(id)).token, "", ADMIN);
+  await sync(`update manufacturing.requirements set machine_op1=null, last_synced_at=clock_timestamp() where id=${id};
+    update manufacturing.operations set active_in_routing=false where requirement_id=${id};`);
+  await assert.rejects(adapter.applyEngineeringOverrides(id, { routing: { revert: true } },
+    (await state(id)).token, "", ADMIN), /Keep at least one operation/);
+  assert.equal((await ops(id))[0].active_in_routing, true);
+  assert.equal((await row("requirements", id)).machine_op1, "Lathe");
 });
 
 test("quantity changes protect claims and passed QC, and completed stages follow the new quantity", async () => {
@@ -534,4 +553,58 @@ test("requirement history lists shop writes, corrections, and QC reviews for onl
   assert.deepEqual(history.reviews.map((review) => [review.result, review.reviewer, review.notes]), [["failed", "Alex A.", "Burr on edge"]]);
   assert.equal(await adapter.readRequirementHistory(999_999), null);
   assert.equal((await sql<{ allowed: boolean }>("select has_function_privilege('authenticated','public.manufacturing_requirement_history(bigint,integer)','execute') allowed"))[0].allowed, false);
+});
+
+test("QC can move to after an earlier operation, re-planning readiness, and back to the default", async () => {
+  const { id, key } = await requirement({ quantity: 2, machines: ["Milling Machine", "Tapping", "Threaded Insert"] });
+  await sql(`update manufacturing.operations set status='Complete', completed_at=now(), completed_quantity=2, quantity_ledger=$2
+    where operation_key=$1`, [`${key}|OP1`, JSON.stringify([{ userId: MACHINIST, name: "Sam M.", claimed: 0, completed: 2 }])]);
+  await sql(`update manufacturing.operations set status='Ready' where operation_key=$1`, [`${key}|OP2`]);
+
+  await assert.rejects(adapter.applyEngineeringOverrides(id, { qcAfterOperation: { value: 4 } }, (await state(id)).token, "", ADMIN), /routing has no OP4/);
+  const moved = await adapter.applyEngineeringOverrides(id, { qcAfterOperation: { value: 1 } }, (await state(id)).token, "Inspect before tapping", ADMIN);
+  assert.deepEqual(moved.changes, [{ field: "QC and finishing", from: "After all operations except threaded inserts", to: "After OP1" }]);
+  assert.deepEqual([(await row("requirements", id)).status, (await row("requirements", id)).qc_after_operation], ["Ready for QC", 1]);
+  assert.deepEqual((await ops(id)).map((operation) => operation.status), ["Complete", "Planned", "Planned"]);
+  assert.equal((await state(id)).requirement?.qc_after_operation, 1);
+
+  const history = await adapter.readRequirementHistory(id);
+  assert.deepEqual(history?.writes[0].corrections.map((correction) => [correction.field, correction.action, correction.value, correction.reason]),
+    [["qc_after_operation", "set", 1, "Inspect before tapping"]]);
+
+  await adapter.applyEngineeringOverrides(id, { qcAfterOperation: { value: null } }, (await state(id)).token, "", ADMIN);
+  assert.deepEqual([(await row("requirements", id)).status, (await row("requirements", id)).qc_after_operation], ["Ready for Manufacturing", null]);
+  assert.deepEqual((await ops(id)).map((operation) => operation.status), ["Complete", "Ready", "Planned"]);
+  assert.deepEqual((await sql("select action from manufacturing.engineering_override_events where field='qc_after_operation' and row_id=$1 order by id", [id]))
+    .map((event) => event.action), ["set", "cleared"]);
+
+  await sql(`update manufacturing.operations set status='In Progress', claimed_quantity=1, quantity_ledger=$2 where operation_key=$1`,
+    [`${key}|OP2`, JSON.stringify([{ userId: MACHINIST, name: "Sam M.", claimed: 1, completed: 0 }])]);
+  await assert.rejects(adapter.applyEngineeringOverrides(id, { qcAfterOperation: { value: 1 } }, (await state(id)).token, "", ADMIN), /OP2 \(Tapping\) is claimed/);
+
+  const passed = await passedPart({ quantity: 1 });
+  await assert.rejects(adapter.applyEngineeringOverrides(passed.id, { qcAfterOperation: { value: 1 } }, (await state(passed.id)).token, "", ADMIN),
+    /Undo the passed QC review before changing when QC happens/);
+});
+
+test("the SQL QC point matches the app and drives routing initialization and approved-quantity rewrites", async () => {
+  const post = async (machine: string, operation: string, point: number | null) =>
+    (await sql<{ post: boolean }>("select manufacturing.is_post_qc_operation($1,$2,$3::smallint) post", [machine, operation, point]))[0].post;
+  assert.deepEqual([await post("Threaded Insert", "OP3", null), await post("Tapping", "OP2", null), await post("Tapping", "OP2", 1),
+    await post("Threaded Insert", "OP2", 2)], [true, false, true, false]);
+
+  // A new route whose OP1 is a threaded insert is only triageable once QC moves after OP1.
+  const [fresh] = await sql<{ id: number }>(`insert into manufacturing.requirements(production_key,part_id,assembly_id,source_root,
+      required_part_revision,source_assembly_revision,active_in_bom,required_quantity,finishing,machine_op1,qc_after_operation,last_synced_at)
+    values('ROOT|A|A-1|P-QC|default|v2',1,1,'ROOT','A','A',true,1,'None','Threaded Insert',1,now()) returning id`);
+  await sql(`insert into manufacturing.operations(operation_key,requirement_id,operation_number,machine,work_type,active_in_routing)
+    values('ROOT|A|A-1|P-QC|default|v2|OP1',$1,'OP1','Threaded Insert','Manufacturing',true)`, [fresh.id]);
+  await sql("select manufacturing.initialize_synced_routing()");
+  assert.deepEqual([(await ops(fresh.id))[0].status, (await row("requirements", fresh.id)).status], ["Ready", "Ready for Manufacturing"]);
+
+  // "QC approved" rewrites only the inspected operations.
+  const { id } = await passedPart({ quantity: 2, machines: ["Milling Machine", "Tapping"] });
+  await sql("update manufacturing.requirements set qc_after_operation=1 where id=$1", [id]);
+  await adapter.applyEngineeringOverrides(id, { quantity: { value: 3 }, passedQcQuantity: "approved" }, (await state(id)).token, "", ADMIN);
+  assert.deepEqual((await ops(id)).map((operation) => [operation.status, Number(operation.completed_quantity)]), [["Complete", 3], ["Ready", 2]]);
 });

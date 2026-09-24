@@ -9,7 +9,8 @@ Finishing detail panels. Correctable values:
 - required quantity (also updates the finishing job's quantity);
 - finishing color (None, Red, or Black), which creates, recolors, or retires the
   finishing job;
-- routing OP1–OP4, with automatic CAM tasks for Haas/Shop Sabre stages; and
+- routing OP1–OP4, with automatic CAM tasks for Haas/Shop Sabre stages;
+- **when QC and finishing happen** (see below); and
 - **off-the-shelf**: the part is bought, not made.
 
 Part details and files belong to the part, so they apply to every requirement
@@ -40,6 +41,28 @@ stamps with `last_synced_at`, which the current sync does. Failed syncs do not
 run the trigger. Replacement files and off-the-shelf status are never retired
 automatically; revert them explicitly. Reverting a field restores the most
 recent Onshape value.
+
+## When QC and finishing happen
+
+By default QC and finishing come after every operation except threaded
+inserts, which follow them. **QC and finishing happen** can instead place them
+after OP1–OP4: operations up to that point are inspected, and later ones wait
+for the QC pass and any finishing. The editor previews the resulting order,
+for example `OP1 Haas CNC → QC → Finishing (Black) → OP2 Tapping`.
+
+The setting is stored in `requirements.qc_after_operation` (null is the
+default), which the sync never writes, so it persists across syncs. It is
+refused while QC is passed (undo the review first), for off-the-shelf parts,
+for an operation the routing doesn't have, and when an operation that would
+change sides of QC has claimed work. Completed work may move after QC. Each
+change is recorded in `engineering_override_events` and shows in the part's
+History.
+
+Every rule that classified operations by the Threaded Insert machine now uses
+the QC point: readiness planning, the QC and Finishing queues, claim guards,
+Force QC, passed-QC quantity corrections, the On Robot guard, and routing
+initialization after a sync (`manufacturing.is_post_qc_operation` mirrors
+`isPostQcOperation`).
 
 ## Off-the-shelf parts
 
@@ -131,7 +154,8 @@ replacement invalidates its preview until the command runs again.
 ## Installation
 
 Apply `supabase/migrations/20260922190000_admin_engineering_overrides.sql`, then
-`20260923040000_passed_qc_quantity_corrections.sql`, after
+`20260923040000_passed_qc_quantity_corrections.sql` and
+`20260924000000_configurable_qc_point.sql`, after
 the engineering-sync API, routing initializer, obsoletion, visibility, and part
 preview migrations. It adds tables, functions, one requirement column, and a
 sync trigger; it does not modify existing manufacturing rows or enable writes.

@@ -1,7 +1,7 @@
 import type { ManufacturingOperation, QualityControlItem, QualityResult, QualityLocationFields } from "./types.ts";
 import type { StorageLocation } from "./storage-locations.ts";
 import { isStorageLocation } from "./storage-locations.ts";
-import { requiresPassedQc } from "./manufacturing-workflow.ts";
+import { isPostQcOperation } from "./manufacturing-workflow.ts";
 
 export interface QualityReviewRow {
   id: number;
@@ -85,7 +85,7 @@ export function qualityMetadataByRequirement(
 
   for (const requirementId of requirementIds) {
     const operations = operationsByRequirement.get(requirementId) ?? [];
-    const inspectedOperations = operations.filter((operation) => !requiresPassedQc(operation.machine));
+    const inspectedOperations = operations.filter((operation) => !isPostQcOperation(operation, operation.qcAfterOperation));
     const review = reviewsByRequirement.get(requirementId);
     const completedAt = latestCompletion(inspectedOperations);
     const completedAfterReview = Boolean(
@@ -168,7 +168,7 @@ export function projectQualityControl(
   return [...operationsByRequirement.entries()]
     .map(([requirementId, operations]) => [
       requirementId,
-      operations.filter((operation) => !requiresPassedQc(operation.machine)),
+      operations.filter((operation) => !isPostQcOperation(operation, operation.qcAfterOperation)),
     ] as const)
     .filter(([requirementId, operations]) => operations.length > 0 && (
       operations.every((operation) => operation.status === "Complete") || metadata.get(requirementId)?.effectiveQcResult !== "pending"

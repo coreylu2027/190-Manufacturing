@@ -71,6 +71,8 @@ export interface ManufacturingOperation extends QualityLocationFields, Obsoletio
   partName: string;
   assemblyNumber: string;
   documentName: string | null;
+  /** QC and finishing happen after this operation number; null means after every operation except threaded inserts. */
+  qcAfterOperation: number | null;
   /** The document of the root assembly this was synced through, which differs from documentName for imported subassemblies. */
   syncedFromDocument: string | null;
   sourceRoot: string | null;

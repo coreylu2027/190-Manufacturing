@@ -1,4 +1,4 @@
-import { requiresPassedQc } from "./manufacturing-workflow.ts";
+import { isPostQcOperation } from "./manufacturing-workflow.ts";
 import type { ManufacturingOperation, OperationStatus } from "./types.ts";
 
 export type ProductionStatus = OperationStatus | "QC Pending" | "Finishing Pending" | "Off the Shelf";
@@ -6,7 +6,7 @@ export type ProductionStatus = OperationStatus | "QC Pending" | "Finishing Pendi
 export function requirementStatus(operations: ManufacturingOperation[]): ProductionStatus {
   if (operations.some((operation) => operation.offTheShelf)) return "Off the Shelf";
   const inspectedOperations = operations.filter((operation) =>
-    operation.workType === "Manufacturing" && !requiresPassedQc(operation.machine),
+    operation.workType === "Manufacturing" && !isPostQcOperation(operation, operation.qcAfterOperation),
   );
   if (inspectedOperations.length > 0 && inspectedOperations.every((operation) =>
     operation.status === "Complete" && operation.effectiveQcResult === "pending",

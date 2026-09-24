@@ -1,7 +1,7 @@
 // Pure planning for administrator corrections to synced engineering data. The
 // database re-applies stored overrides after each Onshape sync; this module
 // plans the edit itself, including routing, CAM prerequisites, and readiness.
-import { deduplicateOperations, planRequirementWorkflow, requiresCam, requiresPassedQc, targetMachineHasStarted, type WorkflowOperationStatus } from "../manufacturing-workflow.ts";
+import { deduplicateOperations, isPostQcOperation, planRequirementWorkflow, requiresCam, targetMachineHasStarted, type WorkflowOperationStatus } from "../manufacturing-workflow.ts";
 import {
   MAX_DESCRIPTION_LENGTH, MAX_MATERIAL_LENGTH, MAX_NAME_LENGTH, MAX_OVERRIDE_QUANTITY, ROUTING_FIELDS, normalizeFinishColor, routingError,
   type EngineeringOverrideFields, type EngineeringOverrideState, type FinishColor, type OverrideField, type Routing,
@@ -26,7 +26,7 @@ export interface OverrideRowInsert { entity: "operations" | "finishing"; row: Re
 export interface OverrideChangeSummary { field: string; from: string; to: string }
 
 const PATCHABLE: Record<OverrideRowChange["entity"], readonly string[]> = {
-  requirements: ["required_quantity", "finishing", ...ROUTING_FIELDS, "status", "qc_outcome", "off_the_shelf"],
+  requirements: ["required_quantity", "finishing", ...ROUTING_FIELDS, "status", "qc_outcome", "off_the_shelf", "qc_after_operation"],
   parts: ["material", "name", "description"],
   operations: ["machine", "active_in_routing", "status", "completed_at", "completed_quantity", "quantity_ledger", "machinist"],
   finishing: ["color", "required_quantity", "active"],
@@ -45,6 +45,7 @@ const hasWork = (row: Row) => targetMachineHasStarted({
   status: operationStatus(row), claimedQuantity: count(row.claimed_quantity), completedQuantity: count(row.completed_quantity),
 });
 const display = (value: unknown) => value === null || value === undefined || value === "" ? "—" : String(value);
+const qcPointLabel = (value: number | null) => value === null ? "After all operations except threaded inserts" : `After OP${value}`;
 
 /** A completed operation's ledger; legacy rows without one are attributed to their machinist. */
 function completedLedger(row: Row): OperationAllocation[] {
@@ -135,7 +136,7 @@ export function planEngineeringOverrides({ rows, state, requirementId, fields, a
   const offTheShelfBefore = requirement.off_the_shelf === true;
   const offTheShelfAfter = fields.offTheShelf ? fields.offTheShelf.value : offTheShelfBefore;
   const offTheShelfChanged = offTheShelfAfter !== offTheShelfBefore;
-  const requirementLevelEdit = fields.quantity || fields.finishing || fields.routing || offTheShelfChanged;
+  const requirementLevelEdit = fields.quantity || fields.finishing || fields.routing || offTheShelfChanged || fields.qcAfterOperation;
   if (requirementLevelEdit) {
     if (requirement.obsolete) throw new EngineeringOverrideError("This requirement is obsolete. Restore it before correcting its routing, quantity, finishing, or sourcing.");
     if (requirement.active_in_bom === false) throw new EngineeringOverrideError("This requirement is no longer active in the BOM");
@@ -145,7 +146,12 @@ export function planEngineeringOverrides({ rows, state, requirementId, fields, a
       ? "Change off-the-shelf status separately from routing and finishing"
       : "Switch this part back to manufactured before changing its routing or finishing");
   }
-  let qcPassed = requirement.qc_outcome === "Passed";
+  const qcPassedBefore = requirement.qc_outcome === "Passed";
+  let qcPassed = qcPassedBefore;
+  /** QC and finishing come after this operation; null is the default. The QC point edit is applied after routing. */
+  let qcAfter: number | null = requirement.qc_after_operation == null ? null : Number(requirement.qc_after_operation);
+  const afterQc = (row: Row, point = qcAfter) => !isCam(row)
+    && isPostQcOperation({ machine: String(row.machine ?? ""), operationNumber: String(row.operation_number ?? "OP1") }, point);
   let workflowChanged = false;
   let finishingNewlyRequired = false;
   const productionKey = String(requirement.production_key ?? "");
@@ -171,7 +177,7 @@ export function planEngineeringOverrides({ rows, state, requirementId, fields, a
     if (stage.some(hasWork)) {
       throw new EngineeringOverrideError(`${operationNumber} (${currentMachine}) has recorded work. Release or undo it before changing this operation.`);
     }
-    const preQc = (machine: string | null) => Boolean(machine && !requiresPassedQc(machine));
+    const preQc = (machine: string | null) => Boolean(machine && !isPostQcOperation({ machine, operationNumber }, qcAfter));
     if (qcPassed && (preQc(currentMachine) || preQc(desired))) {
       throw new EngineeringOverrideError(`Undo the passed QC review before changing ${operationNumber}`);
     }
@@ -261,7 +267,7 @@ export function planEngineeringOverrides({ rows, state, requirementId, fields, a
       }
       if (mode === "approved") {
         // The records were wrong: the corrected quantity was made and passed QC.
-        for (const row of activeOperations().filter((candidate) => !isCam(candidate) && !requiresPassedQc(String(candidate.machine ?? "")))) {
+        for (const row of activeOperations().filter((candidate) => !isCam(candidate) && !afterQc(candidate))) {
           const ledger = completedLedger(row);
           const completed = count(row.completed_quantity);
           if (count(row.claimed_quantity) > 0) throw new EngineeringOverrideError(`${row.operation_number} has claimed work. Release it before correcting the approved quantity.`);
@@ -275,7 +281,7 @@ export function planEngineeringOverrides({ rows, state, requirementId, fields, a
         // The original parts stand; the extra parts need manufacturing and a fresh QC review.
         if (requirement.part_location === "On Robot") throw new EngineeringOverrideError("Move the part off the robot before adding parts that need QC");
         if (finishingRows.some((row) => row.active && text(row.machinist))) throw new EngineeringOverrideError("Release the finishing claim before adding parts");
-        const claimedPostQc = activeOperations().find((row) => !isCam(row) && requiresPassedQc(String(row.machine ?? "")) && count(row.claimed_quantity) > 0);
+        const claimedPostQc = activeOperations().find((row) => afterQc(row) && count(row.claimed_quantity) > 0);
         if (claimedPostQc) throw new EngineeringOverrideError(`${claimedPostQc.operation_number} (${claimedPostQc.machine}) is claimed. Release it before adding parts.`);
         qcPassed = false;
         requirement.qc_outcome = "Not Inspected";
@@ -316,8 +322,8 @@ export function planEngineeringOverrides({ rows, state, requirementId, fields, a
         if (after !== "None") {
           if (before === "None") {
             if (requirement.part_location === "On Robot") throw new EngineeringOverrideError("Move the part off the robot before adding finishing");
-            const postQcStarted = activeOperations().some((row) => !isCam(row) && requiresPassedQc(String(row.machine ?? "")) && hasWork(row));
-            if (postQcStarted) throw new EngineeringOverrideError("Threaded-insert work has started. Undo it before adding finishing.");
+            const postQcStarted = activeOperations().some((row) => afterQc(row) && hasWork(row));
+            if (postQcStarted) throw new EngineeringOverrideError("Work after QC has started. Undo it before adding finishing.");
             finishingNewlyRequired = true;
           }
           activateFinishing(after);
@@ -346,6 +352,30 @@ export function planEngineeringOverrides({ rows, state, requirementId, fields, a
       requirement[field] = target;
       routeStage(index, text(target));
     });
+    if (!activeOperations().some((row) => !isCam(row))) {
+      throw new EngineeringOverrideError("Keep at least one operation, or mark the part off-the-shelf instead", 400);
+    }
+  }
+
+  if (fields.qcAfterOperation) {
+    const desired = fields.qcAfterOperation.value;
+    if (desired !== null && (!Number.isInteger(desired) || desired < 1 || desired > 4)) {
+      throw new EngineeringOverrideError("Choose when QC happens: the default, or after OP1 to OP4", 400);
+    }
+    if (desired !== qcAfter) {
+      if (offTheShelfBefore || offTheShelfChanged) throw new EngineeringOverrideError("Off-the-shelf parts have no routing, so QC can't be moved");
+      if (qcPassedBefore) throw new EngineeringOverrideError("Undo the passed QC review before changing when QC happens");
+      const stages = activeOperations().filter((row) => !isCam(row));
+      const lastStage = Math.max(0, ...stages.map((row) => Number(String(row.operation_number ?? "").replace(/^OP/i, "")) || 0));
+      if (desired !== null && desired > lastStage) throw new EngineeringOverrideError(`The routing has no OP${desired}`, 400);
+      // Work already done may move after QC, but claims would sit on operations that now need a QC pass.
+      const claimed = stages.find((row) => afterQc(row) !== afterQc(row, desired) && count(row.claimed_quantity) > 0);
+      if (claimed) throw new EngineeringOverrideError(`${claimed.operation_number} (${claimed.machine}) is claimed. Release it before moving QC.`);
+      summary.push({ field: "QC and finishing", from: qcPointLabel(qcAfter), to: qcPointLabel(desired) });
+      qcAfter = desired;
+      requirement.qc_after_operation = desired;
+      workflowChanged = true;
+    }
   }
 
   if (offTheShelfChanged) {
@@ -394,7 +424,7 @@ export function planEngineeringOverrides({ rows, state, requirementId, fields, a
       completedQuantity: count(row.completed_quantity),
       startedAt: row.started_at as string | null,
       completedAt: row.completed_at as string | null,
-    })), requirementStatus, { qcPassed, finishingRequired, finishingComplete });
+    })), requirementStatus, { qcPassed, finishingRequired, finishingComplete, qcAfterOperation: qcAfter });
     for (const patch of plan.operationPatches) {
       const row = active.find((candidate) => candidate.id === patch.id);
       if (row) row.status = patch.status;
@@ -430,9 +460,9 @@ export function planEngineeringOverrides({ rows, state, requirementId, fields, a
     requirementStatus: String(requirement.status ?? "Needs Triage"),
     previousRequirementStatus: String(sourceRequirement.status ?? "Needs Triage"),
     partName: part && !same(part.name, sourcePart?.name) ? text(part.name) : null,
-    /** True when what the shop should make changed: quantity, routing, finishing, or sourcing. */
+    /** True when what the shop should make changed: quantity, routing, finishing, sourcing, or when QC happens. */
     routingChanged: changes.some((change) => change.entity === "operations" || change.entity === "finishing"
-      || change.entity === "requirements" && ["required_quantity", "off_the_shelf"].some((column) => column in change.patch))
+      || change.entity === "requirements" && ["required_quantity", "off_the_shelf", "qc_after_operation"].some((column) => column in change.patch))
       || inserts.length > 0,
   };
 }

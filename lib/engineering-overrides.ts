@@ -59,6 +59,8 @@ export interface EngineeringOverrideFields {
   routing?: FieldEdit<Routing>;
   /** Bought rather than made: retires routing and finishing until switched back. */
   offTheShelf?: { value: boolean };
+  /** QC and finishing happen after OP N (1-4); null restores the default, after every operation except threaded inserts. */
+  qcAfterOperation?: { value: number | null };
 }
 
 export interface EngineeringOverrideRow {
@@ -108,6 +110,7 @@ export interface EngineeringOverrideState {
     off_the_shelf_changed_at: string | null;
     qc_outcome: string | null;
     part_location: string | null;
+    qc_after_operation: number | null;
   } | null;
   part: { id: number; part_number: string | null; name: string | null; description: string | null; material: string | null } | null;
   overrides: EngineeringOverrideRow[];
@@ -129,6 +132,9 @@ export function routingOf(requirement: Pick<NonNullable<EngineeringOverrideState
 
 /** Operations must be listed from OP1 without gaps. */
 export function routingError(routing: Routing): string | null {
+  if (routing.every((machine) => machine === null)) {
+    return "Keep at least one operation, or mark the part off-the-shelf instead";
+  }
   for (const machine of routing) {
     if (machine !== null && !isMachineName(machine)) return `Unknown machine: ${machine}`;
   }
@@ -160,5 +166,5 @@ export interface EngineeringCorrection {
 export const CORRECTION_FIELD_LABELS: Record<string, string> = {
   required_quantity: "Quantity", material: "Material", name: "Name", description: "Description", finishing: "Finishing",
   machine_op1: "OP1", machine_op2: "OP2", machine_op3: "OP3", machine_op4: "OP4",
-  "drawing-pdf": "Drawing PDF", step: "STEP file", off_the_shelf: "Off-the-shelf",
+  "drawing-pdf": "Drawing PDF", step: "STEP file", off_the_shelf: "Off-the-shelf", qc_after_operation: "QC and finishing",
 };
