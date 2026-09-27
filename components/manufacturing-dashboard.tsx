@@ -3,7 +3,7 @@ import { workAllowed } from "@/lib/obsoletion";
 import type { ObsoletionFields } from "@/lib/types";
 import { HiddenBadge, ObsoleteBadge, ObsoleteWarning, RequirementObsoletion, RequirementVisibility } from "@/components/requirement-obsoletion";
 import { CopyPartNumber, PartNumberCell } from "@/components/copy-part-number";
-import { ForceQcButton, hasUnfinishedQcPrerequisites } from "@/components/force-qc";
+import { BulkForceQcDialog, ForceQcButton, forceQcBlocker, hasUnfinishedQcPrerequisites } from "@/components/force-qc";
 
 import {
   AllCommunityModule,
@@ -448,6 +448,7 @@ function ProductionOverview({
   const [locationIds, setLocationIds] = useState<number[]>([]);
   const requirementsGridRef = useRef<AgGridReact<ProductionRequirement>>(null);
   const [locationDialogOpen, setLocationDialogOpen] = useState(false);
+  const [forceQcDialogOpen, setForceQcDialogOpen] = useState(false);
   const [moveLocation, setMoveLocation] = useState<StorageLocation | null>(null);
   const requirements = useMemo<ProductionRequirement[]>(() => {
     const grouped = new Map<string, ManufacturingOperation[]>();
@@ -576,6 +577,8 @@ function ProductionOverview({
   const openRequirement = (requirement: ProductionRequirement) => setSelectedRequirementKey(requirement.key);
   const selectedParts = requirements.filter((part) => isListed(part) && part.requirementId !== null && locationIds.includes(part.requirementId));
   const blockedParts = selectedParts.filter((part) => part.obsolete || !part.activeInBom || !canUseOnRobotLocation(part.effectiveQcResult === "passed", part.finishingComplete));
+  const forceQcParts = selectedParts.flatMap((part) => part.requirementId === null ? [] : [{ ...part, requirementId: part.requirementId }]);
+  const forceQcEligibleCount = forceQcParts.filter((part) => !forceQcBlocker(part)).length;
   const visibleIds = visibleRequirements.flatMap((part) => part.requirementId === null ? [] : [part.requirementId]);
   const togglePart = useCallback((id: number, checked: boolean) => {
     setLocationIds((ids) => checked ? [...new Set([...ids, id])] : ids.filter((value) => value !== id));
@@ -707,6 +710,8 @@ function ProductionOverview({
                   <ChevronDown className="size-4" />
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="w-52">
+                  {canForceQc && <DropdownMenuItem disabled={!forceQcEligibleCount} onClick={() => setForceQcDialogOpen(true)}><ShieldCheck /> Force QC{forceQcEligibleCount > 0 ? ` (${forceQcEligibleCount})` : ""}</DropdownMenuItem>}
+                  {canForceQc && <DropdownMenuSeparator />}
                   <DropdownMenuItem disabled={!locationIds.length} onClick={() => setLocationIds([])}>Clear selection</DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -777,6 +782,12 @@ function ProductionOverview({
           <DialogFooter><Button variant="outline" disabled={locationMutation.isPending} onClick={() => setLocationDialogOpen(false)}>Cancel</Button><Button disabled={!moveLocation || !selectedParts.length || locationMutation.isPending || (moveLocation === "On Robot" && blockedParts.length > 0)} onClick={() => locationMutation.mutate()}>{locationMutation.isPending && <LoaderCircle className="animate-spin" />}Set location</Button></DialogFooter>
         </DialogContent>
       </Dialog>
+      {canForceQc && <BulkForceQcDialog
+        open={forceQcDialogOpen}
+        onOpenChange={setForceQcDialogOpen}
+        requirements={forceQcParts}
+        onFinished={(succeeded) => setLocationIds((ids) => ids.filter((id) => !succeeded.includes(id)))}
+      />}
       <Sheet open={Boolean(selectedRequirement)} onOpenChange={(open) => !open && setSelectedRequirementKey(null)}>
         <SheetContent detailView className="w-full overflow-y-auto sm:max-w-2xl">
           {selectedRequirement && (

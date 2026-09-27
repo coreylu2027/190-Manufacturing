@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import type { ManufacturingOperation, OperationsResponse } from "@/lib/types";
 import type { createWritePlan } from "@/lib/manufacturing/write-plan";
 import { isPostQcOperation } from "@/lib/manufacturing-workflow";
+import { settleSequentially } from "@/lib/bulk-selection";
 
 type Preview = Awaited<ReturnType<ReturnType<typeof createWritePlan>["previewForceQuality"]>> & { token: string };
 type ForceQcButtonProps = Pick<ManufacturingOperation, "storageLocation" | "locationUpdatedBy" | "locationUpdatedAt"> & {
@@ -23,6 +24,116 @@ export function hasUnfinishedQcPrerequisites(operations: ManufacturingOperation[
   const preQc = active.filter(op => op.workType === "Manufacturing" && !isPostQcOperation(op, op.qcAfterOperation));
   return preQc.length > 0 && active.some(op => op.status !== "Complete" && (preQc.includes(op)
     || op.workType === "CAM" && preQc.some(target => target.operationNumber === op.operationNumber)));
+}
+
+type BulkForceQcRequirement = Pick<ManufacturingOperation, "partNumber" | "obsolete" | "activeInBom" | "effectiveQcResult"> & {
+  requirementId: number;
+  operations: ManufacturingOperation[];
+};
+
+/** Why Force QC can't run on a requirement, or null when it can. Matches the single-part button. */
+export function forceQcBlocker(requirement: BulkForceQcRequirement) {
+  if (requirement.obsolete) return "obsolete";
+  if (!requirement.activeInBom) return "inactive in the BOM";
+  if (requirement.effectiveQcResult === "passed") return "QC already passed";
+  if (!hasUnfinishedQcPrerequisites(requirement.operations)) return "no unfinished prerequisite work";
+  return null;
+}
+
+function unfinishedPrerequisiteCount(operations: ManufacturingOperation[]) {
+  const active = operations.filter(op => op.activeInRouting);
+  const preQc = active.filter(op => op.workType === "Manufacturing" && !isPostQcOperation(op, op.qcAfterOperation));
+  return active.filter(op => op.status !== "Complete" && (preQc.includes(op)
+    || op.workType === "CAM" && preQc.some(target => target.operationNumber === op.operationNumber))).length;
+}
+
+/** Force-completes prerequisite work and records one QC result for each selected requirement, one at a time. */
+export function BulkForceQcDialog({ open, onOpenChange, requirements, onFinished }: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  requirements: BulkForceQcRequirement[];
+  onFinished: (succeededIds: number[]) => void;
+}) {
+  const client = useQueryClient();
+  const [notes, setNotes] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [errors, setErrors] = useState<string[]>([]);
+  const eligible = requirements.filter(requirement => !forceQcBlocker(requirement));
+  const skipped = requirements.flatMap(requirement => {
+    const reason = forceQcBlocker(requirement);
+    return reason ? [`${requirement.partNumber} (${reason})`] : [];
+  });
+  async function submit(result: "passed" | "failed") {
+    setBusy(true); setErrors([]); setProgress(0);
+    const extra = notes.trim();
+    const results = await settleSequentially(eligible, async (requirement, index) => {
+      try {
+        const previewResponse = await fetch(`/api/admin/qc/${requirement.requirementId}/force`, { cache: "no-store" });
+        const preview = await previewResponse.json();
+        if (!previewResponse.ok) throw new Error(preview.error ?? "Unable to preview Force QC");
+        const combined = extra ? `${preview.generatedNotes}\n\n${extra}` : preview.generatedNotes;
+        if (combined.length > 2000) throw new Error("Inspection notes exceed 2000 characters");
+        const response = await fetch(`/api/admin/qc/${requirement.requirementId}/force`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ notes: combined, token: preview.token, result }),
+        });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error ?? "Unable to force QC");
+        return requirement.requirementId;
+      } catch (error) {
+        throw new Error(`${requirement.partNumber}: ${error instanceof Error ? error.message : "Unable to force QC"}`);
+      } finally {
+        setProgress(index + 1);
+      }
+    });
+    const succeeded = results.flatMap(item => item.status === "fulfilled" ? [item.value] : []);
+    const failures = results.flatMap(item => item.status === "rejected" ? [item.reason instanceof Error ? item.reason.message : "Unable to force QC"] : []);
+    for (const key of ["production", "operations", "qc", "admin", "fabrication"]) void client.invalidateQueries({ queryKey: [key] });
+    setBusy(false);
+    onFinished(succeeded);
+    const verb = result === "passed" ? "passed" : "failed";
+    if (failures.length) {
+      setErrors(failures);
+      toast.warning(`Force QC ${verb} ${succeeded.length} parts; ${failures.length} failed and remain selected.`);
+    } else {
+      toast.success(`Force QC ${verb} ${succeeded.length} parts`);
+      setNotes("");
+      onOpenChange(false);
+    }
+  }
+  return (
+    <Dialog open={open} onOpenChange={value => { if (!busy) { onOpenChange(value); if (!value) setErrors([]); } }}>
+      <DialogContent forceBackdrop className="max-h-[90vh] overflow-y-auto sm:max-w-xl">
+        <DialogHeader>
+          <DialogTitle>Force QC · {eligible.length} {eligible.length === 1 ? "part" : "parts"}</DialogTitle>
+          <DialogDescription>Complete unfinished prerequisites and pass or fail QC for each selected production requirement.</DialogDescription>
+        </DialogHeader>
+        {eligible.length > 0 && <ul className="max-h-48 space-y-1 overflow-y-auto rounded-lg border p-3 text-sm">
+          {eligible.map(requirement => {
+            const count = unfinishedPrerequisiteCount(requirement.operations);
+            return <li key={requirement.requirementId} className="flex justify-between gap-3"><span className="truncate font-mono font-semibold">{requirement.partNumber}</span><span className="shrink-0 text-muted-foreground">{count} unfinished {count === 1 ? "task" : "tasks"}</span></li>;
+          })}
+        </ul>}
+        {skipped.length > 0 && <p className="max-h-32 overflow-y-auto text-sm text-muted-foreground">Skipped: {skipped.join("; ")}.</p>}
+        {eligible.length === 0 && <p className="rounded-lg border border-dashed p-4 text-center text-sm text-muted-foreground">None of the selected parts have unfinished prerequisite work to force-complete.</p>}
+        {eligible.length > 0 && <>
+          <p className="text-xs text-muted-foreground">Outstanding claims on this work will be cleared. Passing credits newly completed quantities to you and preserves existing completed-work credit. Failing rejects each entire batch and resets pre-QC manufacturing quantities for rework.</p>
+          <label className="text-sm font-medium">Additional inspection notes<textarea value={notes} onChange={event => setNotes(event.target.value)} className="mt-2 min-h-24 w-full rounded-md border bg-background p-3 font-normal" disabled={busy} placeholder="Optional. Added after each part's generated Force QC note." /></label>
+        </>}
+        {busy && <p role="status" className="text-sm">Forcing QC… {progress}/{eligible.length}</p>}
+        {errors.length > 0 && <ul role="alert" className="max-h-40 space-y-1 overflow-y-auto text-sm text-destructive">{errors.map(message => <li key={message}>{message}</li>)}</ul>}
+        <DialogFooter className="sm:flex-wrap">
+          <Button variant="outline" disabled={busy} onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button size="lg" variant="destructive" className="h-11" disabled={busy || !eligible.length || notes.trim().length > 1500} onClick={() => void submit("failed")}>
+            <AlertTriangle /> Force complete & fail QC
+          </Button>
+          <Button size="lg" variant="destructive" className="h-11" disabled={busy || !eligible.length || notes.trim().length > 1500} onClick={() => void submit("passed")}>
+            <AlertTriangle /> Force complete & pass QC
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
 }
 
 export function ForceQcButton({ requirementId, label, storageLocation, locationUpdatedBy, locationUpdatedAt }: ForceQcButtonProps) {
