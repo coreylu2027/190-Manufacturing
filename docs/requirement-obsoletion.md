@@ -7,7 +7,10 @@ or restore requirements from Production details, with a version-checked Undo.
 
 The existing PART cell displays the badge. Production includes an Obsolete
 filter and retains deactivated routes for requirements with obsoletion history.
-Restoring a historical requirement does not reactivate its BOM or routing.
+Restoring a historical requirement does not reactivate its BOM or routing,
+but it can still move onto the robot once its deactivated routing shows a
+passed QC review and completed finishing (applied by
+`supabase/migrations/20260926010000_restored_requirement_robot_location.sql`).
 Operations, CAM, finishing, QC decisions (including Force QC), and moves onto
 the robot are blocked while obsolete. Notes and off-robot locations remain
 editable. Profile renames leave obsolete work credit untouched.

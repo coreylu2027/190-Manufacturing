@@ -596,6 +596,16 @@ test("part locations are editable before QC while On Robot requires passed QC an
   await assert.rejects(awaitingFinishing.adapter.updatePartLocation(20, "On Robot", ACTOR), /Complete finishing/);
   assert.equal(awaitingFinishing.commits.length, 0);
 
+  // Restoring from obsolete leaves the BOM row and routing inactive.
+  const historical = fixture({ operation: runtimeRow(ENTITIES.find(entity => entity.name === "operations")!, passedState.rows.operations[0]),
+    requirement: { "QC Outcome": { value: "Passed" }, Status: { value: "Complete" } }, reviews: passedState.reviews });
+  Object.assign(historical.rows.requirements[0], { active_in_bom: false });
+  Object.assign(historical.rows.operations[0], { active_in_routing: false });
+  const neverObsoleted = harness(historical);
+  await assert.rejects(neverObsoleted.adapter.updatePartLocation(20, "On Robot", ACTOR), /inactive in the BOM/);
+  historical.rows.requirements[0].obsoletion_version = 2;
+  const restored = harness(historical);
+  assert.equal((await restored.adapter.updatePartLocation(20, "On Robot", ACTOR)).storageLocation, "On Robot");
 });
 
 test("passed QC inspection notes can be revised without changing workflow status or location", async () => {

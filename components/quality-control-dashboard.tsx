@@ -40,6 +40,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
+import { robotPlacementAllowed } from "@/lib/obsoletion";
 import { canUseOnRobotLocation } from "@/lib/storage-locations";
 import type { AdminResponse, QualityControlItem, QualityFailureSummary, QualityResult } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -624,7 +625,7 @@ export function QualityControlDashboard() {
                       deleting={productionNotesAreDeleting}
                       onDelete={deleteProductionNotesMutation.mutate}
                     />
-                    <div className="mt-3"><StorageLocationEditor requirementId={item.requirementId} value={item.storageLocation} updatedBy={item.locationUpdatedBy} updatedAt={item.locationUpdatedAt} canEdit allowOnRobot={!operation.obsolete && operation.activeInBom && canUseOnRobotLocation(item.effectiveQcResult === "passed", operation.finishingComplete)} /></div>
+                    <div className="mt-3"><StorageLocationEditor requirementId={item.requirementId} value={item.storageLocation} updatedBy={item.locationUpdatedBy} updatedAt={item.locationUpdatedAt} canEdit allowOnRobot={robotPlacementAllowed(operation) && canUseOnRobotLocation(item.effectiveQcResult === "passed", operation.finishingComplete)} /></div>
                     <div className="mt-3 flex flex-wrap items-center gap-2">
                       <Button variant="outline" nativeButton={!operation.hasDrawingPdf} render={operation.hasDrawingPdf ? <a href={`/api/operations/${operation.id}/files/drawing-pdf`} target="_blank" rel="noreferrer" /> : undefined} disabled={!operation.hasDrawingPdf}><FileText /> Drawing PDF</Button>
                       <Button variant="outline" nativeButton={!operation.onshapeUrl} render={operation.onshapeUrl ? <a href={operation.onshapeUrl} target="_blank" rel="noreferrer" /> : undefined} disabled={!operation.onshapeUrl}><ExternalLink /> Onshape source</Button>
@@ -716,7 +717,7 @@ export function QualityControlDashboard() {
                     updatedBy={selected.locationUpdatedBy}
                     updatedAt={selected.locationUpdatedAt}
                     canEdit
-                    allowOnRobot={!operation.obsolete && operation.activeInBom && canUseOnRobotLocation(selected.effectiveQcResult === "passed", operation.finishingComplete)}
+                    allowOnRobot={robotPlacementAllowed(operation) && canUseOnRobotLocation(selected.effectiveQcResult === "passed", operation.finishingComplete)}
                   />
                 </section>
 
