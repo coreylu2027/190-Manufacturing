@@ -118,8 +118,36 @@ export interface ManufacturingOperation extends QualityLocationFields, Obsoletio
   onshapeUrl: string | null;
 }
 
+/** A purchased (COTS) part's requirement. It has no routing, but it has a location. */
+export interface CotsRequirement extends QualityLocationFields, ObsoletionFields {
+  requirementId: number;
+  requirementKey: string | null;
+  partNumber: string;
+  revision: string | null;
+  partName: string;
+  assemblyNumber: string;
+  documentName: string | null;
+  syncedFromDocument: string | null;
+  sourceRoot: string | null;
+  sourceAssemblyRevision: string | null;
+  requiredPartRevision: string | null;
+  configuration: string | null;
+  bomPositions: string | null;
+  material: string | null;
+  vendor: string | null;
+  requirementStatus: string;
+  requirementMachinist: string | null;
+  activeInBom: boolean;
+  engineeringChanged: boolean;
+  disposition: string | null;
+  productionNotes: string;
+  quantity: number;
+  onshapeUrl: string | null;
+}
+
 export interface OperationsResponse {
   operations: ManufacturingOperation[];
+  cotsRequirements?: CotsRequirement[];
   dataVersion?: string;
   syncedAt: string;
   user: { id: string; name: string; email: string | null; role: UserRole; approved: boolean } | null;

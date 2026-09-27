@@ -18,6 +18,7 @@ export async function GET() {
     const { version, snapshot } = await getCurrentManufacturingSnapshot();
     return NextResponse.json({
       operations: user.role === "admin" ? snapshot.operations : snapshot.operations.filter((operation) => !operation.hidden),
+      cotsRequirements: user.role === "admin" ? snapshot.cotsRequirements : snapshot.cotsRequirements.filter((requirement) => !requirement.hidden),
       dataVersion: version,
       syncedAt: new Date().toISOString(),
       user,

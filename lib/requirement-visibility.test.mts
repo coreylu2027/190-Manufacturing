@@ -54,13 +54,15 @@ test("normal lists omit hidden work while admins can retrieve the production arc
   const hidden = { id: 2, hidden: true };
   const dependencies = {
     "@/lib/auth": { getAppUser: async () => ({ approved: true, role }) },
-    "@/lib/manufacturing/cache": { getCurrentManufacturingSnapshot: async () => ({ version: "1", snapshot: { operations: [visible, hidden], jobs: [visible, hidden] } }) },
+    "@/lib/manufacturing/cache": { getCurrentManufacturingSnapshot: async () => ({ version: "1", snapshot: { operations: [visible, hidden], jobs: [visible, hidden], cotsRequirements: [visible, hidden] } }) },
   };
   const operations = route("../app/api/operations/route.ts", dependencies);
   const finishing = route("../app/api/fabrication/route.ts", dependencies);
   assert.deepEqual((await operations.GET()).body.operations, [visible]);
+  assert.deepEqual((await operations.GET()).body.cotsRequirements, [visible]);
   assert.deepEqual((await finishing.GET()).body.jobs, [visible]);
   role = "admin";
   assert.deepEqual((await operations.GET()).body.operations, [visible, hidden]);
+  assert.deepEqual((await operations.GET()).body.cotsRequirements, [visible, hidden]);
   assert.deepEqual((await finishing.GET()).body.jobs, [visible]);
 });
