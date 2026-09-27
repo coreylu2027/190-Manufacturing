@@ -1,5 +1,5 @@
 import { ENTITIES, runtimeRow, type ManufacturingAttachment, type NormalizedRow, type RawRow } from "./model.ts";
-import { projectOperations, projectFinishing } from "./projections.ts";
+import { projectCotsRequirements, projectOperations, projectFinishing } from "./projections.ts";
 export interface AdapterConfig { url: string; serviceKey: string; fetch?: typeof fetch }
 export type ManufacturingRows = Record<string, RawRow[]>;
 const SNAPSHOT_ENTITY_NAMES = new Set(["assemblies", "parts", "requirements", "operations", "finishing"]);
@@ -103,7 +103,7 @@ export function createSupabaseManufacturingAdapter(config: AdapterConfig) {
             "Obsoletion Changed By": row.obsoletion_changed_by ?? null,
             "Obsoletion Origin": row.obsoletion_origin ?? null,
             "Replacement Requirement": row.obsolete_replacement_id ?? null,
-          } : raw;
+          } : entity.name === "parts" ? { ...raw, COTS: row.cots === true } : raw;
         })
           .sort((a,b)=>Number(a.order??a.id)-Number(b.order??b.id) || a.id-b.id)] as const));
       entries.push(...batch);
@@ -113,9 +113,11 @@ export function createSupabaseManufacturingAdapter(config: AdapterConfig) {
   async function readSnapshot() {
     const snapshotEntities = ENTITIES.filter(entity => SNAPSHOT_ENTITY_NAMES.has(entity.name));
     const [rows, attachments] = await Promise.all([readRows(snapshotEntities), readAttachments()]);
+    const operations = projectOperations(rows.operations, rows.requirements, rows.parts, attachments, rows.assemblies);
     return {
-      operations: projectOperations(rows.operations, rows.requirements, rows.parts, attachments, rows.assemblies),
+      operations,
       jobs: projectFinishing(rows.finishing, rows.requirements, attachments, rows.operations, rows.parts, rows.assemblies),
+      cotsRequirements: projectCotsRequirements(rows.requirements, rows.parts, rows.assemblies, operations),
     };
   }
   return {

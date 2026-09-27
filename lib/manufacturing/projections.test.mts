@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { projectFinishing, projectOperations, projectProduction } from "./projections.ts";
+import { projectCotsRequirements, projectFinishing, projectOperations, projectProduction } from "./projections.ts";
 
 const requirement = {
   id: 2,
@@ -197,4 +197,29 @@ test("imported subassembly parts report the document of the root assembly they w
   assert.deepEqual([byRequirement.get(25)?.documentName, byRequirement.get(25)?.syncedFromDocument], ["Configurable Roller", "A-26C-0004"]);
   assert.equal(byRequirement.get(22)?.syncedFromDocument, "A-26C-0004");
   assert.equal(byRequirement.get(26)?.syncedFromDocument, "A-26C-0009");
+});
+
+test("COTS requirements without routing are projected for production with their location", () => {
+  const cotsPart = { id: 7, "Part Number": "WCP-0215", Name: "Bearing", Vendor: "WCP", COTS: true };
+  const assembly = { id: 9, "Assembly Number": "A-1" };
+  const cotsRequirement = {
+    id: 8, Part: [{ id: 7 }], Assembly: [{ id: 9 }], "Required Quantity": 6, "Active in BOM": true,
+    "Production Key": "A-1|A|A-1|WCP-0215|default|v2", "Source Root": "A-1",
+    "Part Location": "Shelf 2", "Location Updated By": "Sam", "Location Updated At": "2026-09-26T00:00:00Z",
+  };
+  const removed = { ...cotsRequirement, id: 10, "Active in BOM": false };
+  const obsolete = { ...removed, id: 11, Obsolete: true, "Obsoletion Version": 1 };
+  const made = { ...cotsRequirement, id: 12, Part: [{ id: 3 }] };
+  const [projected, ...rest] = projectCotsRequirements([cotsRequirement, removed, obsolete, made], [cotsPart, part], [assembly]);
+  assert.equal(rest.length, 1);
+  assert.equal(rest[0].requirementId, 11);
+  assert.equal(projected.requirementId, 8);
+  assert.equal(projected.partNumber, "WCP-0215");
+  assert.equal(projected.assemblyNumber, "A-1");
+  assert.equal(projected.vendor, "WCP");
+  assert.equal(projected.quantity, 6);
+  assert.equal(projected.storageLocation, "Shelf 2");
+  assert.equal(projected.locationUpdatedBy, "Sam");
+  // A COTS requirement that has been given routing belongs to the operations projection.
+  assert.deepEqual(projectCotsRequirements([cotsRequirement], [cotsPart], [assembly], [{ requirementId: 8 }]), []);
 });

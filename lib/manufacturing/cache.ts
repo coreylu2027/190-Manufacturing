@@ -25,11 +25,12 @@ const loadSnapshotByVersion = unstable_cache(
     return {
       operations,
       jobs,
+      cotsRequirements: base.cotsRequirements,
       qualityReviews: quality.reviews,
       retractedQualityReviewIds: quality.retractedIds,
     };
   },
-  ["manufacturing-projected-snapshot-v6-corrections"],
+  ["manufacturing-projected-snapshot-v7-cots"],
   { revalidate: false },
 );
 

@@ -79,7 +79,7 @@ test("snapshot reads include assembly identities and bound entity concurrency", 
   await new Promise(resolve=>setTimeout(resolve,5));activeEntityReads--;
   return Response.json({total:0,rows:[]});
  }});
- assert.deepEqual(await adapter.readSnapshot(),{operations:[],jobs:[]});
+ assert.deepEqual(await adapter.readSnapshot(),{operations:[],jobs:[],cotsRequirements:[]});
  assert.deepEqual(requestedEntities.sort(),["assemblies","finishing","operations","parts","requirements"]);
  assert.equal(maxEntityReads,2);
 });

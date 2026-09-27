@@ -3,7 +3,7 @@ import { projectObsoletion } from "../obsoletion.ts";
 import { requirementIdentity } from "./identity.ts";
 // Pure projections from normalized manufacturing rows and the Supabase attachment catalog.
 import { deduplicateOperations, isPostQcOperation } from "../manufacturing-workflow.ts";
-import type { ManufacturingOperation, FabricationJob, OperationWorkType, OperationStatus, OperationAllocation } from "../types.ts";
+import type { CotsRequirement, ManufacturingOperation, FabricationJob, OperationWorkType, OperationStatus, OperationAllocation } from "../types.ts";
 import { projectQualityControl, qualityMetadataByRequirement, type QualityReviewRow } from "../quality-control.ts";
 import { isStorageLocation } from "../storage-locations.ts";
 import type { ManufacturingAttachment, RawRow as SourceRow } from "./model.ts";
@@ -271,6 +271,60 @@ export function projectOperations(operationRows: SourceRow[], requirementRows: S
 
   return operations;
 }
+/**
+ * Purchased (COTS) parts sync with requirements but no routing, so they never
+ * appear among operations. A COTS requirement that was given routing anyway is
+ * left to the operations projection.
+ */
+export function projectCotsRequirements(
+  requirementRows: SourceRow[],
+  partRows: SourceRow[],
+  assemblyRows: SourceRow[] = [],
+  operations: Pick<ManufacturingOperation, "requirementId">[] = [],
+): CotsRequirement[] {
+  const parts = new Map(partRows.map((row) => [row.id, row]));
+  const assemblies = new Map(assemblyRows.map((row) => [row.id, row]));
+  const rootDocuments = syncedFromDocuments(requirementRows, assemblies);
+  const routed = new Set(operations.map((operation) => operation.requirementId));
+
+  return requirementRows.flatMap((requirement): CotsRequirement[] => {
+    const part = parts.get(linkedId(requirement.Part) ?? -1);
+    if (part?.COTS !== true || routed.has(requirement.id)) return [];
+    const obsoletion = projectObsoletion(requirement);
+    const activeInBom = Boolean(requirement["Active in BOM"]);
+    if (!activeInBom && !obsoletion.obsolete && obsoletion.obsoletionVersion === 0) return [];
+    return [{
+      requirementId: requirement.id,
+      requirementKey: textValue(requirement["Production Key"]) || null,
+      ...obsoletion,
+      ...requirementIdentity(requirement, part, assemblies.get(linkedId(requirement.Assembly) ?? -1)),
+      revision: revisionName(requirement, part),
+      documentName: sourceDocumentName(requirement),
+      syncedFromDocument: rootDocuments.get(textValue(requirement["Source Root"])) ?? null,
+      sourceRoot: textValue(requirement["Source Root"]) || null,
+      sourceAssemblyRevision: textValue(requirement["Source Assembly Revision"]) || null,
+      requiredPartRevision: textValue(requirement["Required Part Revision"]) || null,
+      configuration: textValue(requirement.Configuration) || null,
+      bomPositions: textValue(requirement["BOM Positions"]) || null,
+      material: textValue(part.Material) || null,
+      vendor: textValue(part.Vendor) || null,
+      requirementStatus: selectValue(requirement.Status, "Needs Triage"),
+      requirementMachinist: textValue(requirement.Machinist) || null,
+      activeInBom,
+      engineeringChanged: Boolean(requirement["Engineering Changed"]),
+      disposition: selectValue(requirement.Disposition) || null,
+      productionNotes: textValue(requirement["Production Notes"]),
+      quantity: Number(requirement["Required Quantity"] ?? 1),
+      onshapeUrl: textValue(requirement["Onshape Source"]) || null,
+      storageLocation: isStorageLocation(requirement["Part Location"]) ? requirement["Part Location"] : null,
+      locationUpdatedBy: textValue(requirement["Location Updated By"]) || null,
+      locationUpdatedAt: textValue(requirement["Location Updated At"]) || null,
+      effectiveQcResult: "pending",
+      lastQualityFailure: null,
+    }];
+  });
+}
+
 export function projectFinishing(
   finishingRows: SourceRow[],
   requirementRows: SourceRow[],

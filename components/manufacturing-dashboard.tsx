@@ -3,7 +3,7 @@ import { workAllowed } from "@/lib/obsoletion";
 import type { ObsoletionFields } from "@/lib/types";
 import { HiddenBadge, ObsoleteBadge, ObsoleteWarning, RequirementObsoletion, RequirementVisibility } from "@/components/requirement-obsoletion";
 import { CopyPartNumber, PartNumberCell } from "@/components/copy-part-number";
-import { ForceQcButton, hasUnfinishedQcPrerequisites } from "@/components/force-qc";
+import { BulkForceQcDialog, ForceQcButton, forceQcBlocker, hasUnfinishedQcPrerequisites } from "@/components/force-qc";
 
 import {
   AllCommunityModule,
@@ -113,6 +113,7 @@ import { PreferencesPage } from "@/components/preferences-page";
 import { WORKSPACE_ROUTES, type WorkspaceView } from "@/lib/workspace-routes";
 import {
   type CamHandoffPatch,
+  type CotsRequirement,
   type ManufacturingOperation,
   type OperationActionPatch,
   type OperationQuantityAction,
@@ -130,6 +131,8 @@ type ManufacturingRealtimeStatus = "connecting" | "subscribed" | "disconnected";
 
 const MANUFACTURING_QUERY_KEYS = ["operations", "fabrication", "qc", "admin"] as const;
 const UNSYNCED = "__unsynced";
+/** COTS parts stay hidden until the sync enables SYNC_COTS_PARTS; flip this to offer the toggle. */
+const COTS_TOGGLE_ENABLED = false;
 const REALTIME_REFRESH_DEBOUNCE_MS = 300;
 const REALTIME_REFRESH_JITTER_MS = 1_200;
 
@@ -187,7 +190,33 @@ interface ProductionRequirement extends ObsoletionFields {
   storageLocation: ManufacturingOperation["storageLocation"];
   locationUpdatedBy: string | null;
   locationUpdatedAt: string | null;
+  onshapeUrl: string | null;
+  /** A purchased part with no routing; hidden unless "Show COTS" is on. */
+  cots: boolean;
+  vendor: string | null;
   operations: ManufacturingOperation[];
+}
+
+function cotsProductionRequirement(requirement: CotsRequirement): ProductionRequirement {
+  return {
+    ...requirement,
+    key: `requirement:${requirement.requirementId}`,
+    finishing: null,
+    finishingComplete: true,
+    qualityNotes: "",
+    qualityReviewedBy: null,
+    qualityReviewedAt: null,
+    completedOperations: 0,
+    totalOperations: 0,
+    completedCamTasks: 0,
+    totalCamTasks: 0,
+    completedManufacturingOperations: 0,
+    totalManufacturingOperations: 0,
+    routingProgress: 0,
+    status: "Off the Shelf",
+    cots: true,
+    operations: [],
+  };
 }
 
 const gridTheme = themeQuartz.withParams({
@@ -244,6 +273,7 @@ function ActionCell({ data, onOpen, user }: { data?: ManufacturingOperation; onO
 
 function ProductionProgressCell({ data }: { data?: ProductionRequirement }) {
   if (!data) return null;
+  if (data.cots) return <div className="flex h-full items-center text-xs text-muted-foreground">COTS · no routing</div>;
   return (
     <div className="flex h-full min-w-0 flex-col justify-center">
       <div className="mb-1.5 flex justify-between gap-3 text-xs">
@@ -327,9 +357,14 @@ function isOperationClaimable(operation: ManufacturingOperation) {
   return workAllowed(operation) && ["Ready", "In Progress"].includes(operation.status) && operation.availableQuantity > 0;
 }
 
-/** Keeps every file in a bulk download distinct, since parts can share a STEP file name. */
-function uniqueStepFileName(operation: ManufacturingOperation, used: Set<string>) {
-  const name = safeManufacturingFileName(operation.stepName ?? "", `${operation.partNumber}.step`);
+type BulkFileKind = "drawing-pdf" | "step";
+const BULK_FILE_LABELS: Record<BulkFileKind, string> = { "drawing-pdf": "drawing", step: "STEP file" };
+
+/** Keeps every file in a bulk download distinct, since parts can share a file name. */
+function uniqueFileName(operation: ManufacturingOperation, kind: BulkFileKind, used: Set<string>) {
+  const name = kind === "step"
+    ? safeManufacturingFileName(operation.stepName ?? "", `${operation.partNumber}.step`)
+    : safeManufacturingFileName(operation.drawingPdfName ?? "", `${operation.partNumber}.pdf`);
   if (!used.has(name)) {
     used.add(name);
     return name;
@@ -391,6 +426,7 @@ const inverseQuantityAction: Record<OperationQuantityAction, OperationQuantityAc
 function ProductionOverview({
   canForceQc,
   operations,
+  cotsRequirements,
   isLoading,
   isError,
   errorMessage,
@@ -398,6 +434,7 @@ function ProductionOverview({
 }: {
   canForceQc: boolean;
   operations: ManufacturingOperation[];
+  cotsRequirements: CotsRequirement[];
   isLoading: boolean;
   isError: boolean;
   errorMessage?: string;
@@ -406,6 +443,7 @@ function ProductionOverview({
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<"all" | "Obsolete" | ProductionStatus>("all");
   const [showHidden, setShowHidden] = useState(false);
+  const [showCots, setShowCots] = useState(false);
   const [sourceDocument, setSourceDocument] = useState("all");
   const [location, setLocation] = useState("all");
   /** A synced-from document, "" for unsynced requirements, or null for all. */
@@ -415,6 +453,7 @@ function ProductionOverview({
   const [locationIds, setLocationIds] = useState<number[]>([]);
   const requirementsGridRef = useRef<AgGridReact<ProductionRequirement>>(null);
   const [locationDialogOpen, setLocationDialogOpen] = useState(false);
+  const [forceQcDialogOpen, setForceQcDialogOpen] = useState(false);
   const [moveLocation, setMoveLocation] = useState<StorageLocation | null>(null);
   const requirements = useMemo<ProductionRequirement[]>(() => {
     const grouped = new Map<string, ManufacturingOperation[]>();
@@ -426,10 +465,13 @@ function ProductionOverview({
       grouped.set(key, [...(grouped.get(key) ?? []), operation]);
     }
 
-    return [...grouped.entries()].map(([key, routedOperations]) => {
+    const routed = [...grouped.entries()].map(([key, routedOperations]): ProductionRequirement => {
         const first = routedOperations[0];
         return {
           key,
+          cots: false,
+          vendor: null,
+          onshapeUrl: first.onshapeUrl,
           obsolete: first.obsolete,
           hidden: first.hidden,
           offTheShelf: first.offTheShelf,
@@ -483,12 +525,18 @@ function ProductionOverview({
             || a.id - b.id),
         };
       });
-  }, [operations]);
+    return [...routed, ...cotsRequirements.map(cotsProductionRequirement)];
+  }, [operations, cotsRequirements]);
+
+  const isListed = useCallback((requirement: ProductionRequirement) =>
+    (!requirement.hidden || canForceQc && showHidden) && (!requirement.cots || showCots), [canForceQc, showHidden, showCots]);
+  const cotsCount = useMemo(() => requirements.filter((requirement) => requirement.cots && (!requirement.hidden || canForceQc && showHidden)).length,
+    [requirements, canForceQc, showHidden]);
 
   const visibleRequirements = useMemo(() => {
     const term = search.trim().toLocaleLowerCase();
     const filtered = requirements.filter((requirement) => {
-      if (requirement.hidden && !(canForceQc && showHidden)) return false;
+      if (!isListed(requirement)) return false;
       if (status === "Obsolete" ? !requirement.obsolete : status !== "all" && requirement.status !== status) return false;
       if (sourceDocument === "missing" && requirement.documentName) return false;
       if (sourceDocument !== "all" && sourceDocument !== "missing" && requirement.documentName !== sourceDocument) return false;
@@ -500,6 +548,8 @@ function ProductionOverview({
         requirement.partNumber,
         requirement.revision,
         requirement.partName,
+        requirement.cots ? "cots" : "",
+        requirement.vendor,
         requirement.assemblyNumber,
         requirement.documentName,
         requirement.syncedFromDocument,
@@ -512,27 +562,28 @@ function ProductionOverview({
     });
 
     return [...filtered].sort((a, b) => (a.documentName ?? "").localeCompare(b.documentName ?? "") || a.partNumber.localeCompare(b.partNumber));
-  }, [origin, canForceQc, showHidden, location, requirements, search, sourceDocument, status]);
+  }, [origin, isListed, location, requirements, search, sourceDocument, status]);
 
   const sourceDocuments = useMemo(() => [...new Set(requirements.flatMap((requirement) => requirement.documentName ? [requirement.documentName] : []))].sort(), [requirements]);
   const locations = useMemo(() => [...new Set(requirements.flatMap((requirement) => requirement.storageLocation ? [requirement.storageLocation] : []))].sort(), [requirements]);
 
-  const origins = useMemo(() => documentProgress(requirements.filter((requirement) => !requirement.hidden || canForceQc && showHidden)),
-    [requirements, canForceQc, showHidden]);
+  const origins = useMemo(() => documentProgress(requirements.filter(isListed)), [requirements, isListed]);
 
   const summary = useMemo(() => {
-    const listed = requirements.filter((requirement) => !requirement.hidden || canForceQc && showHidden);
+    const listed = requirements.filter(isListed);
     return {
       total: listed.length,
       complete: listed.filter((requirement) => requirement.status === "Complete").length,
       active: listed.filter((requirement) => requirement.status === "In Progress").length,
       attention: listed.filter((requirement) => requirement.obsolete || requirement.status === "Blocked").length,
     };
-  }, [requirements, canForceQc, showHidden]);
+  }, [requirements, isListed]);
   const selectedRequirement = requirements.find((requirement) => requirement.key === selectedRequirementKey) ?? null;
   const openRequirement = (requirement: ProductionRequirement) => setSelectedRequirementKey(requirement.key);
-  const selectedParts = requirements.filter((part) => (!part.hidden || canForceQc && showHidden) && part.requirementId !== null && locationIds.includes(part.requirementId));
+  const selectedParts = requirements.filter((part) => isListed(part) && part.requirementId !== null && locationIds.includes(part.requirementId));
   const blockedParts = selectedParts.filter((part) => part.obsolete || !part.activeInBom || !canUseOnRobotLocation(part.effectiveQcResult === "passed", part.finishingComplete));
+  const forceQcParts = selectedParts.flatMap((part) => part.requirementId === null ? [] : [{ ...part, requirementId: part.requirementId }]);
+  const forceQcEligibleCount = forceQcParts.filter((part) => !forceQcBlocker(part)).length;
   const visibleIds = visibleRequirements.flatMap((part) => part.requirementId === null ? [] : [part.requirementId]);
   const togglePart = useCallback((id: number, checked: boolean) => {
     setLocationIds((ids) => checked ? [...new Set([...ids, id])] : ids.filter((value) => value !== id));
@@ -582,7 +633,7 @@ function ProductionOverview({
     { field: "partNumber", equals: () => false, cellRenderer: PartNumberCell, cellRendererParams: { suppressMouseEventHandling: () => true }, headerName: "PART", minWidth: 155, pinned: "left", cellClass: "font-mono font-semibold" },
     { field: "revision", headerName: "REVISION", width: 104, valueFormatter: ({ value }) => value || "—" },
     { field: "partName", headerName: "DESCRIPTION", minWidth: 230, flex: 1 },
-    { field: "documentName", headerName: "SOURCE DOCUMENT", minWidth: 175, cellClass: "font-mono", valueFormatter: ({ value }) => value || "Not synced" },
+    { field: "documentName", headerName: "SOURCE DOCUMENT", minWidth: 175, cellClass: "font-mono", valueFormatter: ({ value, data }) => value || (data?.cots ? "—" : "Not synced") },
     { colId: "syncedFrom", headerName: "SYNCED FROM", minWidth: 150, cellClass: "font-mono", valueGetter: ({ data }) => data ? syncedFrom(data) : "", valueFormatter: ({ value }) => value || "Not synced" },
     { field: "storageLocation", headerName: "LOCATION", minWidth: 150, valueFormatter: ({ value }) => value || "Not recorded" },
     { field: "quantity", headerName: "QTY", width: 90, filter: "agNumberColumnFilter" },
@@ -656,6 +707,7 @@ function ProductionOverview({
             </div>
             <div className="order-1 flex w-full flex-wrap items-center justify-between gap-3 sm:ml-auto sm:w-auto">
               <div className="flex items-center gap-2 whitespace-nowrap text-xs text-muted-foreground"><SlidersHorizontal className="size-3.5" /> {visibleRequirements.length} shown{selectedParts.length > 0 ? ` · ${selectedParts.length} selected` : ""}</div>
+              {COTS_TOGGLE_ENABLED && <label className="flex items-center gap-2 text-sm" title="Purchased parts with no routing"><Checkbox checked={showCots} onCheckedChange={(checked) => setShowCots(Boolean(checked))} />Show COTS{cotsCount > 0 ? ` (${cotsCount})` : ""}</label>}
               {canForceQc && <label className="flex items-center gap-2 text-sm"><Checkbox checked={showHidden} onCheckedChange={(checked) => setShowHidden(Boolean(checked))} />Show hidden</label>}
               <Button size="sm" disabled={!selectedParts.length || locationMutation.isPending} onClick={() => { setMoveLocation(null); setLocationDialogOpen(true); }}><MapPin /> Bulk set location{selectedParts.length > 0 ? ` (${selectedParts.length})` : ""}</Button>
               <DropdownMenu>
@@ -663,6 +715,8 @@ function ProductionOverview({
                   <ChevronDown className="size-4" />
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="w-52">
+                  {canForceQc && <DropdownMenuItem disabled={!forceQcEligibleCount} onClick={() => setForceQcDialogOpen(true)}><ShieldCheck /> Force QC{forceQcEligibleCount > 0 ? ` (${forceQcEligibleCount})` : ""}</DropdownMenuItem>}
+                  {canForceQc && <DropdownMenuSeparator />}
                   <DropdownMenuItem disabled={!locationIds.length} onClick={() => setLocationIds([])}>Clear selection</DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -707,13 +761,13 @@ function ProductionOverview({
             </div>
             <div className="divide-y md:hidden">
               {visibleRequirements.map((requirement) => {
-                const percent = Math.round((requirement.completedOperations / requirement.totalOperations) * 100);
+                const percent = requirement.totalOperations ? Math.round((requirement.completedOperations / requirement.totalOperations) * 100) : 0;
                 return (
                   <article key={requirement.key} className="flex items-start gap-3 p-4 transition hover:bg-muted/40">
                     <Checkbox className="mt-1" aria-label={`Select ${requirement.partNumber}`} checked={requirement.requirementId !== null && locationIds.includes(requirement.requirementId)} disabled={requirement.requirementId === null || locationMutation.isPending} onCheckedChange={(checked) => requirement.requirementId !== null && togglePart(requirement.requirementId, Boolean(checked))} />
                     <div className="min-w-0 flex-1">
-                    <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary"><CopyPartNumber partNumber={requirement.partNumber} /> <ObsoleteBadge obsolete={requirement.obsolete} /> <HiddenBadge hidden={requirement.hidden} /></p><h3 className="mt-1 font-semibold">{requirement.partName}</h3><p className="mt-1 font-mono text-[11px] text-muted-foreground">Rev {requirement.revision ?? "—"} · {requirement.documentName ?? "Document not synced"}{requirement.syncedFromDocument && requirement.syncedFromDocument !== requirement.documentName ? ` via ${requirement.syncedFromDocument}` : ""} · Qty {requirement.quantity}</p><p className="mt-1 text-xs text-muted-foreground">Location: {requirement.storageLocation ?? "Not recorded"}</p></div><StatusBadge status={requirement.status} /></div>
-                     <div className="mt-3"><div className="mb-1.5 flex justify-between text-xs text-muted-foreground"><span>Mfg {requirement.completedManufacturingOperations}/{requirement.totalManufacturingOperations}{requirement.totalCamTasks > 0 ? ` · CAM ${requirement.completedCamTasks}/${requirement.totalCamTasks}` : ""}</span><span className="font-semibold text-foreground">{percent}%</span></div><div className="h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary" style={{ width: `${percent}%` }} /></div></div>
+                    <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary"><CopyPartNumber partNumber={requirement.partNumber} /> <ObsoleteBadge obsolete={requirement.obsolete} /> <HiddenBadge hidden={requirement.hidden} /></p><h3 className="mt-1 font-semibold">{requirement.partName}</h3><p className="mt-1 font-mono text-[11px] text-muted-foreground">Rev {requirement.revision ?? "—"} · {requirement.documentName ?? (requirement.cots ? "COTS" : "Document not synced")}{requirement.syncedFromDocument && requirement.syncedFromDocument !== requirement.documentName ? ` via ${requirement.syncedFromDocument}` : ""} · Qty {requirement.quantity}</p><p className="mt-1 text-xs text-muted-foreground">Location: {requirement.storageLocation ?? "Not recorded"}</p></div><StatusBadge status={requirement.status} /></div>
+                     {requirement.cots ? <p className="mt-3 text-xs text-muted-foreground">COTS · no routing</p> : <div className="mt-3"><div className="mb-1.5 flex justify-between text-xs text-muted-foreground"><span>Mfg {requirement.completedManufacturingOperations}/{requirement.totalManufacturingOperations}{requirement.totalCamTasks > 0 ? ` · CAM ${requirement.completedCamTasks}/${requirement.totalCamTasks}` : ""}</span><span className="font-semibold text-foreground">{percent}%</span></div><div className="h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary" style={{ width: `${percent}%` }} /></div></div>}
                      <Button className="mt-3 w-full" variant="outline" onClick={() => setSelectedRequirementKey(requirement.key)}>More details<ChevronRight /></Button>
                     </div>
                    </article>
@@ -733,6 +787,12 @@ function ProductionOverview({
           <DialogFooter><Button variant="outline" disabled={locationMutation.isPending} onClick={() => setLocationDialogOpen(false)}>Cancel</Button><Button disabled={!moveLocation || !selectedParts.length || locationMutation.isPending || (moveLocation === "On Robot" && blockedParts.length > 0)} onClick={() => locationMutation.mutate()}>{locationMutation.isPending && <LoaderCircle className="animate-spin" />}Set location</Button></DialogFooter>
         </DialogContent>
       </Dialog>
+      {canForceQc && <BulkForceQcDialog
+        open={forceQcDialogOpen}
+        onOpenChange={setForceQcDialogOpen}
+        requirements={forceQcParts}
+        onFinished={(succeeded) => setLocationIds((ids) => ids.filter((id) => !succeeded.includes(id)))}
+      />}
       <Sheet open={Boolean(selectedRequirement)} onOpenChange={(open) => !open && setSelectedRequirementKey(null)}>
         <SheetContent detailView className="w-full overflow-y-auto sm:max-w-2xl">
           {selectedRequirement && (
@@ -740,13 +800,13 @@ function ProductionOverview({
               <SheetHeader className="border-b p-6 pr-14">
                 <div className="mb-2 flex flex-wrap items-center gap-2">
                   <StatusBadge status={selectedRequirement.status} /><ObsoleteBadge obsolete={selectedRequirement.obsolete} /><HiddenBadge hidden={selectedRequirement.hidden} />
-                  <Badge variant="outline">{selectedRequirement.requirementStatus}</Badge>
+                  {selectedRequirement.cots ? <Badge variant="outline">COTS</Badge> : <><Badge variant="outline">{selectedRequirement.requirementStatus}</Badge>
                   <Badge variant="outline" className={cn(
                     selectedRequirement.effectiveQcResult === "passed" && "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-400/30 dark:bg-emerald-400/15 dark:text-emerald-200",
                     selectedRequirement.effectiveQcResult === "failed" && "border-rose-200 bg-rose-50 text-rose-800 dark:border-rose-400/30 dark:bg-rose-400/15 dark:text-rose-200",
                   )}>
                     {selectedRequirement.effectiveQcResult === "passed" ? "QC passed" : selectedRequirement.effectiveQcResult === "failed" ? "QC failed" : "QC pending"}
-                  </Badge>
+                  </Badge></>}
                 </div>
                 <SheetTitle className="text-2xl font-bold tracking-tight">{selectedRequirement.partName}</SheetTitle>
                 <SheetDescription className="font-mono text-xs font-semibold text-primary"><CopyPartNumber partNumber={selectedRequirement.partNumber} />{selectedRequirement.revision ? ` · Rev ${selectedRequirement.revision}` : ""}</SheetDescription>
@@ -769,7 +829,19 @@ function ProductionOverview({
                 <section>
                   <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Requirement details</h3>
                   <div className="grid grid-cols-2 overflow-hidden rounded-xl border">
-                    {[
+                    {(selectedRequirement.cots ? [
+                      ["Production key", selectedRequirement.requirementKey || "Not synced"],
+                      ["Synced from", selectedRequirement.sourceRoot
+                        ? `${syncedFrom(selectedRequirement) || "Unknown document"} · root ${selectedRequirement.sourceRoot}` : "Not synced"],
+                      ["Assembly", selectedRequirement.assemblyNumber],
+                      ["Configuration", selectedRequirement.configuration || "Default"],
+                      ["Required part revision", selectedRequirement.requiredPartRevision || selectedRequirement.revision || "—"],
+                      ["Required quantity", String(selectedRequirement.quantity)],
+                      ["Vendor", selectedRequirement.vendor || "Not specified"],
+                      ["BOM positions", selectedRequirement.bomPositions || "Not specified"],
+                      ["Active in BOM", selectedRequirement.activeInBom ? "Yes" : "No"],
+                      ["Engineering changed", selectedRequirement.engineeringChanged ? "Yes" : "No"],
+                    ] : [
                       ["Production key", selectedRequirement.requirementKey || "Not synced"],
                       ["Source document", selectedRequirement.documentName || "Not synced"],
                       ["Synced from", selectedRequirement.sourceRoot
@@ -787,7 +859,7 @@ function ProductionOverview({
                       ["Active in BOM", selectedRequirement.activeInBom ? "Yes" : "No"],
                       ["Engineering changed", selectedRequirement.engineeringChanged ? "Yes" : "No"],
                       ["Relevant operations", String(selectedRequirement.totalOperations)],
-                    ].map(([label, value], index, details) => (
+                    ]).map(([label, value], index, details) => (
                       <div key={label} className={cn("p-3", index % 2 === 0 && "border-r", index < details.length - 2 && "border-b")}>
                         <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{label}</p>
                         <p className="mt-1 break-words text-sm font-semibold">
@@ -830,13 +902,13 @@ function ProductionOverview({
                       canEdit
                       allowOnRobot={!selectedRequirement.obsolete && selectedRequirement.activeInBom && canUseOnRobotLocation(selectedRequirement.effectiveQcResult === "passed", selectedRequirement.finishingComplete)}
                     />
-                    {!canUseOnRobotLocation(selectedRequirement.effectiveQcResult === "passed", selectedRequirement.finishingComplete) && (
+                    {!selectedRequirement.cots && !canUseOnRobotLocation(selectedRequirement.effectiveQcResult === "passed", selectedRequirement.finishingComplete) && (
                       <p className="mt-2 text-xs text-muted-foreground">“On Robot” becomes available after QC passes and any required finishing is complete.</p>
                     )}
                   </section>
                 )}
 
-                <section>
+                {!selectedRequirement.cots && <section>
                   <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                     <h3 className="text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Quality review</h3>
                     {canForceQc && !selectedRequirement.obsolete && selectedRequirement.requirementId !== null && selectedRequirement.activeInBom && selectedRequirement.effectiveQcResult !== "passed" && hasUnfinishedQcPrerequisites(selectedRequirement.operations) && (
@@ -857,7 +929,7 @@ function ProductionOverview({
                     </div>
                     <p className={cn("mt-2 whitespace-pre-wrap text-sm", selectedRequirement.qualityNotes ? "text-foreground" : "text-muted-foreground")}>{selectedRequirement.qualityNotes || "No inspection notes recorded."}</p>
                   </div>
-                </section>
+                </section>}
 
                 <section>
                   <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Files & source</h3>
@@ -865,10 +937,12 @@ function ProductionOverview({
                     {(() => {
                       const operation = selectedRequirement.operations[0];
                       return [
-                        { label: "Drawing PDF", href: operation.hasDrawingPdf ? `/api/operations/${operation.id}/files/drawing-pdf` : null, fileName: operation.drawingPdfName, icon: FileText, preload: true },
-                        { label: "STEP file", href: operation.hasStepFile ? `/api/operations/${operation.id}/files/step` : null, fileName: operation.stepName, icon: Download, preload: true },
-                        { label: "Onshape drawing", href: operation.drawingUrl, fileName: null, icon: ArrowUpRight, preload: false },
-                        { label: "BOM source", href: operation.onshapeUrl, fileName: null, icon: Cloud, preload: false },
+                        ...(operation ? [
+                          { label: "Drawing PDF", href: operation.hasDrawingPdf ? `/api/operations/${operation.id}/files/drawing-pdf` : null, fileName: operation.drawingPdfName, icon: FileText, preload: true },
+                          { label: "STEP file", href: operation.hasStepFile ? `/api/operations/${operation.id}/files/step` : null, fileName: operation.stepName, icon: Download, preload: true },
+                          { label: "Onshape drawing", href: operation.drawingUrl, fileName: null, icon: ArrowUpRight, preload: false },
+                        ] : []),
+                        { label: "BOM source", href: selectedRequirement.onshapeUrl, fileName: null, icon: Cloud, preload: false },
                       ].map(({ label, href, fileName, icon: Icon, preload }) => href ? (
                         preload ? <ManufacturingFileLink key={label} href={href} download={label === "STEP file" ? fileName ?? true : undefined} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-3 rounded-xl border p-3 text-sm font-semibold transition hover:border-primary/40 hover:bg-accent/40"><div className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary"><Icon className="size-4" /></div><span className="min-w-0"><span className="block">{label}</span>{fileName && <span className="block truncate text-[10px] font-normal text-muted-foreground">{fileName}</span>}</span><ChevronRight className="ml-auto size-4 shrink-0 text-muted-foreground" /></ManufacturingFileLink>
                           : <a key={label} href={href} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-3 rounded-xl border p-3 text-sm font-semibold transition hover:border-primary/40 hover:bg-accent/40"><div className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary"><Icon className="size-4" /></div><span className="min-w-0"><span className="block">{label}</span>{fileName && <span className="block truncate text-[10px] font-normal text-muted-foreground">{fileName}</span>}</span><ChevronRight className="ml-auto size-4 shrink-0 text-muted-foreground" /></a>
@@ -879,7 +953,7 @@ function ProductionOverview({
                   </div>
                 </section>
 
-                <section>
+                {selectedRequirement.cots ? <p className="rounded-xl border border-dashed p-4 text-sm text-muted-foreground">COTS parts are purchased, so they have no operations. Record where they are stored above.</p> : <section>
                   <div className="mb-3 flex items-center justify-between gap-3">
                     <h3 className="text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Relevant operations</h3>
                     <span className="text-xs text-muted-foreground">{selectedRequirement.completedOperations}/{selectedRequirement.totalOperations} complete</span>
@@ -907,7 +981,7 @@ function ProductionOverview({
                       </article>
                     ))}
                   </div>
-                </section>
+                </section>}
 
                 {selectedRequirement.requirementId !== null && <RequirementHistory key={`history:${selectedRequirement.requirementId}`} requirementId={selectedRequirement.requirementId} />}
               </div></div>
@@ -1240,29 +1314,31 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
     onSettled: refreshManufacturingData,
   });
 
-  const bulkStepDownloadMutation = useMutation({
-    mutationFn: async (stepOperations: ManufacturingOperation[]) => {
-      if (stepOperations.length === 0) throw new Error("None of the selected operations have a STEP file");
+  const bulkFileDownloadMutation = useMutation({
+    mutationFn: async ({ kind, operations: fileOperations }: { kind: BulkFileKind; operations: ManufacturingOperation[] }) => {
+      const label = BULK_FILE_LABELS[kind];
+      if (fileOperations.length === 0) throw new Error(`None of the selected operations have a ${label}`);
       const usedNames = new Set<string>();
-      const results = await settleSequentially(stepOperations, async (operation) => {
-        const response = await fetch(`/api/operations/${operation.id}/files/step`, {
+      const results = await settleSequentially(fileOperations, async (operation) => {
+        const response = await fetch(`/api/operations/${operation.id}/files/${kind}`, {
           credentials: "same-origin",
           redirect: "follow",
         });
-        if (!response.ok) throw new Error(`Unable to download the STEP file for ${operation.partNumber}`);
-        saveBlobAs(await response.blob(), uniqueStepFileName(operation, usedNames));
+        if (!response.ok) throw new Error(`Unable to download the ${label} for ${operation.partNumber}`);
+        saveBlobAs(await response.blob(), uniqueFileName(operation, kind, usedNames));
         return operation.id;
       });
       const succeeded = results.filter((result) => result.status === "fulfilled").length;
       const failures = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
-      if (succeeded === 0) throw new Error(failures[0] instanceof Error ? failures[0].message : "No STEP files were downloaded");
-      return { succeeded, failed: failures.length };
+      if (succeeded === 0) throw new Error(failures[0] instanceof Error ? failures[0].message : `No ${label}s were downloaded`);
+      return { kind, succeeded, failed: failures.length };
     },
-    onSuccess: ({ succeeded, failed }) => {
-      if (failed) toast.warning(`Downloaded ${succeeded} STEP ${succeeded === 1 ? "file" : "files"}; ${failed} failed.`);
-      else toast.success(`Downloaded ${succeeded} STEP ${succeeded === 1 ? "file" : "files"}`);
+    onSuccess: ({ kind, succeeded, failed }) => {
+      const files = `${BULK_FILE_LABELS[kind]}${succeeded === 1 ? "" : "s"}`;
+      if (failed) toast.warning(`Downloaded ${succeeded} ${files}; ${failed} failed.`);
+      else toast.success(`Downloaded ${succeeded} ${files}`);
     },
-    onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to download the STEP files"),
+    onError: (error, { kind }) => toast.error(error instanceof Error ? error.message : `Unable to download the ${BULK_FILE_LABELS[kind]}s`),
   });
 
   const camHandoffMutation = useMutation({
@@ -1352,14 +1428,17 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
     return claimed > 0 ? [{ operation, quantity: claimed }] : [];
   });
   const selectedReleaseQuantity = selectedReleaseItems.reduce((total, item) => total + item.quantity, 0);
-  const selectedStepOperations = (() => {
+  // One file per production requirement, since its operations share the part's files.
+  const selectedFileOperations = (hasFile: (operation: ManufacturingOperation) => boolean) => {
     const seen = new Set<number>();
     return selectedBulkOperations.flatMap((operation) => {
-      if (!operation.hasStepFile || operation.requirementId === null || seen.has(operation.requirementId)) return [];
+      if (!hasFile(operation) || operation.requirementId === null || seen.has(operation.requirementId)) return [];
       seen.add(operation.requirementId);
       return [operation];
     });
-  })();
+  };
+  const selectedStepOperations = selectedFileOperations((operation) => operation.hasStepFile);
+  const selectedDrawingOperations = selectedFileOperations((operation) => operation.hasDrawingPdf);
   const hasLocationOnlySelection = selectedBulkOperations.length !== bulkItems.length;
   const selectedBulkActions = new Set(bulkItems.map((item) => item.action));
   const bulkAction = selectedBulkActions.size === 1 ? [...selectedBulkActions][0] : null;
@@ -1731,7 +1810,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                   {bulkActionMutation.isPending ? <LoaderCircle className="animate-spin" /> : <ListChecks />} {bulkButtonLabel}{bulkItems.length > 0 ? ` (${bulkItems.length})` : ""}
                 </Button>
                 <DropdownMenu>
-                  <DropdownMenuTrigger render={<Button size="sm" variant="outline" className="w-8 px-0" aria-label="More bulk actions" disabled={bulkActionMutation.isPending || bulkLocationMutation.isPending || bulkReleaseMutation.isPending || bulkStepDownloadMutation.isPending} />}>
+                  <DropdownMenuTrigger render={<Button size="sm" variant="outline" className="w-8 px-0" aria-label="More bulk actions" disabled={bulkActionMutation.isPending || bulkLocationMutation.isPending || bulkReleaseMutation.isPending || bulkFileDownloadMutation.isPending} />}>
                     <ChevronDown className="size-4" />
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end" className="w-52">
@@ -1744,10 +1823,16 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                       onClick={() => setBulkReleaseDialogOpen(true)}
                     ><RotateCcw /> Bulk release claim{selectedReleaseItems.length > 0 ? ` (${selectedReleaseItems.length})` : ""}</DropdownMenuItem>
                     <DropdownMenuItem
-                      disabled={selectedStepOperations.length === 0 || !query.data?.user?.approved || bulkStepDownloadMutation.isPending}
-                      onClick={() => bulkStepDownloadMutation.mutate(selectedStepOperations)}
+                      disabled={selectedStepOperations.length === 0 || !query.data?.user?.approved || bulkFileDownloadMutation.isPending}
+                      onClick={() => bulkFileDownloadMutation.mutate({ kind: "step", operations: selectedStepOperations })}
                     >
-                      {bulkStepDownloadMutation.isPending ? <LoaderCircle className="animate-spin" /> : <Download />} Bulk download STEP{selectedStepOperations.length > 0 ? ` (${selectedStepOperations.length})` : ""}
+                      {bulkFileDownloadMutation.isPending && bulkFileDownloadMutation.variables?.kind === "step" ? <LoaderCircle className="animate-spin" /> : <Download />} Bulk download STEP{selectedStepOperations.length > 0 ? ` (${selectedStepOperations.length})` : ""}
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      disabled={selectedDrawingOperations.length === 0 || !query.data?.user?.approved || bulkFileDownloadMutation.isPending}
+                      onClick={() => bulkFileDownloadMutation.mutate({ kind: "drawing-pdf", operations: selectedDrawingOperations })}
+                    >
+                      {bulkFileDownloadMutation.isPending && bulkFileDownloadMutation.variables?.kind === "drawing-pdf" ? <LoaderCircle className="animate-spin" /> : <FileText />} Bulk download drawing{selectedDrawingOperations.length > 0 ? ` (${selectedDrawingOperations.length})` : ""}
                     </DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
@@ -1836,6 +1921,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
         <ProductionOverview
           canForceQc={query.data?.user?.role === "admin" && query.data.user.approved}
           operations={query.data?.operations ?? operations}
+          cotsRequirements={query.data?.cotsRequirements ?? []}
           isLoading={query.isPending}
           isError={query.isError && !query.data}
           errorMessage={query.error instanceof Error ? query.error.message : undefined}

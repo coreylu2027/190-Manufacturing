@@ -111,8 +111,8 @@ export async function previewForceQuality(requirementId: number) {
   return writer().previewForceQuality(requirementId);
 }
 
-export async function forceQualityReview(requirementId: number, notes: string, token: string, actor: Actor, result: "passed" | "failed" = "passed") {
-  return writer().forceQualityReview(requirementId, notes, token, actor, result);
+export async function forceQualityReview(requirementId: number, notes: string, token: string, actor: Actor, result: "passed" | "failed" = "passed", completeFinishing = false) {
+  return writer().forceQualityReview(requirementId, notes, token, actor, result, completeFinishing);
 }
 
 export const updateQualityLocation = updatePartLocation;

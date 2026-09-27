@@ -180,22 +180,32 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       try { return { ...await createWritePlan(state.rows).previewForceQuality(requirementId), token: state.token }; }
       catch (error) { throw new ManufacturingWriteError(error instanceof Error ? error.message : "Unable to preview Force QC", 409); }
     },
-    forceQualityReview(requirementId: number, notes: string, token: string, actor: Actor, result: "passed" | "failed" = "passed") {
+    forceQualityReview(requirementId: number, notes: string, token: string, actor: Actor, result: "passed" | "failed" = "passed", completeFinishing = false) {
       const reviewedAt = new Date().toISOString();
+      if (completeFinishing && result !== "passed") return Promise.reject(new ManufacturingWriteError("Finishing can only be completed when QC passes", 400));
       return transact(actor, "qc_review", async (plan, state) => {
         if (token !== state.token) throw new ManufacturingWriteError("Manufacturing changed. Refresh the preview and review the affected work before submitting again.", 409);
         assertForceEligible(state, requirementId);
         try { await plan.forceCompletePrerequisites(requirementId, actor, reviewedAt); }
         catch (error) { throw new ManufacturingWriteError(error instanceof Error ? error.message : "Unable to force complete work", 409); }
         const updatedRequirement = await plan.patchRequirementQualityOutcome(requirementId, result, actor.name, notes, reviewedAt);
+        let requirementStatus = sourceSelectValue(updatedRequirement.Status, "Needs Triage");
+        let finishingCompleted = false;
+        if (completeFinishing) {
+          try {
+            const finished = await plan.forceCompleteFinishing(requirementId, actor);
+            if (finished) { requirementStatus = finished.requirementStatus; finishingCompleted = true; }
+          } catch (error) { throw new ManufacturingWriteError(error instanceof Error ? error.message : "Unable to complete finishing", 409); }
+        }
         return {
           requirementId,
           result,
           notes,
+          finishingCompleted,
           notificationContext: {
             ...notificationPartContext(state, requirementId),
             previousRequirementStatus: String(requirement(state, requirementId).status ?? "Needs Triage"),
-            requirementStatus: sourceSelectValue(updatedRequirement.Status, "Needs Triage"),
+            requirementStatus,
           },
         };
       }, { requirement_id: requirementId, result, notes, reviewed_at: reviewedAt, location: null });
