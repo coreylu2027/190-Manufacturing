@@ -806,6 +806,15 @@ async function previewForceQuality(requirementId: number) {
   const generatedNotes = "Admin Force QC — force-completed prerequisite work:\n" + operations.map(op => `${op.operationNumber} ${op.workType} (${op.machine || "CAM"}): ${op.previousStatus} → Complete; ${op.quantity} ${op.workType === "CAM" ? "task(s)" : "part(s)"} force-completed.`).join("\n");
   return { requirementId, productionKey: String(requirement["Production Key"] ?? ""), quantity, operations, generatedNotes, nextDestination };
 }
+/** Admin Force QC can also finish powder coating, crediting the admin. Null when no finishing is pending. */
+async function forceCompleteFinishing(requirementId: number, actor: { name: string }) {
+  const requirement = await getRow(REQUIREMENTS, requirementId);
+  if (selectValue(requirement.Status) !== "Ready for Finishing") return null;
+  const job = (await listAllRows(FINISHING)).find(row => Boolean(row.Active) && linkedId(row["Production Requirement"]) === requirementId);
+  if (!job) throw new Error("This production requirement has no active finishing job");
+  await patchRow(FINISHING, job.id, { Machinist: actor.name });
+  return applyFabricationAction(job.id, "complete", actor);
+}
 async function forceCompletePrerequisites(requirementId: number, actor: { id: string; name: string }, timestamp: string) {
   const preview = await previewForceQuality(requirementId);
   for (const item of preview.operations) {
@@ -824,7 +833,7 @@ async function forceCompletePrerequisites(requirementId: number, actor: { id: st
   }
   return preview;
 }
-return { previewForceQuality, forceCompletePrerequisites, applyFabricationAction,patchOperation,updateCamHandoff,applyQuantityAction,stealOperationClaim,renameMachinistAllocations,patchRequirementQualityOutcome,patchRequirementQualityNote,clearPassedRequirementQualityOutcome,
+return { previewForceQuality, forceCompletePrerequisites, forceCompleteFinishing, applyFabricationAction,patchOperation,updateCamHandoff,applyQuantityAction,stealOperationClaim,renameMachinistAllocations,patchRequirementQualityOutcome,patchRequirementQualityNote,clearPassedRequirementQualityOutcome,
  changes() {
  return ENTITIES.flatMap(entity=>(input[entity.name]??[]).flatMap(before=>{
  const after=normalizeRow(entity,rows[entity.name].find(r=>r.id===before.id)!);

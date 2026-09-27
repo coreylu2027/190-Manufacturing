@@ -136,6 +136,31 @@ test("Force QC routes finishing and post-QC work without completing inserts", as
   }
 });
 
+test("Force QC can complete finishing in the same passed review", async () => {
+  for (const postQcWork of [false, true]) {
+    const base = fixture({ requirement: { Finishing: { value: "Black" } }, finishing: { Machinist: "Other" } });
+    const { adapter, commits } = harness(postQcWork ? withThreadedInsert(base) : base);
+    const preview = await adapter.previewForceQuality(20);
+    const review = await adapter.forceQualityReview(20, "Finished", preview.token, ACTOR, "passed", true);
+    assert.equal(review.finishingCompleted, true);
+    assert.equal(review.notificationContext.requirementStatus, postQcWork ? "Ready for Manufacturing" : "Complete");
+    assert.equal(commits.length, 1);
+    assert.equal(commits[0].p_action, "qc_review");
+    const changes = commits[0].p_changes as Array<{ entity: string; id: number; patch: Record<string, unknown> }>;
+    assert.equal(changes.find(change => change.entity === "finishing")!.patch.machinist, ACTOR.name);
+    // The fixture starts in Ready for Manufacturing, so post-QC work leaves status unpatched.
+    assert.equal(changes.find(change => change.entity === "requirements")!.patch.status, postQcWork ? undefined : "Complete");
+    if (postQcWork) assert.equal(changes.find(change => change.entity === "operations" && change.id === 11)!.patch.status, "Ready");
+  }
+  // Without finishing, the option is a no-op.
+  const plain = harness(fixture());
+  const plainPreview = await plain.adapter.previewForceQuality(20);
+  assert.equal((await plain.adapter.forceQualityReview(20, "", plainPreview.token, ACTOR, "passed", true)).finishingCompleted, false);
+  const failing = harness(fixture({ requirement: { Finishing: { value: "Black" } } }));
+  await assert.rejects(failing.adapter.forceQualityReview(20, "", "fixture-token", ACTOR, "failed", true), /only be completed when QC passes/);
+  assert.equal(failing.commits.length, 0);
+});
+
 test("Force QC rejects stale previews, inactive requirements, completed prerequisites, and current passes", async () => {
   const stale = harness(fixture());
   await assert.rejects(stale.adapter.forceQualityReview(20, "", "old-token", ACTOR), /Refresh the preview/);

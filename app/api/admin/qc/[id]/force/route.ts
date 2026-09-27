@@ -5,7 +5,12 @@ import { forceQualityReview, previewForceQuality } from "@/lib/manufacturing";
 import { ManufacturingWriteError } from "@/lib/manufacturing/write-adapter";
 import { scheduleSlackManufacturingEvent } from "@/lib/slack-notifications";
 
-const schema = z.object({ notes: z.string().trim().max(2000), token: z.string().min(1), result: z.enum(["passed", "failed"]).default("passed") }).strict();
+const schema = z.object({
+  notes: z.string().trim().max(2000),
+  token: z.string().min(1),
+  result: z.enum(["passed", "failed"]).default("passed"),
+  completeFinishing: z.boolean().default(false),
+}).strict().refine(value => !value.completeFinishing || value.result === "passed", { message: "Finishing can only be completed when QC passes" });
 type Context = { params: Promise<{ id: string }> };
 async function handle(request: Request, context: Context) {
   const actor = await getAdminActor();
@@ -17,7 +22,7 @@ async function handle(request: Request, context: Context) {
     if (request.method === "GET") return NextResponse.json(await previewForceQuality(id));
     const parsed = schema.safeParse(await request.json().catch(() => null));
     if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message }, { status: 400 });
-    const result = await forceQualityReview(id, parsed.data.notes, parsed.data.token, actor, parsed.data.result);
+    const result = await forceQualityReview(id, parsed.data.notes, parsed.data.token, actor, parsed.data.result, parsed.data.completeFinishing);
     const { notificationContext, ...review } = result;
     scheduleSlackManufacturingEvent({
       type: "qc_reviewed",
