@@ -357,9 +357,14 @@ function isOperationClaimable(operation: ManufacturingOperation) {
   return workAllowed(operation) && ["Ready", "In Progress"].includes(operation.status) && operation.availableQuantity > 0;
 }
 
-/** Keeps every file in a bulk download distinct, since parts can share a STEP file name. */
-function uniqueStepFileName(operation: ManufacturingOperation, used: Set<string>) {
-  const name = safeManufacturingFileName(operation.stepName ?? "", `${operation.partNumber}.step`);
+type BulkFileKind = "drawing-pdf" | "step";
+const BULK_FILE_LABELS: Record<BulkFileKind, string> = { "drawing-pdf": "drawing", step: "STEP file" };
+
+/** Keeps every file in a bulk download distinct, since parts can share a file name. */
+function uniqueFileName(operation: ManufacturingOperation, kind: BulkFileKind, used: Set<string>) {
+  const name = kind === "step"
+    ? safeManufacturingFileName(operation.stepName ?? "", `${operation.partNumber}.step`)
+    : safeManufacturingFileName(operation.drawingPdfName ?? "", `${operation.partNumber}.pdf`);
   if (!used.has(name)) {
     used.add(name);
     return name;
@@ -1309,29 +1314,31 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
     onSettled: refreshManufacturingData,
   });
 
-  const bulkStepDownloadMutation = useMutation({
-    mutationFn: async (stepOperations: ManufacturingOperation[]) => {
-      if (stepOperations.length === 0) throw new Error("None of the selected operations have a STEP file");
+  const bulkFileDownloadMutation = useMutation({
+    mutationFn: async ({ kind, operations: fileOperations }: { kind: BulkFileKind; operations: ManufacturingOperation[] }) => {
+      const label = BULK_FILE_LABELS[kind];
+      if (fileOperations.length === 0) throw new Error(`None of the selected operations have a ${label}`);
       const usedNames = new Set<string>();
-      const results = await settleSequentially(stepOperations, async (operation) => {
-        const response = await fetch(`/api/operations/${operation.id}/files/step`, {
+      const results = await settleSequentially(fileOperations, async (operation) => {
+        const response = await fetch(`/api/operations/${operation.id}/files/${kind}`, {
           credentials: "same-origin",
           redirect: "follow",
         });
-        if (!response.ok) throw new Error(`Unable to download the STEP file for ${operation.partNumber}`);
-        saveBlobAs(await response.blob(), uniqueStepFileName(operation, usedNames));
+        if (!response.ok) throw new Error(`Unable to download the ${label} for ${operation.partNumber}`);
+        saveBlobAs(await response.blob(), uniqueFileName(operation, kind, usedNames));
         return operation.id;
       });
       const succeeded = results.filter((result) => result.status === "fulfilled").length;
       const failures = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
-      if (succeeded === 0) throw new Error(failures[0] instanceof Error ? failures[0].message : "No STEP files were downloaded");
-      return { succeeded, failed: failures.length };
+      if (succeeded === 0) throw new Error(failures[0] instanceof Error ? failures[0].message : `No ${label}s were downloaded`);
+      return { kind, succeeded, failed: failures.length };
     },
-    onSuccess: ({ succeeded, failed }) => {
-      if (failed) toast.warning(`Downloaded ${succeeded} STEP ${succeeded === 1 ? "file" : "files"}; ${failed} failed.`);
-      else toast.success(`Downloaded ${succeeded} STEP ${succeeded === 1 ? "file" : "files"}`);
+    onSuccess: ({ kind, succeeded, failed }) => {
+      const files = `${BULK_FILE_LABELS[kind]}${succeeded === 1 ? "" : "s"}`;
+      if (failed) toast.warning(`Downloaded ${succeeded} ${files}; ${failed} failed.`);
+      else toast.success(`Downloaded ${succeeded} ${files}`);
     },
-    onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to download the STEP files"),
+    onError: (error, { kind }) => toast.error(error instanceof Error ? error.message : `Unable to download the ${BULK_FILE_LABELS[kind]}s`),
   });
 
   const camHandoffMutation = useMutation({
@@ -1421,14 +1428,17 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
     return claimed > 0 ? [{ operation, quantity: claimed }] : [];
   });
   const selectedReleaseQuantity = selectedReleaseItems.reduce((total, item) => total + item.quantity, 0);
-  const selectedStepOperations = (() => {
+  // One file per production requirement, since its operations share the part's files.
+  const selectedFileOperations = (hasFile: (operation: ManufacturingOperation) => boolean) => {
     const seen = new Set<number>();
     return selectedBulkOperations.flatMap((operation) => {
-      if (!operation.hasStepFile || operation.requirementId === null || seen.has(operation.requirementId)) return [];
+      if (!hasFile(operation) || operation.requirementId === null || seen.has(operation.requirementId)) return [];
       seen.add(operation.requirementId);
       return [operation];
     });
-  })();
+  };
+  const selectedStepOperations = selectedFileOperations((operation) => operation.hasStepFile);
+  const selectedDrawingOperations = selectedFileOperations((operation) => operation.hasDrawingPdf);
   const hasLocationOnlySelection = selectedBulkOperations.length !== bulkItems.length;
   const selectedBulkActions = new Set(bulkItems.map((item) => item.action));
   const bulkAction = selectedBulkActions.size === 1 ? [...selectedBulkActions][0] : null;
@@ -1800,7 +1810,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                   {bulkActionMutation.isPending ? <LoaderCircle className="animate-spin" /> : <ListChecks />} {bulkButtonLabel}{bulkItems.length > 0 ? ` (${bulkItems.length})` : ""}
                 </Button>
                 <DropdownMenu>
-                  <DropdownMenuTrigger render={<Button size="sm" variant="outline" className="w-8 px-0" aria-label="More bulk actions" disabled={bulkActionMutation.isPending || bulkLocationMutation.isPending || bulkReleaseMutation.isPending || bulkStepDownloadMutation.isPending} />}>
+                  <DropdownMenuTrigger render={<Button size="sm" variant="outline" className="w-8 px-0" aria-label="More bulk actions" disabled={bulkActionMutation.isPending || bulkLocationMutation.isPending || bulkReleaseMutation.isPending || bulkFileDownloadMutation.isPending} />}>
                     <ChevronDown className="size-4" />
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end" className="w-52">
@@ -1813,10 +1823,16 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                       onClick={() => setBulkReleaseDialogOpen(true)}
                     ><RotateCcw /> Bulk release claim{selectedReleaseItems.length > 0 ? ` (${selectedReleaseItems.length})` : ""}</DropdownMenuItem>
                     <DropdownMenuItem
-                      disabled={selectedStepOperations.length === 0 || !query.data?.user?.approved || bulkStepDownloadMutation.isPending}
-                      onClick={() => bulkStepDownloadMutation.mutate(selectedStepOperations)}
+                      disabled={selectedStepOperations.length === 0 || !query.data?.user?.approved || bulkFileDownloadMutation.isPending}
+                      onClick={() => bulkFileDownloadMutation.mutate({ kind: "step", operations: selectedStepOperations })}
                     >
-                      {bulkStepDownloadMutation.isPending ? <LoaderCircle className="animate-spin" /> : <Download />} Bulk download STEP{selectedStepOperations.length > 0 ? ` (${selectedStepOperations.length})` : ""}
+                      {bulkFileDownloadMutation.isPending && bulkFileDownloadMutation.variables?.kind === "step" ? <LoaderCircle className="animate-spin" /> : <Download />} Bulk download STEP{selectedStepOperations.length > 0 ? ` (${selectedStepOperations.length})` : ""}
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      disabled={selectedDrawingOperations.length === 0 || !query.data?.user?.approved || bulkFileDownloadMutation.isPending}
+                      onClick={() => bulkFileDownloadMutation.mutate({ kind: "drawing-pdf", operations: selectedDrawingOperations })}
+                    >
+                      {bulkFileDownloadMutation.isPending && bulkFileDownloadMutation.variables?.kind === "drawing-pdf" ? <LoaderCircle className="animate-spin" /> : <FileText />} Bulk download drawing{selectedDrawingOperations.length > 0 ? ` (${selectedDrawingOperations.length})` : ""}
                     </DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
