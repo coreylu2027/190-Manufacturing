@@ -43,6 +43,9 @@ await install("supabase/migrations/20260922190000_admin_engineering_overrides.sq
 await install("supabase/migrations/20260923040000_passed_qc_quantity_corrections.sql");
 await install("supabase/migrations/20260923170000_requirement_history.sql");
 await install("supabase/migrations/20260924000000_configurable_qc_point.sql");
+await install("supabase/migrations/20260926010000_restored_requirement_robot_location.sql");
+// Reapplying the patch leaves the deployed function unchanged.
+await install("supabase/migrations/20260926010000_restored_requirement_robot_location.sql");
 
 const ADMIN = { id: "00000000-0000-4000-8000-000000000190", name: "Alex A." };
 const MACHINIST = "00000000-0000-4000-8000-000000000191";
@@ -607,4 +610,28 @@ test("the SQL QC point matches the app and drives routing initialization and app
   await sql("update manufacturing.requirements set qc_after_operation=1 where id=$1", [id]);
   await adapter.applyEngineeringOverrides(id, { quantity: { value: 3 }, passedQcQuantity: "approved" }, (await state(id)).token, "", ADMIN);
   assert.deepEqual((await ops(id)).map((operation) => [operation.status, Number(operation.completed_quantity)]), [["Complete", 3], ["Ready", 2]]);
+});
+
+test("a requirement restored from obsolete can move onto the robot through its deactivated routing", async () => {
+  const { id } = await passedPart({ quantity: 1 });
+  await sql(`insert into public.quality_control(production_requirement_id,result,notes,reviewed_by,reviewed_at)
+    values($1,'passed','',$2,now() + interval '1 minute')`, [id, ADMIN.id]);
+  // Sync removed it from the BOM; it was then obsoleted and restored.
+  await sql("update manufacturing.operations set active_in_routing=false where requirement_id=$1", [id]);
+  await sql(`update manufacturing.requirements set active_in_bom=false, obsolete=true, obsoletion_version=1,
+    obsoletion_changed_at=now(), obsoletion_origin='automatic' where id=$1`, [id]);
+  const moveOntoRobot = async () => {
+    const [{ token }] = await sql<{ token: string }>("select md5(manufacturing.write_snapshot()::text) token");
+    await sql(`select public.manufacturing_commit_with_locations($1::uuid,$2::uuid,'part_location',$3,'[]'::jsonb,$4::jsonb,'{}'::jsonb)`,
+      [crypto.randomUUID(), ADMIN.id, token, JSON.stringify({ requirement_id: id, location: "On Robot", location_updated_at: new Date().toISOString() })]);
+  };
+  await assert.rejects(moveOntoRobot(), /obsolete/);
+  await sql("update manufacturing.requirements set obsolete=false, obsoletion_version=2 where id=$1", [id]);
+  await moveOntoRobot();
+  assert.equal((await row("requirements", id)).part_location, "On Robot");
+
+  // Active routing, when present, is still the one that must be complete.
+  await sql("update manufacturing.requirements set part_location=null where id=$1", [id]);
+  await sql(`update manufacturing.operations set active_in_routing=true, status='In Progress' where requirement_id=$1`, [id]);
+  await assert.rejects(moveOntoRobot(), /On Robot requires passed QC and completed finishing/);
 });

@@ -4,6 +4,7 @@ import { createSupabaseManufacturingAdapter, supabaseApiHeaders, type AdapterCon
 import type { NormalizedRow } from "./model.ts";
 import type { FabricationAction, OperationPatch, OperationQuantityAction, QualityResult } from "../types.ts";
 import { ROBOT_LOCATION, canUseOnRobotLocation, isStorageLocation, isPrintingOperation, type StorageLocation } from "../storage-locations.ts";
+import { robotPlacementAllowed } from "../obsoletion.ts";
 
 import { notificationPartContext as resolvePartContext } from "./identity.ts";
 import { EngineeringOverrideError, planEngineeringOverrides } from "./engineering-override-plan.ts";
@@ -147,9 +148,12 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     message = "A location can only be edited for the latest effective passed QC review",
   ) {
     const review = latestReview(state, requirementId);
-    const manufacturingOperations = deduplicateOperations(state.rows.operations.filter((row) =>
-      row.active_in_routing && row.work_type === "Manufacturing" && row.requirement_id === requirementId
-        && !afterQc(state, row),
+    const requirementOperations = state.rows.operations.filter((row) => row.requirement_id === requirementId);
+    // A requirement restored from obsolete keeps its deactivated routing, which
+    // then remains the record of the inspected work.
+    const routed = requirementOperations.some((row) => row.active_in_routing);
+    const manufacturingOperations = deduplicateOperations(requirementOperations.filter((row) =>
+      (row.active_in_routing || !routed) && row.work_type === "Manufacturing" && !afterQc(state, row),
     ).map((row) => ({
       id: row.id,
       operationKey: String(row.operation_key ?? ""),
@@ -471,7 +475,10 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
           || requirementRow.qc_outcome === "Passed"
             && !["Ready for QC", "Ready for Finishing"].includes(String(requirementRow.status ?? ""));
         if (location === ROBOT_LOCATION) {
-          assertWorkAllowed(state, requirementId);
+          if (requirementRow.obsolete) throw new ManufacturingWriteError("This requirement is obsolete. Do not manufacture or install it.", 409);
+          if (!robotPlacementAllowed({ activeInBom: Boolean(requirementRow.active_in_bom), obsoletionVersion: Number(requirementRow.obsoletion_version ?? 0) })) {
+            throw new ManufacturingWriteError("This requirement is inactive in the BOM", 409);
+          }
           assertEffectivePassedReview(state, requirementId, "On Robot requires a current passed QC review");
           if (!canUseOnRobotLocation(true, finishingComplete)) {
             throw new ManufacturingWriteError("Complete finishing before moving this part onto the robot", 409);

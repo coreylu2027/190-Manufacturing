@@ -46,6 +46,7 @@ import { ProductionRequirementNotes } from "@/components/production-requirement-
 import { EngineeringOverrides } from "@/components/engineering-override-editor";
 import { StorageLocationEditor, StorageLocationSelect } from "@/components/storage-location-editor";
 import { isShopName } from "@/lib/profile-name";
+import { robotPlacementAllowed } from "@/lib/obsoletion";
 import { canUseOnRobotLocation, type StorageLocation } from "@/lib/storage-locations";
 import type { FabricationAction, FabricationActionPatch, FabricationJob, FabricationResponse, OperationStatus, OperationsResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -243,7 +244,7 @@ export function FabricationDashboard({
   const primaryLabel = primaryAction === "complete" || view === "mine" ? "Bulk complete" : "Bulk claim";
   const dialogJobs = bulkDialog === "location" ? selectedJobs : bulkDialog === "claim" ? claimable : owned;
   const locationJobs = [...new Map(selectedJobs.map((job) => [job.requirementId, job])).values()];
-  const allowOnRobot = locationJobs.length > 0 && locationJobs.every((job) => !job.obsolete && job.active && canUseOnRobotLocation(job.effectiveQcResult === "passed", job.status === "Complete"));
+  const allowOnRobot = locationJobs.length > 0 && locationJobs.every((job) => robotPlacementAllowed({ ...job, activeInBom: job.active }) && canUseOnRobotLocation(job.effectiveQcResult === "passed", job.status === "Complete"));
   const bulkMutation = useMutation({
     mutationFn: async ({ action, targets, location }: { action: "claim" | "complete" | "release" | "location"; targets: FabricationJob[]; location: StorageLocation | null }) => {
       const results = await settleSequentially(targets, async (job) => {
@@ -496,7 +497,7 @@ export function FabricationDashboard({
                     updatedBy={selected.locationUpdatedBy}
                     updatedAt={selected.locationUpdatedAt}
                     canEdit
-                    allowOnRobot={!selected.obsolete && selected.active && canUseOnRobotLocation(selected.effectiveQcResult === "passed", selected.status === "Complete")}
+                    allowOnRobot={robotPlacementAllowed({ ...selected, activeInBom: selected.active }) && canUseOnRobotLocation(selected.effectiveQcResult === "passed", selected.status === "Complete")}
                   />
                 </section>
 

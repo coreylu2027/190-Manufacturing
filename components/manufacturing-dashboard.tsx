@@ -1,5 +1,5 @@
 "use client";
-import { workAllowed } from "@/lib/obsoletion";
+import { robotPlacementAllowed, workAllowed } from "@/lib/obsoletion";
 import type { ObsoletionFields } from "@/lib/types";
 import { HiddenBadge, ObsoleteBadge, ObsoleteWarning, RequirementObsoletion, RequirementVisibility } from "@/components/requirement-obsoletion";
 import { CopyPartNumber, PartNumberCell } from "@/components/copy-part-number";
@@ -581,7 +581,7 @@ function ProductionOverview({
   const selectedRequirement = requirements.find((requirement) => requirement.key === selectedRequirementKey) ?? null;
   const openRequirement = (requirement: ProductionRequirement) => setSelectedRequirementKey(requirement.key);
   const selectedParts = requirements.filter((part) => isListed(part) && part.requirementId !== null && locationIds.includes(part.requirementId));
-  const blockedParts = selectedParts.filter((part) => part.obsolete || !part.activeInBom || !canUseOnRobotLocation(part.effectiveQcResult === "passed", part.finishingComplete));
+  const blockedParts = selectedParts.filter((part) => !robotPlacementAllowed(part) || !canUseOnRobotLocation(part.effectiveQcResult === "passed", part.finishingComplete));
   const forceQcParts = selectedParts.flatMap((part) => part.requirementId === null ? [] : [{ ...part, requirementId: part.requirementId }]);
   const forceQcEligibleCount = forceQcParts.filter((part) => !forceQcBlocker(part)).length;
   const visibleIds = visibleRequirements.flatMap((part) => part.requirementId === null ? [] : [part.requirementId]);
@@ -900,7 +900,7 @@ function ProductionOverview({
                       updatedBy={selectedRequirement.locationUpdatedBy}
                       updatedAt={selectedRequirement.locationUpdatedAt}
                       canEdit
-                      allowOnRobot={!selectedRequirement.obsolete && selectedRequirement.activeInBom && canUseOnRobotLocation(selectedRequirement.effectiveQcResult === "passed", selectedRequirement.finishingComplete)}
+                      allowOnRobot={robotPlacementAllowed(selectedRequirement) && canUseOnRobotLocation(selectedRequirement.effectiveQcResult === "passed", selectedRequirement.finishingComplete)}
                     />
                     {!selectedRequirement.cots && !canUseOnRobotLocation(selectedRequirement.effectiveQcResult === "passed", selectedRequirement.finishingComplete) && (
                       <p className="mt-2 text-xs text-muted-foreground">“On Robot” becomes available after QC passes and any required finishing is complete.</p>
@@ -1976,7 +1976,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                       updatedBy={selected.locationUpdatedBy}
                       updatedAt={selected.locationUpdatedAt}
                       canEdit
-                      allowOnRobot={!selected.obsolete && selected.activeInBom && canUseOnRobotLocation(selected.effectiveQcResult === "passed", selected.finishingComplete)}
+                      allowOnRobot={robotPlacementAllowed(selected) && canUseOnRobotLocation(selected.effectiveQcResult === "passed", selected.finishingComplete)}
                     />
                   </section>
                 )}
@@ -2220,7 +2220,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
               <DialogDescription>Set one location for {selectedLocationRequirementCount} part {selectedLocationRequirementCount === 1 ? "requirement" : "requirements"} across {selectedLocationOperations.length} selected operations. Claim and completion status will stay the same.</DialogDescription>
             </DialogHeader>
             <div className="my-5 space-y-3">
-              <StorageLocationSelect value={bulkMoveLocation} onChange={setBulkMoveLocation} emptyLabel="Choose a location" disabled={bulkLocationMutation.isPending} allowOnRobot={selectedLocationOperations.length > 0 && selectedLocationOperations.every((operation) => !operation.obsolete && operation.activeInBom && canUseOnRobotLocation(operation.effectiveQcResult === "passed", operation.finishingComplete))} />
+              <StorageLocationSelect value={bulkMoveLocation} onChange={setBulkMoveLocation} emptyLabel="Choose a location" disabled={bulkLocationMutation.isPending} allowOnRobot={selectedLocationOperations.length > 0 && selectedLocationOperations.every((operation) => robotPlacementAllowed(operation) && canUseOnRobotLocation(operation.effectiveQcResult === "passed", operation.finishingComplete))} />
               <p className="text-xs text-muted-foreground">Location applies to all quantities and operations of each selected part requirement.</p>
               {selectedLocationOperations.some((operation) => !visibleOperationIds.has(operation.id)) && <p className="text-xs text-amber-700 dark:text-amber-300">Includes selected operations hidden by the current filters.</p>}
             </div>
