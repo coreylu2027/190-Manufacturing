@@ -769,10 +769,10 @@ async function clearPassedRequirementQualityOutcome(requirementId: number) {
     || Number(row["Claimed Quantity"] ?? 0) > 0 || Number(row["Completed Quantity"] ?? 0) > 0)) {
     throw new Error("Undo the work after QC before undoing the QC pass");
   }
-  const finishing = selectValue((await getRow(REQUIREMENTS, requirementId)).Finishing);
-  const currentStatus = selectValue((await getRow(REQUIREMENTS, requirementId)).Status);
-  if (finishing && finishing !== "None" && currentStatus !== "Ready for Finishing") {
-    throw new Error("QC cannot be undone after finishing is complete");
+  // Undoing QC resets finishing too, even when it was already complete, so the finisher has to claim it again.
+  const finishingJob = (await listAllRows(FINISHING)).find(row => Boolean(row.Active) && linkedId(row["Production Requirement"]) === requirementId);
+  if (finishingJob && String(finishingJob.Machinist ?? "").trim()) {
+    await patchRow(FINISHING, finishingJob.id, { Machinist: "" });
   }
   await patchRow(REQUIREMENTS, requirementId, {
     "QC Outcome": "Not Inspected",

@@ -784,6 +784,24 @@ test("release, completion undo, CAM edits, finishing completion, and QC undo are
   });
   assert.equal(qcUndo.commits[0].p_action, "qc_undo");
   assert.deepEqual(qcUndo.commits[0].p_qc, { requirement_id: 20 });
+
+  const finishedQcUndo = harness(fixture({
+    operation: {
+      Status: { value: "Complete" }, Machinist: "Alex A. (2)", "Completed Quantity": 2,
+      "Quantity Ledger": JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 2 }]),
+      "Completed At": "2026-09-05T00:01:00Z",
+    },
+    requirement: {
+      Status: { value: "Complete" }, Finishing: { value: "Black" }, Machinist: "Alex A. (2)", "QC Outcome": { value: "Passed" },
+      "QC Notes": "Looks good", "QC Reviewed By": ACTOR.name, "QC Reviewed At": passedAt,
+    },
+    finishing: { Machinist: "Blake B." },
+    reviews: [{ id: 50, production_requirement_id: 20, operation_id: null, result: "passed", reviewed_at: passedAt }],
+  }));
+  await finishedQcUndo.adapter.undoQualityReview(20, ACTOR);
+  const finishedQcChanges = finishedQcUndo.commits[0].p_changes as { entity: string; id: number; patch: Record<string, unknown> }[];
+  assert.deepEqual(finishedQcChanges.find(change => change.entity === "finishing")?.patch, { machinist: null });
+  assert.equal(finishedQcChanges.find(change => change.entity === "requirements")?.patch.status, "Ready for QC");
 });
 
 test("stale edits become 409 responses and transport retries reuse the request ID", async () => {
