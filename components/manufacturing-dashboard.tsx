@@ -53,6 +53,7 @@ import { toast } from "sonner";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { AdminDashboard } from "@/components/admin-dashboard";
+import { EngineeringSyncReview } from "@/components/engineering-sync-review";
 import { DocumentProgressPanel } from "@/components/document-progress";
 import { ExpandableText } from "@/components/expandable-text";
 import { FabricationDashboard } from "@/components/fabrication-dashboard";
@@ -101,7 +102,7 @@ import {
 } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { documentProgress, syncedFrom } from "@/lib/document-progress";
-import { mergeVisibleSelection, settleSequentially } from "@/lib/bulk-selection";
+import { mergeVisibleSelection, postBulk, settleConcurrently } from "@/lib/bulk-selection";
 import { safeManufacturingFileName } from "@/lib/manufacturing/file-names";
 import { requirementStatus, type ProductionStatus } from "@/lib/production-status";
 import { nextWorkflowAction } from "@/lib/manufacturing-workflow";
@@ -146,6 +147,8 @@ const PartModelPreview = dynamic(
 
 function activeManufacturingQueryKey(workspaceView: WorkspaceView) {
   if (workspaceView === "production") return "operations";
+  // Shop changes alter what a staged sync would do; keep its review current.
+  if (workspaceView === "sync") return "engineering-sync";
   return workspaceView;
 }
 
@@ -359,6 +362,8 @@ function isOperationClaimable(operation: ManufacturingOperation) {
 
 type BulkFileKind = "drawing-pdf" | "step";
 const BULK_FILE_LABELS: Record<BulkFileKind, string> = { "drawing-pdf": "drawing", step: "STEP file" };
+// Downloads are independent reads, so a few can run at once.
+const BULK_DOWNLOAD_CONCURRENCY = 4;
 
 /** Keeps every file in a bulk download distinct, since parts can share a file name. */
 function uniqueFileName(operation: ManufacturingOperation, kind: BulkFileKind, used: Set<string>) {
@@ -606,17 +611,14 @@ function ProductionOverview({
     mutationFn: async () => {
       if (!moveLocation || !selectedParts.length) throw new Error("Select parts and a location");
       if (moveLocation === "On Robot" && blockedParts.length) throw new Error("Selected parts still require QC or finishing");
-      const results = await settleSequentially(selectedParts, async (part) => {
-        const response = await fetch(`/api/requirements/${part.requirementId}/location`, {
-          method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ location: moveLocation }),
-        });
-        const body = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(`${part.partNumber}: ${body.error ?? "Unable to update location"}`);
-        return part.requirementId!;
+      const results = await postBulk("/api/requirements/bulk/location", selectedParts, {
+        body: (parts) => ({ requirementIds: parts.map((part) => part.requirementId), location: moveLocation }),
+        fallbackError: "Unable to update location",
       });
       return {
-        succeeded: results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []),
-        errors: results.flatMap((result) => result.status === "rejected" ? [result.reason instanceof Error ? result.reason.message : "Unable to update location"] : []),
+        succeeded: results.flatMap((result, index) => result.status === "fulfilled" ? [selectedParts[index].requirementId!] : []),
+        errors: results.flatMap((result, index) => result.status === "rejected"
+          ? [`${selectedParts[index].partNumber}: ${result.reason instanceof Error ? result.reason.message : "Unable to update location"}`] : []),
       };
     },
     onSuccess: ({ succeeded, errors }) => {
@@ -1200,12 +1202,11 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
       notes: string;
       location: StorageLocation | null;
     }) => {
-      const results = await settleSequentially(items, async (item) => {
-        const response = await fetch(`/api/operations/${item.id}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            action,
+      const results = await postBulk<(typeof items)[number], Partial<ManufacturingOperation>>("/api/operations/bulk", items, {
+        body: (chunk) => ({
+          action,
+          items: chunk.map((item) => ({
+            id: item.id,
             quantity: item.quantity,
             ...(item.completeAllClaims ? { completeAllClaims: true } : {}),
             ...(location && item.workType === "Manufacturing" && (action === "complete" || item.printing) ? { location } : {}),
@@ -1213,13 +1214,11 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
               ...(programPath ? { programPath } : {}),
               notes,
             } : {}),
-          }),
-        });
-        const body = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(body.error ?? (action === "claim" ? "Claim failed" : "Completion failed"));
-        return { item, updated: body.updated as Partial<ManufacturingOperation> | undefined };
+          })),
+        }),
+        fallbackError: action === "claim" ? "Claim failed" : "Completion failed",
       });
-      const succeeded = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+      const succeeded = results.flatMap((result, index) => result.status === "fulfilled" ? [{ item: items[index], updated: result.value }] : []);
       const failed = results.length - succeeded.length;
       if (succeeded.length === 0) {
         const firstFailure = results.find((result) => result.status === "rejected");
@@ -1249,17 +1248,11 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
   const bulkLocationMutation = useMutation({
     mutationFn: async ({ selectedOperations, location }: { selectedOperations: ManufacturingOperation[]; location: StorageLocation }) => {
       const requirementIds = [...new Set(selectedOperations.flatMap((operation) => operation.requirementId === null ? [] : [operation.requirementId]))];
-      const results = await settleSequentially(requirementIds, async (requirementId) => {
-        const response = await fetch(`/api/requirements/${requirementId}/location`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ location }),
-        });
-        const body = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(body.error ?? "Unable to set part location");
-        return { requirementId, updated: body as Pick<ManufacturingOperation, "storageLocation" | "locationUpdatedBy" | "locationUpdatedAt"> };
+      const results = await postBulk<number, Pick<ManufacturingOperation, "storageLocation" | "locationUpdatedBy" | "locationUpdatedAt">>("/api/requirements/bulk/location", requirementIds, {
+        body: (ids) => ({ requirementIds: ids, location }),
+        fallbackError: "Unable to set part location",
       });
-      const succeeded = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+      const succeeded = results.flatMap((result, index) => result.status === "fulfilled" ? [{ requirementId: requirementIds[index], updated: result.value }] : []);
       const failures = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
       if (succeeded.length === 0) throw new Error(failures[0] instanceof Error ? failures[0].message : "No part locations were updated");
       return { succeeded, failed: failures.length, selectedOperations };
@@ -1283,17 +1276,12 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
 
   const bulkReleaseMutation = useMutation({
     mutationFn: async (items: { operation: ManufacturingOperation; quantity: number }[]) => {
-      const results = await settleSequentially(items, async ({ operation, quantity }) => {
-        const response = await fetch(`/api/operations/${operation.id}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "release", quantity }),
-        });
-        const body = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(body.error ?? `Unable to release ${operation.partNumber}`);
-        return { id: operation.id, quantity, updated: body.updated as Partial<ManufacturingOperation> | undefined };
+      const results = await postBulk<(typeof items)[number], Partial<ManufacturingOperation>>("/api/operations/bulk", items, {
+        body: (chunk) => ({ action: "release", items: chunk.map(({ operation, quantity }) => ({ id: operation.id, quantity })) }),
+        fallbackError: "Unable to release the selected claims",
       });
-      const succeeded = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+      const succeeded = results.flatMap((result, index) => result.status === "fulfilled"
+        ? [{ id: items[index].operation.id, quantity: items[index].quantity, updated: result.value }] : []);
       const failures = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
       if (succeeded.length === 0) throw new Error(failures[0] instanceof Error ? failures[0].message : "No claims were released");
       return { succeeded, failed: failures.length };
@@ -1319,7 +1307,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
       const label = BULK_FILE_LABELS[kind];
       if (fileOperations.length === 0) throw new Error(`None of the selected operations have a ${label}`);
       const usedNames = new Set<string>();
-      const results = await settleSequentially(fileOperations, async (operation) => {
+      const results = await settleConcurrently(fileOperations, BULK_DOWNLOAD_CONCURRENCY, async (operation) => {
         const response = await fetch(`/api/operations/${operation.id}/files/${kind}`, {
           credentials: "same-origin",
           redirect: "follow",
@@ -1658,8 +1646,8 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                 </Button>
                 <Button
                   variant="ghost"
-                  className={cn("h-10", workspaceView === "admin" ? "bg-accent/70 text-primary" : "text-muted-foreground")}
-                  aria-current={workspaceView === "admin" ? "page" : undefined}
+                  className={cn("h-10", workspaceView === "admin" || workspaceView === "sync" ? "bg-accent/70 text-primary" : "text-muted-foreground")}
+                  aria-current={workspaceView === "admin" || workspaceView === "sync" ? "page" : undefined}
                   nativeButton={false}
                   render={<Link href={WORKSPACE_ROUTES.admin} />}
                 >
@@ -1687,8 +1675,8 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
               aria-label="Refresh data"
               onClick={() => workspaceView === "fabrication"
                 ? queryClient.invalidateQueries({ queryKey: ["fabrication"] })
-                : workspaceView === "qc" || workspaceView === "admin"
-                  ? queryClient.invalidateQueries({ queryKey: [workspaceView] })
+                : workspaceView === "qc" || workspaceView === "admin" || workspaceView === "sync"
+                  ? queryClient.invalidateQueries({ queryKey: [activeManufacturingQueryKey(workspaceView)] })
                   : query.refetch()}
               disabled={["operations", "production"].includes(workspaceView) && query.isFetching}
             ><RefreshCw className={cn(["operations", "production"].includes(workspaceView) && query.isFetching && "animate-spin")} /></Button>
@@ -1721,12 +1709,12 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
               { id: "admin" as const, label: "Admin", icon: ShieldCheck },
             ] : []),
           ].map(({ id, label, icon: Icon }) => (
-            <Button key={id} size="sm" variant="ghost" className={cn("min-w-0 gap-1 px-1 text-[11px]", workspaceView === id ? "bg-accent/70 text-primary" : "text-muted-foreground")} aria-current={workspaceView === id ? "page" : undefined} nativeButton={false} render={<Link href={WORKSPACE_ROUTES[id]} />}><Icon />{label}</Button>
+            <Button key={id} size="sm" variant="ghost" className={cn("min-w-0 gap-1 px-1 text-[11px]", workspaceView === id || (id === "admin" && workspaceView === "sync") ? "bg-accent/70 text-primary" : "text-muted-foreground")} aria-current={workspaceView === id || (id === "admin" && workspaceView === "sync") ? "page" : undefined} nativeButton={false} render={<Link href={WORKSPACE_ROUTES[id]} />}><Icon />{label}</Button>
           ))}
         </nav>
       </header>
 
-      {workspaceView === "preferences" ? <PreferencesPage /> : workspaceView === "admin" ? <AdminDashboard /> : workspaceView === "qc" ? <QualityControlDashboard /> : workspaceView === "operations" ? <section className="mx-auto max-w-[1800px] px-4 py-5 md:px-7 md:py-7">
+      {workspaceView === "preferences" ? <PreferencesPage /> : workspaceView === "admin" ? <AdminDashboard /> : workspaceView === "sync" ? <EngineeringSyncReview /> : workspaceView === "qc" ? <QualityControlDashboard /> : workspaceView === "operations" ? <section className="mx-auto max-w-[1800px] px-4 py-5 md:px-7 md:py-7">
         <div className="mb-5 flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
           <div>
             <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-primary"><span className="size-2 rounded-full bg-emerald-500 shadow-[0_0_0_4px_rgba(16,185,129,.12)]" /> Shop queue</div>

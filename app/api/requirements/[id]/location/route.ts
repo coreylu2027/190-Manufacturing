@@ -4,7 +4,7 @@ import { z } from "zod";
 import { getAppUser } from "@/lib/auth";
 import { updatePartLocation } from "@/lib/manufacturing";
 import { ManufacturingWriteError } from "@/lib/manufacturing/write-adapter";
-import { scheduleSlackManufacturingEvent } from "@/lib/slack-notifications";
+import { scheduleLocationChangedEvent } from "@/lib/slack-notifications";
 import { storageLocationSchema } from "@/lib/storage-locations";
 
 const locationSchema = z.object({
@@ -28,18 +28,7 @@ export async function PATCH(request: Request, { params }: RouteContext<"/api/req
   try {
     const result = await updatePartLocation(requirementId, parsed.data.location, currentUser);
     const { notificationContext, ...updated } = result;
-    if (notificationContext.previousLocation !== parsed.data.location) {
-      scheduleSlackManufacturingEvent({
-        type: "location_changed",
-        actorName: currentUser.name,
-        location: parsed.data.location,
-        previousLocation: notificationContext.previousLocation,
-        requirementId: notificationContext.requirementId,
-        partNumber: notificationContext.partNumber,
-        partName: notificationContext.partName,
-        assemblyNumber: notificationContext.assemblyNumber,
-      });
-    }
+    scheduleLocationChangedEvent(currentUser.name, parsed.data.location, notificationContext);
     return NextResponse.json(updated);
   } catch (error) {
     return NextResponse.json(

@@ -22,8 +22,13 @@ after QC passes and any required finishing is complete.
 
 The historical [migration report](docs/baserow-supabase-staged-migration.md) and
 [shadow validation report](docs/supabase-shadow-migration.md) remain as offline
-cutover records. Onshape/BOM synchronization is maintained separately from this
-application.
+cutover records.
+
+The Onshape → Supabase BOM sync lives in [`integrations/onshape`](integrations/onshape).
+The Poot Horse workflow stages each sync, and administrators approve, trim, or
+deny it at `/admin/sync` before anything reaches the shop. See the
+[sync review runbook](docs/engineering-sync-review.md) for setup and the
+GitHub Actions secrets it needs.
 
 ## To-Do List
 

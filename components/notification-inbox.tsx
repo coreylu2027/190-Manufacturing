@@ -2,6 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { BellRing, LoaderCircle } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
@@ -53,6 +54,7 @@ function notificationFromRecord(record: Record<string, unknown>): AppNotificatio
 
 export function NotificationInbox({ userId }: { userId: string | null }) {
   const queryClient = useQueryClient();
+  const router = useRouter();
   const [realtimeUserId, setRealtimeUserId] = useState<string | null>(null);
   const query = useQuery({
     queryKey: ["notifications"],
@@ -122,6 +124,9 @@ export function NotificationInbox({ userId }: { userId: string | null }) {
   }, [queryClient, userId]);
 
   const current = query.data?.notifications[0] ?? null;
+  // Alerts may point at an in-app page, such as a staged Onshape sync to review.
+  const href = typeof current?.data.href === "string" && current.data.href.startsWith("/") && !current.data.href.startsWith("//")
+    ? current.data.href : null;
   const mutation = useMutation({
     mutationFn: async (id: string) => {
       const response = await fetch(`/api/notifications/${id}`, { method: "PATCH" });
@@ -152,9 +157,14 @@ export function NotificationInbox({ userId }: { userId: string | null }) {
               <p className="text-xs text-muted-foreground">1 of {query.data.notifications.length} unread alerts</p>
             )}
             <DialogFooter>
-              <Button onClick={() => mutation.mutate(current.id)} disabled={mutation.isPending}>
+              <Button variant={href ? "outline" : "default"} onClick={() => mutation.mutate(current.id)} disabled={mutation.isPending}>
                 {mutation.isPending && <LoaderCircle className="animate-spin" />} Acknowledge
               </Button>
+              {href && (
+                <Button disabled={mutation.isPending} onClick={() => mutation.mutate(current.id, { onSuccess: () => router.push(href) })}>
+                  Review now
+                </Button>
+              )}
             </DialogFooter>
           </>
         )}

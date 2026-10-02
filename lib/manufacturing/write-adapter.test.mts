@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import { ENTITIES, normalizeRow, runtimeRow, type NormalizedRow, type RawRow } from "./model.ts";
 import { createSupabaseWriteAdapter, ManufacturingWriteError, type WriteState } from "./write-adapter.ts";
+import { createWritePlan } from "./write-plan.ts";
 import { formatSlackManufacturingEvent } from "../slack-notifications-core.ts";
 
 const ACTOR = { id: "00000000-0000-4000-8000-000000000190", name: "Alex A." };
@@ -951,3 +952,158 @@ for (const scenario of [
     assert.equal(commits.length, 0);
   });
 }
+
+type Change = { entity: string; id: number; patch: Record<string, unknown> };
+
+/** Adds another requirement with one OP1 operation and a finishing job (ID + 100), mirroring the fixture. */
+function withRequirement(state: WriteState, requirementId: number, operationId: number, options: {
+  operation?: Partial<RawRow>;
+  requirement?: Partial<RawRow>;
+  finishing?: Partial<RawRow>;
+} = {}) {
+  const link = [{ id: requirementId, value: "P-1 — Fixture [A-1]" }];
+  state.rows.requirements.push(normalized("requirements", {
+    id: requirementId, "Production Key": `fixture-${requirementId}`, Part: [{ id: 40 }], Assembly: [{ id: 50 }],
+    "Required Quantity": 2, Finishing: { value: "None" }, "Active in BOM": true,
+    Status: { value: "Ready for Manufacturing" }, Machinist: "", "QC Outcome": { value: "Not Inspected" },
+    "QC Notes": "", "QC Reviewed By": "", ...options.requirement,
+  }));
+  state.rows.operations.push(normalized("operations", {
+    id: operationId, Operation: `fixture-${requirementId}|OP1|Manufacturing`, "Production Requirement": link,
+    "Operation Number": { value: "OP1" }, Machine: { value: "Mill" }, "Work Type": { value: "Manufacturing" },
+    "Active in Routing": true, Status: { value: "Ready" }, Machinist: "",
+    "Claimed Quantity": 0, "Completed Quantity": 0, "Quantity Ledger": "", ...options.operation,
+  }));
+  state.rows.finishing.push(normalized("finishing", {
+    id: operationId + 100, "Production Key": `fixture-${requirementId}`, "Production Requirement": link,
+    Active: true, Machinist: "", ...options.finishing,
+  }));
+  return state;
+}
+
+test("a failed write-plan attempt leaves no partial changes for the next target", async () => {
+  const plan = createWritePlan(fixture().rows);
+  await assert.rejects(plan.attempt(async () => {
+    await plan.applyQuantityAction(10, "claim", 1, ACTOR);
+    throw new Error("later validation failed");
+  }), /later validation failed/);
+  assert.deepEqual(plan.changes(), []);
+  await plan.attempt(() => plan.applyQuantityAction(10, "claim", 2, ACTOR));
+  const operation = plan.changes().find((change) => change.entity === "operations")!.patch;
+  assert.equal(operation.claimed_quantity, 2);
+});
+
+test("bulk claims commit every valid target in one transaction and report the rest", async () => {
+  const state = withRequirement(withRequirement(fixture(), 21, 13), 22, 14, { operation: { Status: { value: "Planned" } } });
+  const { adapter, commits } = harness(state);
+  const results = await adapter.applyQuantityActions("claim", [
+    { id: 10, quantity: 1 },
+    { id: 14, quantity: 1 },
+    { id: 13, quantity: 2 },
+  ], ACTOR);
+  assert.deepEqual(results.map((result) => result.status), ["fulfilled", "rejected", "fulfilled"]);
+  assert.match(String((results[1] as PromiseRejectedResult).reason), /not available to claim/);
+  assert.equal(commits.length, 1);
+  assert.equal(commits[0].p_action, "claim");
+  assert.equal(commits[0].p_expected, "fixture-token");
+  const changes = commits[0].p_changes as Change[];
+  assert.deepEqual(changes.filter((change) => change.entity === "operations").map((change) => [change.id, change.patch.claimed_quantity]), [[10, 1], [13, 2]]);
+  assert.deepEqual(changes.filter((change) => change.entity === "requirements").map((change) => change.id), [20, 21]);
+  assert.equal((commits[0].p_result as unknown[]).length, 2);
+  const claimed = results[2] as PromiseFulfilledResult<{ claimedQuantity: number; notificationContext: { requirementId: number } }>;
+  assert.equal(claimed.value.claimedQuantity, 2);
+  assert.equal(claimed.value.notificationContext.requirementId, 21);
+});
+
+test("bulk completions that move a part commit separately and keep request order", async () => {
+  const claimed = (quantity: number) => ({
+    Status: { value: "In Progress" }, "Claimed Quantity": quantity,
+    "Quantity Ledger": JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: quantity, completed: 0 }]),
+  });
+  const state = withRequirement(fixture({ operation: claimed(2) }), 21, 13, { operation: claimed(2) });
+  const { adapter, commits } = harness(state);
+  const results = await adapter.applyQuantityActions("complete", [
+    { id: 10, quantity: 2, handoff: { location: "Shelf 1" } },
+    { id: 13, quantity: 2, handoff: {} },
+  ], ACTOR);
+  assert.deepEqual(results.map((result) => result.status), ["fulfilled", "fulfilled"]);
+  const moved = results[0] as PromiseFulfilledResult<{ id: number; storageLocation?: string }>;
+  assert.equal(moved.value.id, 10);
+  assert.equal(moved.value.storageLocation, "Shelf 1");
+  assert.equal((results[1] as PromiseFulfilledResult<{ id: number }>).value.id, 13);
+  assert.equal(commits.length, 2);
+  assert.deepEqual((commits[0].p_changes as Change[]).filter((change) => change.entity === "operations").map((change) => change.id), [13]);
+  assert.equal((commits[1].p_result as { storageLocation: string }).storageLocation, "Shelf 1");
+});
+
+test("a rejected bulk commit fails every planned target without retrying", async () => {
+  const state = withRequirement(fixture(), 21, 13);
+  const { adapter, commits } = harness(state, () => Response.json({ code: "PT409", message: "Manufacturing state changed" }, { status: 409 }));
+  const results = await adapter.applyQuantityActions("claim", [{ id: 10, quantity: 1 }, { id: 13, quantity: 1 }], ACTOR);
+  assert.equal(commits.length, 1);
+  for (const result of results) {
+    assert.equal(result.status, "rejected");
+    const reason = (result as PromiseRejectedResult).reason;
+    assert.ok(reason instanceof ManufacturingWriteError && reason.status === 409);
+  }
+});
+
+test("bulk finishing completion commits every job in one transaction", async () => {
+  const ready = {
+    requirement: { Finishing: { value: "Black" }, Status: { value: "Ready for Finishing" }, "QC Outcome": { value: "Passed" } },
+    finishing: { Machinist: ACTOR.name },
+  };
+  const state = withRequirement(fixture(ready), 21, 13, ready);
+  const { adapter, commits } = harness(state);
+  const results = await adapter.applyFabricationActions("complete", [30, 113], ACTOR);
+  assert.deepEqual(results.map((result) => result.status), ["fulfilled", "fulfilled"]);
+  assert.equal(commits.length, 1);
+  assert.equal(commits[0].p_action, "finishing_complete");
+  const statuses = (commits[0].p_changes as Change[]).filter((change) => change.entity === "requirements").map((change) => [change.id, change.patch.status]);
+  assert.deepEqual(statuses, [[20, "Complete"], [21, "Complete"]]);
+});
+
+test("one writer reads part and assembly identities once across sequential bulk writes", async () => {
+  const state = withRequirement(fixture(), 21, 13);
+  const { parts, assemblies } = state.rows;
+  delete state.rows.parts;
+  delete state.rows.assemblies;
+  const reads: string[] = [];
+  let commits = 0;
+  const adapter = createSupabaseWriteAdapter({ url: "https://example.test", serviceKey: "test", fetch: async (input, init) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("manufacturing_write_state")) return Response.json(state);
+    const entity = url.searchParams.get("p_entity");
+    if (entity) {
+      reads.push(entity);
+      const rows = entity === "parts" ? parts : assemblies;
+      return Response.json({ rows, total: rows.length });
+    }
+    commits += 1;
+    return Response.json(JSON.parse(String(init?.body)).p_result);
+  } });
+  const first = await adapter.updatePartLocation(20, "Shelf 1", ACTOR);
+  const second = await adapter.updatePartLocation(21, "Shelf 1", ACTOR);
+  assert.equal(first.notificationContext.partNumber, "P-1");
+  assert.equal(second.notificationContext.requirementId, 21);
+  assert.equal(commits, 2);
+  assert.deepEqual(reads.sort(), ["assemblies", "parts"]);
+});
+
+test("bulk Force QC derives its notes from the preview planned in the same commit", async () => {
+  const { adapter, commits } = harness(fixture({ operation: {
+    Status: { value: "In Progress" }, "Claimed Quantity": 1,
+    "Quantity Ledger": JSON.stringify([{ userId: "other", name: "Other", claimed: 1, completed: 0 }]),
+  } }));
+  const review = await adapter.forceQualityReview(20, (preview) => `${preview.generatedNotes}\n\nShared note`, null, ACTOR);
+  assert.equal(commits.length, 1);
+  const notes = (commits[0].p_qc as { notes: string }).notes;
+  assert.match(notes, /^Admin Force QC — force-completed prerequisite work:\nOP1 Manufacturing/);
+  assert.match(notes, /\n\nShared note$/);
+  assert.equal(review.notes, notes);
+  await assert.rejects(
+    adapter.forceQualityReview(20, () => { throw new ManufacturingWriteError("Inspection notes exceed 2000 characters", 400); }, null, ACTOR),
+    (error: unknown) => error instanceof ManufacturingWriteError && error.status === 400,
+  );
+  assert.equal(commits.length, 1);
+});

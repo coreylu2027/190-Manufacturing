@@ -10,8 +10,15 @@ import { notificationPartContext as resolvePartContext } from "./identity.ts";
 import { EngineeringOverrideError, planEngineeringOverrides } from "./engineering-override-plan.ts";
 import type { EngineeringCorrection, EngineeringOverrideFields, EngineeringOverrideState, OverrideFileKind } from "../engineering-overrides.ts";
 import type { RequirementHistoryPayload } from "../requirement-history.ts";
+import {
+  buildApprovedPayload, buildSyncReview, deniedReview, SyncReviewError,
+  type StoredSyncReview, type SyncPayload, type SyncProposalStatus, type SyncProposalSummary, type SyncReviewState,
+} from "../engineering-sync-review.ts";
 
 const STALE_OVERRIDE_MESSAGE = "Onshape data or another adjustment changed. Review the latest values and try again.";
+const STALE_SYNC_REVIEW_MESSAGE = "The proposed changes or the shop's data changed while you were reviewing. Review the latest changes and try again.";
+
+export type SyncDecisionResult = Record<string, unknown> & { status: string; proposal_status: SyncProposalStatus; error?: string };
 
 export class ManufacturingWriteError extends Error {
   status: number;
@@ -35,6 +42,9 @@ export interface WriteState {
 }
 type Actor = { id: string; name: string };
 type Plan = ReturnType<typeof createWritePlan>;
+type ForceQualityPreview = Awaited<ReturnType<Plan["previewForceQuality"]>>;
+export type QuantityHandoff = { programPath?: string; notes?: string; location?: StorageLocation; completeAllClaims?: boolean };
+export interface QuantityTarget { id: number; quantity: number; handoff?: QuantityHandoff }
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 function sourceSelectValue(value: unknown, fallback = "") {
   return typeof value === "object" && value !== null && "value" in value
@@ -43,12 +53,12 @@ function sourceSelectValue(value: unknown, fallback = "") {
 }
 export function createSupabaseWriteAdapter(config: AdapterConfig) {
   const request = config.fetch ?? fetch;
-  async function rpc<T>(name: string, body?: unknown): Promise<T> {
+  async function rpc<T>(name: string, body?: unknown, timeoutMs = 30_000): Promise<T> {
     const response = await request(`${config.url.replace(/\/$/, "")}/rest/v1/rpc/${name}`, {
       method: body === undefined ? "GET" : "POST",
       headers: { ...supabaseApiHeaders(config.serviceKey), "Content-Type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
-      cache: "no-store", redirect: "error", signal: AbortSignal.timeout(30_000),
+      cache: "no-store", redirect: "error", signal: AbortSignal.timeout(timeoutMs),
     });
     if (!response.ok) {
       const error = await response.json().catch(() => ({})) as { code?: string; message?: string };
@@ -68,6 +78,22 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     }
     return response.json();
   }
+  function assertActor(actor: Actor) {
+    if (!UUID_PATTERN.test(actor.id) || !actor.name.trim()) throw new ManufacturingWriteError("An authenticated manufacturing actor is required", 401);
+  }
+  async function writeState() {
+    const state = await rpc<WriteState>("manufacturing_write_state");
+    state.rows = await withIdentityRows(state);
+    return state;
+  }
+  async function commit<T>(actor: Actor, action: string, state: WriteState, plan: Plan, result: T, qualityPayload: object | null, commitRpc: string) {
+    const body = { p_request_id: crypto.randomUUID(), p_actor: actor.id, p_action: action,
+      p_expected: state.token, p_changes: plan.changes(), p_qc: qualityPayload, p_result: result ?? null };
+    // A transport failure can occur after commit. Repeat the identical request ID;
+    // the database returns the recorded result instead of applying it twice.
+    try { return await rpc<T>(commitRpc, body); }
+    catch (error) { if (error instanceof ManufacturingWriteError) throw error; return rpc<T>(commitRpc, body); }
+  }
   async function transact<T>(
     actor: Actor,
     action: string,
@@ -75,23 +101,36 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     qc: object | ((state: WriteState, result: T) => object | null) | null = null,
     commitRpc = "manufacturing_commit_with_qc_quantities",
   ) {
-    if (!UUID_PATTERN.test(actor.id) || !actor.name.trim()) throw new ManufacturingWriteError("An authenticated manufacturing actor is required", 401);
-    const state = await rpc<WriteState>("manufacturing_write_state");
-    const reader = createSupabaseManufacturingAdapter(config);
-    const [parts, assemblies] = await Promise.all([
-      state.rows.parts ?? reader.readEntity("parts"),
-      state.rows.assemblies ?? reader.readEntity("assemblies"),
-    ]);
-    state.rows = { ...state.rows, parts, assemblies };
+    assertActor(actor);
+    const state = await writeState();
     const plan = createWritePlan(state.rows);
     const result = await build(plan, state);
-    const qualityPayload = typeof qc === "function" ? qc(state, result) : qc;
-    const body = { p_request_id: crypto.randomUUID(), p_actor: actor.id, p_action: action,
-      p_expected: state.token, p_changes: plan.changes(), p_qc: qualityPayload, p_result: result ?? null };
-    // A transport failure can occur after commit. Repeat the identical request ID;
-    // the database returns the recorded result instead of applying it twice.
-    try { return await rpc<T>(commitRpc, body); }
-    catch (error) { if (error instanceof ManufacturingWriteError) throw error; return rpc<T>(commitRpc, body); }
+    return commit(actor, action, state, plan, result, typeof qc === "function" ? qc(state, result) : qc, commitRpc);
+  }
+  /**
+   * Applies one action to many targets in a single compare-and-swap transaction.
+   * A target that fails validation is reported and skipped without partial
+   * changes; the rest commit together.
+   */
+  async function transactEach<Item, T>(
+    actor: Actor,
+    action: string,
+    items: readonly Item[],
+    build: (plan: Plan, state: WriteState, item: Item) => Promise<T>,
+  ): Promise<PromiseSettledResult<T>[]> {
+    assertActor(actor);
+    const state = await writeState();
+    const plan = createWritePlan(state.rows);
+    const results: PromiseSettledResult<T>[] = [];
+    for (const item of items) {
+      try { results.push({ status: "fulfilled", value: await plan.attempt(() => build(plan, state, item)) }); }
+      catch (reason) { results.push({ status: "rejected", reason }); }
+    }
+    const values = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+    if (values.length === 0) return results;
+    try { await commit(actor, action, state, plan, values, null, "manufacturing_commit_with_qc_quantities"); }
+    catch (reason) { return results.map((result) => result.status === "fulfilled" ? { status: "rejected", reason } : result); }
+    return results;
   }
   function operation(state: WriteState, id: number) {
     const row = state.rows.operations.find(row => row.id === id);
@@ -122,13 +161,23 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     if (!row.active_in_bom) throw new ManufacturingWriteError("This requirement is inactive in the BOM", 409);
     return row;
   }
+  // Part and assembly identities only label notifications, so one bulk request
+  // reads them once instead of paging through both tables for every target.
+  const identityReads = new Map<"parts" | "assemblies", Promise<NormalizedRow[]>>();
+  function identityRows(state: WriteState, entity: "parts" | "assemblies") {
+    if (state.rows[entity]) return state.rows[entity];
+    let read = identityReads.get(entity);
+    if (!read) {
+      read = createSupabaseManufacturingAdapter(config).readEntity(entity);
+      identityReads.set(entity, read);
+      const pending = read;
+      pending.catch(() => { if (identityReads.get(entity) === pending) identityReads.delete(entity); });
+    }
+    return read;
+  }
   /** Adds the part and assembly rows that the write-state snapshot omits. */
   async function withIdentityRows(state: WriteState) {
-    const reader = createSupabaseManufacturingAdapter(config);
-    const [parts, assemblies] = await Promise.all([
-      state.rows.parts ?? reader.readEntity("parts"),
-      state.rows.assemblies ?? reader.readEntity("assemblies"),
-    ]);
+    const [parts, assemblies] = await Promise.all([identityRows(state, "parts"), identityRows(state, "assemblies")]);
     return { ...state.rows, parts, assemblies };
   }
   function notificationPartContext(state: WriteState, requirementId: number) {
@@ -177,6 +226,42 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     catch (error) { if (!(error instanceof ManufacturingWriteError)) throw error; }
     if (passed) throw new ManufacturingWriteError("This requirement already has a current QC pass", 409);
   }
+  async function quantityAction(plan: Plan, state: WriteState, id: number, action: OperationQuantityAction, quantity: number, actor: Actor, handoff?: QuantityHandoff) {
+    const row = operation(state, id);
+    const printing = isPrintingOperation({ machine: String(row.machine ?? ""), workType: String(row.work_type ?? "Manufacturing") });
+    if (handoff?.completeAllClaims && (action !== "complete" || !printing)) {
+      throw new ManufacturingWriteError("Only 3D printing claims can be completed on behalf of other users", 400);
+    }
+    if (handoff?.location !== undefined) {
+      if (!isStorageLocation(handoff.location)) throw new ManufacturingWriteError("Invalid storage location", 400);
+      if (row.work_type === "CAM" || !(action === "complete" || action === "claim" && printing)) {
+        throw new ManufacturingWriteError("Set a location when claiming printed parts or completing manufacturing work", 400);
+      }
+      if (handoff.location === ROBOT_LOCATION) throw new ManufacturingWriteError("Move parts onto the robot separately after QC and finishing", 409);
+    }
+    if (afterQc(state, row) && ["claim", "complete"].includes(action)) {
+      assertEffectivePassedReview(state, Number(row.requirement_id), "Work after QC requires a current passed QC review");
+    }
+    const result = await plan.applyQuantityAction(id, action, quantity, actor, handoff);
+    return { ...result, ...(handoff?.location === undefined ? {} : {
+      storageLocation: handoff.location,
+      locationUpdatedBy: actor.name,
+      locationUpdatedAt: new Date().toISOString(),
+    }) };
+  }
+  function commitQuantityAction(id: number, action: OperationQuantityAction, quantity: number, actor: Actor, handoff?: QuantityHandoff) {
+    return transact(actor, action, (plan, state) => quantityAction(plan, state, id, action, quantity, actor, handoff),
+      null, handoff?.location === undefined ? "manufacturing_commit_with_qc_quantities" : "manufacturing_commit_with_operation_location");
+  }
+  async function fabricationAction(plan: Plan, state: WriteState, id: number, action: FabricationAction, actor: Actor) {
+    const finishing = state.rows.finishing.find((candidate) => candidate.id === id);
+    if (!finishing?.active) throw new ManufacturingWriteError("This finishing job is no longer active", 409);
+    assertWorkAllowed(state, Number(finishing.requirement_id));
+    if (action === "undo_complete" && requirement(state, Number(finishing.requirement_id)).part_location === ROBOT_LOCATION) {
+      throw new ManufacturingWriteError("Move the part off the robot before reopening finishing", 409);
+    }
+    return plan.applyFabricationAction(id, action, actor);
+  }
   return {
     async previewForceQuality(requirementId: number) {
       const state = await rpc<WriteState>("manufacturing_write_state");
@@ -184,14 +269,21 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       try { return { ...await createWritePlan(state.rows).previewForceQuality(requirementId), token: state.token }; }
       catch (error) { throw new ManufacturingWriteError(error instanceof Error ? error.message : "Unable to preview Force QC", 409); }
     },
-    forceQualityReview(requirementId: number, notes: string, token: string, actor: Actor, result: "passed" | "failed" = "passed", completeFinishing = false) {
+    /**
+     * With a preview token, commits only if nothing changed since that preview.
+     * Bulk Force QC passes null and derives the notes from the preview planned
+     * in the committing transaction instead of a separate preview request.
+     */
+    forceQualityReview(requirementId: number, notesOrBuilder: string | ((preview: ForceQualityPreview) => string), token: string | null, actor: Actor, result: "passed" | "failed" = "passed", completeFinishing = false) {
       const reviewedAt = new Date().toISOString();
       if (completeFinishing && result !== "passed") return Promise.reject(new ManufacturingWriteError("Finishing can only be completed when QC passes", 400));
       return transact(actor, "qc_review", async (plan, state) => {
-        if (token !== state.token) throw new ManufacturingWriteError("Manufacturing changed. Refresh the preview and review the affected work before submitting again.", 409);
+        if (token !== null && token !== state.token) throw new ManufacturingWriteError("Manufacturing changed. Refresh the preview and review the affected work before submitting again.", 409);
         assertForceEligible(state, requirementId);
-        try { await plan.forceCompletePrerequisites(requirementId, actor, reviewedAt); }
+        let preview: ForceQualityPreview;
+        try { preview = await plan.forceCompletePrerequisites(requirementId, actor, reviewedAt); }
         catch (error) { throw new ManufacturingWriteError(error instanceof Error ? error.message : "Unable to force complete work", 409); }
+        const notes = typeof notesOrBuilder === "function" ? notesOrBuilder(preview) : notesOrBuilder;
         const updatedRequirement = await plan.patchRequirementQualityOutcome(requirementId, result, actor.name, notes, reviewedAt);
         let requirementStatus = sourceSelectValue(updatedRequirement.Status, "Needs Triage");
         let finishingCompleted = false;
@@ -212,35 +304,29 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
             requirementStatus,
           },
         };
-      }, { requirement_id: requirementId, result, notes, reviewed_at: reviewedAt, location: null });
+      }, (_state, review) => ({ requirement_id: requirementId, result, notes: review.notes, reviewed_at: reviewedAt, location: null }));
     },
     async retractedReviewIds() {
       return (await rpc<WriteState>("manufacturing_write_state")).retractions.map(row => row.review_id);
     },
-    applyQuantityAction(id: number, action: OperationQuantityAction, quantity: number, actor: Actor, handoff?: { programPath?: string; notes?: string; location?: StorageLocation; completeAllClaims?: boolean }) {
-      return transact(actor, action, async (plan, state) => {
-        const row = operation(state, id);
-        const printing = isPrintingOperation({ machine: String(row.machine ?? ""), workType: String(row.work_type ?? "Manufacturing") });
-        if (handoff?.completeAllClaims && (action !== "complete" || !printing)) {
-          throw new ManufacturingWriteError("Only 3D printing claims can be completed on behalf of other users", 400);
-        }
-        if (handoff?.location !== undefined) {
-          if (!isStorageLocation(handoff.location)) throw new ManufacturingWriteError("Invalid storage location", 400);
-          if (row.work_type === "CAM" || !(action === "complete" || action === "claim" && printing)) {
-            throw new ManufacturingWriteError("Set a location when claiming printed parts or completing manufacturing work", 400);
-          }
-          if (handoff.location === ROBOT_LOCATION) throw new ManufacturingWriteError("Move parts onto the robot separately after QC and finishing", 409);
-        }
-        if (afterQc(state, row) && ["claim", "complete"].includes(action)) {
-          assertEffectivePassedReview(state, Number(row.requirement_id), "Work after QC requires a current passed QC review");
-        }
-        const result = await plan.applyQuantityAction(id, action, quantity, actor, handoff);
-        return { ...result, ...(handoff?.location === undefined ? {} : {
-          storageLocation: handoff.location,
-          locationUpdatedBy: actor.name,
-          locationUpdatedAt: new Date().toISOString(),
-        }) };
-      }, null, handoff?.location === undefined ? "manufacturing_commit_with_qc_quantities" : "manufacturing_commit_with_operation_location");
+    applyQuantityAction: commitQuantityAction,
+    /**
+     * Bulk claim, release, or completion. Targets without a location commit in
+     * one transaction; a location move is atomic with its own completion, so
+     * those targets commit one at a time.
+     */
+    async applyQuantityActions(action: OperationQuantityAction, items: readonly QuantityTarget[], actor: Actor) {
+      const results = new Array<PromiseSettledResult<Awaited<ReturnType<typeof quantityAction>>>>(items.length);
+      const batched = [...items.entries()].filter(([, item]) => item.handoff?.location === undefined);
+      const batchedResults = batched.length === 0 ? [] : await transactEach(actor, action, batched, (plan, state, [, item]) =>
+        quantityAction(plan, state, item.id, action, item.quantity, actor, item.handoff));
+      batched.forEach(([index], position) => { results[index] = batchedResults[position]; });
+      for (const [index, item] of items.entries()) {
+        if (results[index]) continue;
+        try { results[index] = { status: "fulfilled", value: await commitQuantityAction(item.id, action, item.quantity, actor, item.handoff) }; }
+        catch (reason) { results[index] = { status: "rejected", reason }; }
+      }
+      return results;
     },
     stealOperationClaim(id: number, actor: Actor) {
       return transact(actor, "steal", async (plan, state) => {
@@ -272,19 +358,11 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       return transact(actor, "cam_handoff", async (plan, state) => { operation(state, id); return plan.updateCamHandoff(id, patch); });
     },
     applyFabricationAction(id: number, action: FabricationAction, actor: Actor) {
-      return transact(actor, action === "steal" ? "steal" : `finishing_${action}`, (plan, state) => {
-        const finishing = state.rows.finishing.find((candidate) => candidate.id === id);
-        if (!finishing?.active) throw new ManufacturingWriteError("This finishing job is no longer active", 409);
-        assertWorkAllowed(state, Number(finishing.requirement_id));
-        if (action === "undo_complete") {
-          const finishingRow = state.rows.finishing.find((candidate) => candidate.id === id);
-          const requirementRow = finishingRow ? requirement(state, Number(finishingRow.requirement_id)) : null;
-          if (requirementRow?.part_location === ROBOT_LOCATION) {
-            throw new ManufacturingWriteError("Move the part off the robot before reopening finishing", 409);
-          }
-        }
-        return plan.applyFabricationAction(id, action, actor);
-      });
+      return transact(actor, action === "steal" ? "steal" : `finishing_${action}`, (plan, state) => fabricationAction(plan, state, id, action, actor));
+    },
+    /** Bulk finishing claim, release, or completion, committed in one transaction. */
+    applyFabricationActions(action: Exclude<FabricationAction, "steal">, ids: readonly number[], actor: Actor) {
+      return transactEach(actor, `finishing_${action}`, ids, (plan, state, id) => fabricationAction(plan, state, id, action, actor));
     },
     renameMachinistAllocations(userId: string, oldName: string, newName: string) {
       return transact({ id: userId, name: newName }, "rename", plan => plan.renameMachinistAllocations(userId, oldName, newName));
@@ -405,6 +483,42 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     },
     readEngineeringCorrections() {
       return rpc<EngineeringCorrection[]>("manufacturing_engineering_correction_list", {});
+    },
+    listEngineeringSyncProposals(limit = 25) {
+      return rpc<SyncProposalSummary[]>("manufacturing_engineering_sync_proposals", { p_limit: limit });
+    },
+    readEngineeringSyncReviewState(proposalId: string) {
+      return rpc<SyncReviewState | null>("manufacturing_engineering_sync_review_state", { p_proposal_id: proposalId }, 60_000);
+    },
+    /**
+     * Approves (with exclusions) or denies a staged sync. The payload is rebuilt
+     * from the latest rows and must match the review the administrator saw.
+     */
+    async decideEngineeringSync(proposalId: string, decision: "approve" | "deny", exclusions: string[], expectedToken: string, note: string, actor: Actor) {
+      if (!UUID_PATTERN.test(actor.id) || !actor.name.trim()) throw new ManufacturingWriteError("An authenticated manufacturing actor is required", 401);
+      const state = await rpc<SyncReviewState | null>("manufacturing_engineering_sync_review_state", { p_proposal_id: proposalId }, 60_000);
+      if (!state) throw new ManufacturingWriteError("This sync proposal no longer exists", 404);
+      if (state.proposal.status !== "pending" && state.proposal.status !== "failed") {
+        throw new ManufacturingWriteError(`This sync was already ${state.proposal.status}`, 409);
+      }
+      let payload: SyncPayload | null = null;
+      let review: StoredSyncReview | null;
+      try {
+        if (buildSyncReview(state).token !== expectedToken) throw new ManufacturingWriteError(STALE_SYNC_REVIEW_MESSAGE, 409);
+        if (decision === "approve") {
+          if (state.stale) throw new ManufacturingWriteError("Another sync committed after this one was prepared. Run the sync again to review current changes.", 409);
+          ({ payload, review } = buildApprovedPayload(state, exclusions));
+        } else review = deniedReview(state);
+      } catch (error) {
+        if (error instanceof SyncReviewError) throw new ManufacturingWriteError(error.message, 409);
+        throw error;
+      }
+      // Never retried: a lost response after the commit leaves the proposal
+      // decided, and the page refreshes to show it.
+      return rpc<SyncDecisionResult>("manufacturing_decide_engineering_sync", {
+        p_proposal_id: proposalId, p_actor: actor.id, p_decision: decision, p_payload: payload,
+        p_exclusions: exclusions, p_review: review, p_note: note,
+      }, 120_000);
     },
     async applyEngineeringOverrides(requirementId: number, fields: EngineeringOverrideFields, expectedToken: string, reason: string, actor: Actor) {
       if (!UUID_PATTERN.test(actor.id) || !actor.name.trim()) throw new ManufacturingWriteError("An authenticated manufacturing actor is required", 401);

@@ -201,3 +201,17 @@ export function projectQualityControl(
     .sort((a, b) => Number(a.result !== "pending") - Number(b.result !== "pending")
       || a.operations[0].partNumber.localeCompare(b.operations[0].partNumber));
 }
+
+const FORCE_QC_FINISHING_NOTE = "Finishing marked complete by Admin Force QC.";
+export const FORCE_QC_NOTES_LIMIT = 2000;
+
+export function withForceQcFinishingNote(notes: string) {
+  return [notes.trim(), FORCE_QC_FINISHING_NOTE].filter(Boolean).join("\n\n");
+}
+
+/** Bulk Force QC records each part's generated summary, then the shared notes, then the finishing note. */
+export function bulkForceQcNotes(generatedNotes: string, extraNotes: string, finishingCompleted: boolean) {
+  const extra = extraNotes.trim();
+  const inspection = extra ? `${generatedNotes}\n\n${extra}` : generatedNotes;
+  return finishingCompleted ? withForceQcFinishingNote(inspection) : inspection;
+}

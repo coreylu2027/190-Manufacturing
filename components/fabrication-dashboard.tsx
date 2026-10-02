@@ -37,7 +37,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { mergeVisibleSelection, settleSequentially } from "@/lib/bulk-selection";
+import { mergeVisibleSelection, postBulk } from "@/lib/bulk-selection";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
@@ -247,18 +247,17 @@ export function FabricationDashboard({
   const allowOnRobot = locationJobs.length > 0 && locationJobs.every((job) => robotPlacementAllowed({ ...job, activeInBom: job.active }) && canUseOnRobotLocation(job.effectiveQcResult === "passed", job.status === "Complete"));
   const bulkMutation = useMutation({
     mutationFn: async ({ action, targets, location }: { action: "claim" | "complete" | "release" | "location"; targets: FabricationJob[]; location: StorageLocation | null }) => {
-      const results = await settleSequentially(targets, async (job) => {
-        const response = await fetch(action === "location" ? `/api/requirements/${job.requirementId}/location` : `/api/fabrication/${job.id}`, {
-          method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(action === "location" ? { location } : { action }),
-        });
-        const body = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(`${job.partNumber}: ${body.error ?? "Unable to update finishing job"}`);
-        return job;
+      const results = await postBulk(action === "location" ? "/api/requirements/bulk/location" : "/api/fabrication/bulk", targets, {
+        body: (jobs) => action === "location"
+          ? { requirementIds: jobs.map((job) => job.requirementId), location }
+          : { action, ids: jobs.map((job) => job.id) },
+        fallbackError: "Unable to update finishing job",
       });
       return {
         action,
-        succeeded: results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []),
-        errors: results.flatMap((result) => result.status === "rejected" ? [result.reason instanceof Error ? result.reason.message : "Unable to update finishing job"] : []),
+        succeeded: results.flatMap((result, index) => result.status === "fulfilled" ? [targets[index]] : []),
+        errors: results.flatMap((result, index) => result.status === "rejected"
+          ? [`${targets[index].partNumber}: ${result.reason instanceof Error ? result.reason.message : "Unable to update finishing job"}`] : []),
       };
     },
     onSuccess: ({ action, succeeded, errors }) => {

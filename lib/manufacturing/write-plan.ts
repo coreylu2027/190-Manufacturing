@@ -155,11 +155,25 @@ export function createWritePlan(input: Record<string, NormalizedRow[]>) {
  }
  async function getRow(entityName:string,id:number):Promise<RawRow> { const row=rows[entityName]?.find(r=>r.id===id); if(!row) throw new Error('Manufacturing row not found'); return structuredClone(row); }
  async function listAllRows(entityName:string):Promise<RawRow[]> { return structuredClone(rows[entityName]??[]); }
+ // Undo log for the current attempt(); patchRow is the only writer of rows.
+ type JournalEntry = { row: RawRow; key: string; had: boolean; value: unknown };
+ let journal: JournalEntry[] | null = null;
  async function patchRow(entityName:string,id:number,patch:Record<string,unknown>) {
  const row=rows[entityName]?.find(r=>r.id===id); if(!row) throw new Error('Manufacturing row not found');
  const entity=ENTITIES.find(e=>e.name===entityName)!;
- for(const [key,value] of Object.entries(patch)) { const column=entity.columns.find(c=>c[1]===key&&c[3]==='shop'); if(!column)throw new Error('Engineering field is not writable'); row[key]=column[2]==='select' && value!==null ? {value}:value; }
+ for(const [key,value] of Object.entries(patch)) { const column=entity.columns.find(c=>c[1]===key&&c[3]==='shop'); if(!column)throw new Error('Engineering field is not writable'); journal?.push({ row, key, had: Object.hasOwn(row, key), value: row[key] }); row[key]=column[2]==='select' && value!==null ? {value}:value; }
  return structuredClone(row);
+ }
+ /** Runs one step of a multi-target plan; a step that throws leaves no partial changes behind. */
+ async function attempt<T>(step: () => Promise<T>): Promise<T> {
+   if (journal) throw new Error('Write plan attempts cannot be nested');
+   const entries: JournalEntry[] = [];
+   journal = entries;
+   try { return await step(); }
+   catch (error) {
+     for (const { row, key, had, value } of entries.reverse()) { if (had) row[key] = value; else delete row[key]; }
+     throw error;
+   } finally { journal = null; }
  }
 async function applyFabricationAction(id: number, action: FabricationAction, actor: { name: string }) {
   
@@ -833,7 +847,7 @@ async function forceCompletePrerequisites(requirementId: number, actor: { id: st
   }
   return preview;
 }
-return { previewForceQuality, forceCompletePrerequisites, forceCompleteFinishing, applyFabricationAction,patchOperation,updateCamHandoff,applyQuantityAction,stealOperationClaim,renameMachinistAllocations,patchRequirementQualityOutcome,patchRequirementQualityNote,clearPassedRequirementQualityOutcome,
+return { attempt, previewForceQuality, forceCompletePrerequisites, forceCompleteFinishing, applyFabricationAction,patchOperation,updateCamHandoff,applyQuantityAction,stealOperationClaim,renameMachinistAllocations,patchRequirementQualityOutcome,patchRequirementQualityNote,clearPassedRequirementQualityOutcome,
  changes() {
  return ENTITIES.flatMap(entity=>(input[entity.name]??[]).flatMap(before=>{
  const after=normalizeRow(entity,rows[entity.name].find(r=>r.id===before.id)!);

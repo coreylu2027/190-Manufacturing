@@ -1,0 +1,33 @@
+name: Test Onshape sync
+
+on:
+  pull_request:
+    paths:
+      - 'integrations/onshape/**'
+      - 'supabase/**'
+      - 'lib/engineering-sync-review*'
+      - 'scripts/manufacturing-migration/engineering-sync-review.test.mts'
+      - '.github/workflows/onshape-sync-*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-tests:
+    name: Mocked Onshape and isolated PostgreSQL tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Test resolution, dry runs, staging, and Supabase transport without live APIs
+        run: python -m unittest integrations/onshape/test_onshape_to_supabase.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Test the engineering transaction and staged review in PGlite
+        run: npm run onshape:test-sql

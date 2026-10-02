@@ -12,14 +12,12 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import type { ManufacturingOperation, OperationsResponse } from "@/lib/types";
 import type { createWritePlan } from "@/lib/manufacturing/write-plan";
 import { isPostQcOperation } from "@/lib/manufacturing-workflow";
-import { settleSequentially } from "@/lib/bulk-selection";
+import { postBulk } from "@/lib/bulk-selection";
+import { FORCE_QC_NOTES_LIMIT, withForceQcFinishingNote as withFinishingNote } from "@/lib/quality-control";
 
 type Preview = Awaited<ReturnType<ReturnType<typeof createWritePlan>["previewForceQuality"]>> & { token: string };
-const FINISHING_NOTE = "Finishing marked complete by Admin Force QC.";
-
-function withFinishingNote(notes: string) {
-  return [notes.trim(), FINISHING_NOTE].filter(Boolean).join("\n\n");
-}
+// Smaller requests keep the progress count moving; each Force QC commits separately.
+const FORCE_QC_REQUEST_SIZE = 10;
 
 function FinishingToggle({ checked, onChange, disabled, children }: { checked: boolean; onChange: (checked: boolean) => void; disabled: boolean; children: React.ReactNode }) {
   return <label className="flex items-start gap-2 rounded-lg border p-3 text-sm">
@@ -81,31 +79,15 @@ export function BulkForceQcDialog({ open, onOpenChange, requirements, onFinished
   });
   async function submit(result: "passed" | "failed") {
     setBusy(true); setErrors([]); setProgress(0);
-    const extra = notes.trim();
-    const results = await settleSequentially(eligible, async (requirement, index) => {
-      try {
-        const previewResponse = await fetch(`/api/admin/qc/${requirement.requirementId}/force`, { cache: "no-store" });
-        const preview = await previewResponse.json();
-        if (!previewResponse.ok) throw new Error(preview.error ?? "Unable to preview Force QC");
-        const finish = result === "passed" && completeFinishing && preview.nextDestination === "Finishing";
-        const inspectionNotes = extra ? `${preview.generatedNotes}\n\n${extra}` : preview.generatedNotes;
-        const combined = finish ? withFinishingNote(inspectionNotes) : inspectionNotes;
-        if (combined.length > 2000) throw new Error("Inspection notes exceed 2000 characters");
-        const response = await fetch(`/api/admin/qc/${requirement.requirementId}/force`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ notes: combined, token: preview.token, result, completeFinishing: finish }),
-        });
-        const body = await response.json();
-        if (!response.ok) throw new Error(body.error ?? "Unable to force QC");
-        return requirement.requirementId;
-      } catch (error) {
-        throw new Error(`${requirement.partNumber}: ${error instanceof Error ? error.message : "Unable to force QC"}`);
-      } finally {
-        setProgress(index + 1);
-      }
+    const results = await postBulk("/api/admin/qc/bulk/force", eligible, {
+      body: chunk => ({ requirementIds: chunk.map(requirement => requirement.requirementId), notes, result, completeFinishing: result === "passed" && completeFinishing }),
+      fallbackError: "Unable to force QC",
+      chunkSize: FORCE_QC_REQUEST_SIZE,
+      onProgress: setProgress,
     });
-    const succeeded = results.flatMap(item => item.status === "fulfilled" ? [item.value] : []);
-    const failures = results.flatMap(item => item.status === "rejected" ? [item.reason instanceof Error ? item.reason.message : "Unable to force QC"] : []);
+    const succeeded = results.flatMap((item, index) => item.status === "fulfilled" ? [eligible[index].requirementId] : []);
+    const failures = results.flatMap((item, index) => item.status === "rejected"
+      ? [`${eligible[index].partNumber}: ${item.reason instanceof Error ? item.reason.message : "Unable to force QC"}`] : []);
     for (const key of ["production", "operations", "qc", "admin", "fabrication"]) void client.invalidateQueries({ queryKey: [key] });
     setBusy(false);
     onFinished(succeeded);
@@ -200,7 +182,7 @@ export function ForceQcButton({ requirementId, label, storageLocation, locationU
   }
   const finishingPending = preview?.nextDestination === "Finishing";
   const finishing = finishingPending && completeFinishing;
-  const notesTooLong = (finishing ? withFinishingNote(notes) : notes.trim()).length > 2000;
+  const notesTooLong = (finishing ? withFinishingNote(notes) : notes.trim()).length > FORCE_QC_NOTES_LIMIT;
   return <>
     <Button
       size="lg"
@@ -227,7 +209,7 @@ export function ForceQcButton({ requirementId, label, storageLocation, locationU
           <ul className="space-y-2 text-sm">{preview.operations.map(op => <li key={op.id}>{op.operationNumber} · {op.workType} · {op.machine || "CAM"}: {op.previousStatus} → Complete ({op.quantity} {op.workType === "CAM" ? "task(s)" : "part(s)"})</li>)}</ul>
           <p className="text-xs text-muted-foreground">Outstanding claims on this work will be cleared. Passing credits newly completed quantities to you and preserves existing completed-work credit. Failing rejects the entire batch and resets pre-QC manufacturing quantities for rework.</p>
           <label className="text-sm font-medium">Inspection notes<textarea value={notes} onChange={event => setNotes(event.target.value)} className="mt-2 min-h-40 w-full rounded-md border bg-background p-3 font-normal" disabled={busy} /></label>
-          <p className="text-xs text-muted-foreground">{notes.trim().length}/2000 characters. The prefilled note is fully editable.</p>
+          <p className="text-xs text-muted-foreground">{notes.trim().length}/{FORCE_QC_NOTES_LIMIT} characters. The prefilled note is fully editable.</p>
           {finishingPending && <FinishingToggle checked={completeFinishing} onChange={setCompleteFinishing} disabled={busy}>
             On pass, completes powder coating and credits you, instead of sending the part to Finishing.
           </FinishingToggle>}

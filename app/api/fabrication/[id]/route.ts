@@ -4,7 +4,7 @@ import { z } from "zod";
 import { getAppUser } from "@/lib/auth";
 import { applyFabricationAction } from "@/lib/manufacturing";
 import { isShopName } from "@/lib/profile-name";
-import { scheduleSlackManufacturingEvent } from "@/lib/slack-notifications";
+import { scheduleFinishingEvent } from "@/lib/slack-notifications";
 import { ManufacturingWriteError } from "@/lib/manufacturing/write-adapter";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createNotification } from "@/lib/notifications";
@@ -58,27 +58,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
         notificationWarning = "Finishing job taken over, but notification delivery failed.";
       }
     }
-    const eventType = {
-      claim: "finishing_claimed",
-      steal: "finishing_claimed",
-      complete: "finishing_completed",
-      release: "finishing_released",
-      undo_complete: "finishing_reopened",
-    } as const;
-    scheduleSlackManufacturingEvent({
-      type: eventType[parsed.data.action],
-      actorName: machinist,
-      requirementId: notificationContext.requirementId,
-      partNumber: notificationContext.partNumber,
-      partName: notificationContext.partName,
-      assemblyNumber: notificationContext.assemblyNumber,
-      color: notificationContext.color,
-      quantity: notificationContext.quantity,
-      postQcWorkReady: notificationContext.previousRequirementStatus !== "Ready for Manufacturing"
-        && notificationContext.requirementStatus === "Ready for Manufacturing",
-      becameComplete: notificationContext.previousRequirementStatus !== "Complete"
-        && notificationContext.requirementStatus === "Complete",
-    });
+    scheduleFinishingEvent(parsed.data.action, machinist, notificationContext);
     return NextResponse.json({ updated, notificationWarning });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to update finishing job" }, { status: error instanceof ManufacturingWriteError ? error.status : 502 });
