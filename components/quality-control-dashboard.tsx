@@ -34,7 +34,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { Checkbox } from "@/components/ui/checkbox";
-import { mergeVisibleSelection, settleSequentially } from "@/lib/bulk-selection";
+import { mergeVisibleSelection, postBulk } from "@/lib/bulk-selection";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -269,18 +269,18 @@ export function QualityControlDashboard() {
   }, []);
   const bulkReviewMutation = useMutation({
     mutationFn: async (reviews: { item: QualityControlItem; notes: string }[]) => {
-      const results = await settleSequentially(reviews, async ({ item, notes }) => {
-        if (!canBulkPass(item)) throw new Error(`${item.operations[0]?.partNumber ?? item.requirementId}: no longer ready for QC`);
-        try {
-          await submitReview(item, "passed", notes);
-          return item.requirementId;
-        } catch (error) {
-          throw new Error(`${item.operations[0].partNumber}: ${error instanceof Error ? error.message : "Unable to pass QC"}`);
-        }
+      const ready = reviews.filter(({ item }) => canBulkPass(item));
+      const results = await postBulk("/api/admin/qc/bulk", ready, {
+        body: (chunk) => ({ reviews: chunk.map(({ item, notes }) => ({ requirementId: item.requirementId, notes })) }),
+        fallbackError: "Unable to pass QC",
       });
       return {
-        succeeded: results.flatMap((entry) => entry.status === "fulfilled" ? [entry.value] : []),
-        errors: results.flatMap((entry) => entry.status === "rejected" ? [String(entry.reason instanceof Error ? entry.reason.message : entry.reason)] : []),
+        succeeded: results.flatMap((entry, index) => entry.status === "fulfilled" ? [ready[index].item.requirementId] : []),
+        errors: [
+          ...reviews.filter(({ item }) => !canBulkPass(item)).map(({ item }) => `${item.operations[0]?.partNumber ?? item.requirementId}: no longer ready for QC`),
+          ...results.flatMap((entry, index) => entry.status === "rejected"
+            ? [`${ready[index].item.operations[0].partNumber}: ${entry.reason instanceof Error ? entry.reason.message : "Unable to pass QC"}`] : []),
+        ],
       };
     },
     onSuccess: ({ succeeded, errors }) => {

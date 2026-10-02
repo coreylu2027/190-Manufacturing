@@ -3,7 +3,7 @@ import { z } from "zod";
 import { getAdminActor } from "@/lib/auth";
 import { forceQualityReview, previewForceQuality } from "@/lib/manufacturing";
 import { ManufacturingWriteError } from "@/lib/manufacturing/write-adapter";
-import { scheduleSlackManufacturingEvent } from "@/lib/slack-notifications";
+import { scheduleQualityReviewEvent } from "@/lib/slack-notifications";
 
 const schema = z.object({
   notes: z.string().trim().max(2000),
@@ -24,21 +24,7 @@ async function handle(request: Request, context: Context) {
     if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message }, { status: 400 });
     const result = await forceQualityReview(id, parsed.data.notes, parsed.data.token, actor, parsed.data.result, parsed.data.completeFinishing);
     const { notificationContext, ...review } = result;
-    scheduleSlackManufacturingEvent({
-      type: "qc_reviewed",
-      actorName: actor.name,
-      result: parsed.data.result,
-      notes: parsed.data.notes,
-      storageLocation: null,
-      forced: true,
-      becameReadyForFinishing: notificationContext.previousRequirementStatus !== "Ready for Finishing"
-        && notificationContext.requirementStatus === "Ready for Finishing",
-      postQcWorkReady: parsed.data.result === "passed" && notificationContext.previousRequirementStatus !== "Ready for Manufacturing"
-        && notificationContext.requirementStatus === "Ready for Manufacturing",
-      becameComplete: notificationContext.previousRequirementStatus !== "Complete"
-        && notificationContext.requirementStatus === "Complete",
-      ...notificationContext,
-    });
+    scheduleQualityReviewEvent(actor.name, { result: parsed.data.result, notes: parsed.data.notes, storageLocation: null, forced: true }, notificationContext);
     return NextResponse.json(review);
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to force QC" }, { status: error instanceof ManufacturingWriteError ? error.status : 502 });

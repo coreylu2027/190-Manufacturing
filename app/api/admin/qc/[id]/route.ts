@@ -4,7 +4,7 @@ import { z } from "zod";
 import { getAdminActor } from "@/lib/auth";
 import { recordQualityReview, undoQualityReview, updatePassedQualityNotes } from "@/lib/manufacturing";
 import { ManufacturingWriteError } from "@/lib/manufacturing/write-adapter";
-import { scheduleSlackManufacturingEvent } from "@/lib/slack-notifications";
+import { scheduleQualityReviewEvent, scheduleSlackManufacturingEvent } from "@/lib/slack-notifications";
 import { storageLocationSchema } from "@/lib/storage-locations";
 
 const reviewSchema = z.discriminatedUnion("result", [
@@ -47,21 +47,12 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       parsed.data.result === "failed" ? parsed.data.rejectedQuantity : undefined,
     );
     const { notificationContext, ...review } = result;
-    scheduleSlackManufacturingEvent({
-      type: "qc_reviewed",
-      actorName: currentUser.name,
+    scheduleQualityReviewEvent(currentUser.name, {
       result: parsed.data.result,
       notes: parsed.data.notes,
       storageLocation: location,
       rejectedQuantity: result.rejectedQuantity,
-      becameReadyForFinishing: notificationContext.previousRequirementStatus !== "Ready for Finishing"
-        && notificationContext.requirementStatus === "Ready for Finishing",
-      postQcWorkReady: notificationContext.previousRequirementStatus !== "Ready for Manufacturing"
-        && notificationContext.requirementStatus === "Ready for Manufacturing",
-      becameComplete: notificationContext.previousRequirementStatus !== "Complete"
-        && notificationContext.requirementStatus === "Complete",
-      ...notificationContext,
-    });
+    }, notificationContext);
     return NextResponse.json({ review });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to record quality review" }, { status: error instanceof ManufacturingWriteError ? error.status : 502 });

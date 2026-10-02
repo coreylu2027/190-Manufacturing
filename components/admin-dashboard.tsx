@@ -8,6 +8,7 @@ import { useCallback, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { EngineeringCorrectionsReport } from "@/components/engineering-corrections-report";
+import { EngineeringSyncCard } from "@/components/engineering-sync-review";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -219,6 +220,8 @@ export function AdminDashboard() {
           ))}
         </div>
       </div>
+
+      <EngineeringSyncCard />
 
       <div className="overflow-hidden rounded-2xl border bg-card shadow-[0_14px_42px_rgba(15,23,42,.055)]">
         <div className="border-b bg-muted/25 p-3 md:p-4">

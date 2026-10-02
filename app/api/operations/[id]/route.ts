@@ -5,7 +5,7 @@ import { getAppUser } from "@/lib/auth";
 import { applyQuantityAction, patchOperation, stealOperationClaim, updateCamHandoff } from "@/lib/manufacturing";
 import { createNotification } from "@/lib/notifications";
 import { isShopName } from "@/lib/profile-name";
-import { scheduleSlackManufacturingEvent } from "@/lib/slack-notifications";
+import { scheduleOperationQuantityEvent, scheduleSlackManufacturingEvent } from "@/lib/slack-notifications";
 import { OPERATION_STATUSES } from "@/lib/types";
 import { ManufacturingWriteError } from "@/lib/manufacturing/write-adapter";
 import { storageLocationSchema } from "@/lib/storage-locations";
@@ -158,28 +158,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
           completeAllClaims: parsed.data.completeAllClaims,
         });
       const { notificationContext, ...updated } = result;
-      const eventType = {
-        claim: "operation_claimed",
-        complete: "operation_completed",
-        release: "operation_released",
-        undo_complete: "operation_reopened",
-      } as const;
-      scheduleSlackManufacturingEvent({
-        type: eventType[parsed.data.action],
-        actorName: machinist,
-        requirementId: notificationContext.requirementId,
-        partNumber: notificationContext.partNumber,
-        partName: notificationContext.partName,
-        assemblyNumber: notificationContext.assemblyNumber,
-        operationNumber: notificationContext.operationNumber,
-        workType: notificationContext.workType,
-        machine: notificationContext.machine,
-        quantity: parsed.data.quantity,
-        becameReadyForQc: notificationContext.previousRequirementStatus !== "Ready for QC"
-          && notificationContext.requirementStatus === "Ready for QC",
-        becameComplete: notificationContext.previousRequirementStatus !== "Complete"
-          && notificationContext.requirementStatus === "Complete",
-      });
+      scheduleOperationQuantityEvent(parsed.data.action, machinist, parsed.data.quantity, notificationContext);
       return NextResponse.json({ updated });
     }
 

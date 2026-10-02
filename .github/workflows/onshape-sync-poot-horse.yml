@@ -1,0 +1,155 @@
+name: Sync Onshape poot_horse BOM
+
+# Stages the released Onshape BOM for administrator review. Nothing reaches the
+# shop until an admin approves it at /admin/sync in the manufacturing app.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Resolve the released BOM without calling Supabase
+        required: false
+        default: false
+        type: boolean
+      onshape_doc_url:
+        description: Optional master Main URL when use_subassembly_list is false
+        required: false
+        type: string
+      force_refresh:
+        description: Recalculate all resolved roots even when released revisions are unchanged
+        required: false
+        default: false
+        type: boolean
+      use_subassembly_list:
+        description: Sync the configured manufacturing-root URL list instead of discovering from Main
+        required: false
+        default: true
+        type: boolean
+      subassembly_urls:
+        description: Optional comma- or newline-separated manufacturing-root URLs for a manual list-mode run
+        required: false
+        type: string
+      sync_cad_files:
+        description: Export and upload drawing PDFs and part STEP files
+        required: false
+        default: true
+        type: boolean
+  repository_dispatch:
+    types: [bom_sync_poot_horse_supabase]
+
+concurrency:
+  group: >-
+    onshape-supabase-poot_horse-${{ github.event_name == 'workflow_dispatch' &&
+      inputs.dry_run && 'dry-run' || 'production' }}
+  cancel-in-progress: true
+
+env:
+  DEFAULT_ONSHAPE_SUBASSEMBLY_URLS: |-
+    https://frc190.onshape.com/documents/0b93a945f55626752d97aece/w/2702276d5f65f473e96092c1/e/29cefa513e5d1d9883644c29
+    https://frc190.onshape.com/documents/e6a03477fcf74dae02a191b5/w/af849f9a5aae8b198e57dc0d/e/e8cdd43e3043c566dad73817
+    https://frc190.onshape.com/documents/a954232c9b6c463860aa96c4/w/3b807be2adbfbd1312b0fbad/e/8e13cbfb549cc3b786646dd1
+    https://frc190.onshape.com/documents/0a0e6617e29d1bda5890611e/w/04004edc4b82879957dffa36/e/2ce7e421f9400768aa94f692
+    https://frc190.onshape.com/documents/f49c226c2be777de53eff8eb/w/d16ff967a07bf58bc0cd31d4/e/501913e228bb9741e25cd7a0
+    https://frc190.onshape.com/documents/61a258c0f66147f28e3c7f0a/w/01c1a403cf0a5f43a05ba283/e/3e3880ecde30502433dd9a7c
+    https://frc190.onshape.com/documents/e0e5730aacdbb8063c5716e8/w/bbf4b4765261ae88cc30b198/e/81e8a72bfca21fa77a8e2aea
+
+jobs:
+  stage-supabase:
+    name: Stage engineering BOM for review
+    if: >-
+      ${{ github.event_name != 'workflow_dispatch' ||
+          (!inputs.dry_run && github.ref_name == github.event.repository.default_branch) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: integrations/onshape/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r integrations/onshape/requirements.txt
+
+      - name: Test Onshape to Supabase sync
+        run: python -m unittest integrations/onshape/test_onshape_to_supabase.py
+
+      - name: Stage BOM for administrator review
+        env:
+          STAGE_FOR_REVIEW: "true"
+          SYNC_LABEL: Poot Horse
+          MANUFACTURING_APP_URL: ${{ vars.MANUFACTURING_APP_URL }}
+          FORCE_REFRESH: ${{ github.event_name == 'workflow_dispatch' && inputs.force_refresh }}
+          ONSHAPE_ACCESS_KEY: ${{ secrets.ONSHAPE_ACCESS_KEY }}
+          ONSHAPE_SECRET_KEY: ${{ secrets.ONSHAPE_SECRET_KEY }}
+          ONSHAPE_DOC_URL: >-
+            ${{ github.event_name == 'workflow_dispatch' &&
+                inputs.onshape_doc_url || secrets.ONSHAPE_DOC_URL_EPSILON }}
+          PARTNUMBER_PREFIXES: "P-190B-26"
+          SYNC_COTS_PARTS: "false"
+          USE_SUBASSEMBLY_LIST: >-
+            ${{ github.event_name != 'workflow_dispatch' || inputs.use_subassembly_list }}
+          ONSHAPE_SUBASSEMBLY_URLS: >-
+            ${{ github.event_name == 'workflow_dispatch' && inputs.subassembly_urls ||
+                env.DEFAULT_ONSHAPE_SUBASSEMBLY_URLS }}
+          SYNC_CAD_FILES: >-
+            ${{ github.event_name != 'workflow_dispatch' || inputs.sync_cad_files }}
+
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          ONSHAPE_EXPORT_TIMEOUT_SECONDS: "600"
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python integrations/onshape/OnshapeToSupabase.py
+
+  dry-run:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout selected branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: integrations/onshape/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r integrations/onshape/requirements.txt
+
+      - name: Test Onshape to Supabase sync
+        run: python -m unittest integrations/onshape/test_onshape_to_supabase.py
+
+      - name: Resolve released BOM without Supabase
+        env:
+          ONSHAPE_ACCESS_KEY: ${{ secrets.ONSHAPE_ACCESS_KEY }}
+          ONSHAPE_SECRET_KEY: ${{ secrets.ONSHAPE_SECRET_KEY }}
+          ONSHAPE_DOC_URL: ${{ inputs.onshape_doc_url || secrets.ONSHAPE_DOC_URL_EPSILON }}
+          PARTNUMBER_PREFIXES: "P-190B-26"
+          SYNC_COTS_PARTS: "false"
+          USE_SUBASSEMBLY_LIST: ${{ inputs.use_subassembly_list }}
+          ONSHAPE_SUBASSEMBLY_URLS: >-
+            ${{ inputs.subassembly_urls || env.DEFAULT_ONSHAPE_SUBASSEMBLY_URLS }}
+          SYNC_CAD_FILES: ${{ inputs.sync_cad_files }}
+        run: >-
+          python integrations/onshape/OnshapeToSupabase.py
+          --dry-run
+          --output-json onshape-supabase-dry-run.json
+
+      - name: Upload dry-run records
+        uses: actions/upload-artifact@v4
+        with:
+          name: onshape-supabase-poot-horse-dry-run
+          path: onshape-supabase-dry-run.json
