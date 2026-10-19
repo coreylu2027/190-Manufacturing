@@ -56,8 +56,6 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       rejectedQuantity: result.rejectedQuantity,
       becameReadyForFinishing: notificationContext.previousRequirementStatus !== "Ready for Finishing"
         && notificationContext.requirementStatus === "Ready for Finishing",
-      postQcWorkReady: notificationContext.previousRequirementStatus !== "Ready for Manufacturing"
-        && notificationContext.requirementStatus === "Ready for Manufacturing",
       becameComplete: notificationContext.previousRequirementStatus !== "Complete"
         && notificationContext.requirementStatus === "Complete",
       ...notificationContext,

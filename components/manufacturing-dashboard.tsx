@@ -1477,7 +1477,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
   }, [bulkSelectedIds, filtered]);
 
   const stats = useMemo(() => ({
-    ready: operations.filter((operation) => ["Ready", "In Progress"].includes(operation.status) && operation.availableQuantity > 0).length,
+    ready: operations.filter(isOperationClaimable).length,
     planned: operations.filter((operation) => operation.status === "Planned").length,
     active: operations.filter((operation) => operation.status === "In Progress").length,
     attention: operations.filter((operation) => operation.status === "Blocked").length,

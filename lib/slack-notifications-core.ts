@@ -21,6 +21,7 @@ export type SlackManufacturingEvent =
       quantity: number;
       tookOver?: boolean;
       becameReadyForQc?: boolean;
+      postQcWorkReady?: boolean;
       becameComplete?: boolean;
     })
   | (SlackPartContext & {

@@ -1,3 +1,5 @@
+import { ManufacturingWriteError } from "./manufacturing/errors.ts";
+
 export const CAM_REQUIRED_MACHINES = ["Haas CNC", "Shop Sabre CNC"] as const;
 export const POST_QC_MACHINES = ["Threaded Insert"] as const;
 
@@ -168,7 +170,7 @@ export function validateCamAction(input: {
   quantity: number;
   targetStarted?: boolean;
 }) {
-  if (input.quantity !== 1) throw new Error("CAM is a single task");
+  if (input.quantity !== 1) throw new ManufacturingWriteError("CAM is a single task", 400);
   if (input.action === "undo_complete" && input.targetStarted) {
     throw new Error("CAM cannot be reopened after the target machine operation has started");
   }

@@ -30,11 +30,10 @@ async function handle(request: Request, context: Context) {
       result: parsed.data.result,
       notes: parsed.data.notes,
       storageLocation: null,
+      rejectedQuantity: result.rejectedQuantity,
       forced: true,
       becameReadyForFinishing: notificationContext.previousRequirementStatus !== "Ready for Finishing"
         && notificationContext.requirementStatus === "Ready for Finishing",
-      postQcWorkReady: parsed.data.result === "passed" && notificationContext.previousRequirementStatus !== "Ready for Manufacturing"
-        && notificationContext.requirementStatus === "Ready for Manufacturing",
       becameComplete: notificationContext.previousRequirementStatus !== "Complete"
         && notificationContext.requirementStatus === "Complete",
       ...notificationContext,

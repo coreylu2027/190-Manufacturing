@@ -40,7 +40,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
-import { robotPlacementAllowed } from "@/lib/obsoletion";
+import { robotPlacementAllowed, workAllowed } from "@/lib/obsoletion";
 import { canUseOnRobotLocation } from "@/lib/storage-locations";
 import type { AdminResponse, QualityControlItem, QualityFailureSummary, QualityResult } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -104,7 +104,7 @@ async function submitReview(item: QualityControlItem, result: "passed" | "failed
 
 function canBulkPass(item: QualityControlItem) {
   return item.result === "pending" && item.operations.length > 0
-    && item.operations.every((operation) => operation.status === "Complete" && !operation.obsolete && operation.activeInBom);
+    && item.operations.every((operation) => operation.status === "Complete" && workAllowed(operation));
 }
 
 async function undoPassedReview(item: QualityControlItem) {
@@ -410,7 +410,7 @@ export function QualityControlDashboard() {
   const bulkBusy = reviewIsPending || undoReviewIsPending || notesArePending;
 
   const stats = useMemo(() => ({
-    pending: items.filter((item) => item.result === "pending").length,
+    pending: items.filter(canBulkPass).length,
     passed: items.filter((item) => item.result === "passed").length,
     failed: items.filter((item) => item.result === "failed").length,
   }), [items]);
@@ -630,7 +630,7 @@ export function QualityControlDashboard() {
                       <Button variant="outline" nativeButton={!operation.hasDrawingPdf} render={operation.hasDrawingPdf ? <a href={`/api/operations/${operation.id}/files/drawing-pdf`} target="_blank" rel="noreferrer" /> : undefined} disabled={!operation.hasDrawingPdf}><FileText /> Drawing PDF</Button>
                       <Button variant="outline" nativeButton={!operation.onshapeUrl} render={operation.onshapeUrl ? <a href={operation.onshapeUrl} target="_blank" rel="noreferrer" /> : undefined} disabled={!operation.onshapeUrl}><ExternalLink /> Onshape source</Button>
                       <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
-                        {item.result === "pending" ? <><Button variant="destructive" onClick={() => openFailureDialog(item)} disabled={operation.obsolete || !operation.activeInBom || reviewIsPending || !item.operations.every((row) => row.status === "Complete")}><X /> Fail QC</Button><Button className="bg-emerald-600 hover:bg-emerald-700" onClick={() => mutateReview({ item, result: "passed", notes: draftNotes[item.requirementId] ?? item.notes })} disabled={operation.obsolete || !operation.activeInBom || reviewIsPending || !item.operations.every((row) => row.status === "Complete")}>{reviewIsPending ? <LoaderCircle className="animate-spin" /> : <Check />} Pass QC</Button></> : item.result === "passed" ? <><Button onClick={() => mutateNotes({ item, notes: draftNotes[item.requirementId] ?? item.notes })} disabled={notesArePending || draftNotes[item.requirementId] === undefined || draftNotes[item.requirementId] === item.notes}>{notesArePending ? <LoaderCircle className="animate-spin" /> : <Save />} Save note</Button><Button variant="outline" onClick={() => mutateUndoReview(item)} disabled={operation.obsolete || !operation.activeInBom || undoReviewIsPending || notesArePending}><Clock3 /> Undo QC pass</Button></> : <p className="text-xs text-muted-foreground">Complete the reopened route to request QC again.</p>}
+                        {item.result === "pending" ? <><Button variant="destructive" onClick={() => openFailureDialog(item)} disabled={!workAllowed(operation) || reviewIsPending || !item.operations.every((row) => row.status === "Complete")}><X /> Fail QC</Button><Button className="bg-emerald-600 hover:bg-emerald-700" onClick={() => mutateReview({ item, result: "passed", notes: draftNotes[item.requirementId] ?? item.notes })} disabled={!workAllowed(operation) || reviewIsPending || !item.operations.every((row) => row.status === "Complete")}>{reviewIsPending ? <LoaderCircle className="animate-spin" /> : <Check />} Pass QC</Button></> : item.result === "passed" ? <><Button onClick={() => mutateNotes({ item, notes: draftNotes[item.requirementId] ?? item.notes })} disabled={notesArePending || draftNotes[item.requirementId] === undefined || draftNotes[item.requirementId] === item.notes}>{notesArePending ? <LoaderCircle className="animate-spin" /> : <Save />} Save note</Button><Button variant="outline" onClick={() => mutateUndoReview(item)} disabled={!workAllowed(operation) || undoReviewIsPending || notesArePending}><Clock3 /> Undo QC pass</Button></> : <p className="text-xs text-muted-foreground">Complete the reopened route to request QC again.</p>}
                       </div>
                     </div>
                   </article>
@@ -732,12 +732,12 @@ export function QualityControlDashboard() {
 
               <SheetFooter className="sticky bottom-0 border-t bg-card/95 p-4 backdrop-blur">
                 {selected.result === "pending" ? <>
-                  <Button size="lg" variant="destructive" className="h-11" onClick={() => openFailureDialog(selected)} disabled={operation.obsolete || !operation.activeInBom || reviewIsPending || !ready}><X /> Fail QC</Button>
-                  <Button size="lg" className="h-11 bg-emerald-600 hover:bg-emerald-700" onClick={() => mutateReview({ item: selected, result: "passed", notes: draftNotes[selected.requirementId] ?? selected.notes })} disabled={operation.obsolete || !operation.activeInBom || reviewIsPending || !ready}>{reviewIsPending ? <LoaderCircle className="animate-spin" /> : <Check />} Pass QC</Button>
+                  <Button size="lg" variant="destructive" className="h-11" onClick={() => openFailureDialog(selected)} disabled={!workAllowed(operation) || reviewIsPending || !ready}><X /> Fail QC</Button>
+                  <Button size="lg" className="h-11 bg-emerald-600 hover:bg-emerald-700" onClick={() => mutateReview({ item: selected, result: "passed", notes: draftNotes[selected.requirementId] ?? selected.notes })} disabled={!workAllowed(operation) || reviewIsPending || !ready}>{reviewIsPending ? <LoaderCircle className="animate-spin" /> : <Check />} Pass QC</Button>
                 </> : selected.result === "passed" ? (
                   <>
                     <Button size="lg" className="h-11" onClick={() => mutateNotes({ item: selected, notes: draftNotes[selected.requirementId] ?? selected.notes })} disabled={notesArePending || draftNotes[selected.requirementId] === undefined || draftNotes[selected.requirementId] === selected.notes}>{notesArePending ? <LoaderCircle className="animate-spin" /> : <Save />} Save note</Button>
-                    <Button size="lg" variant="outline" className="h-11" onClick={() => mutateUndoReview(selected)} disabled={operation.obsolete || !operation.activeInBom || undoReviewIsPending || notesArePending}>{undoReviewIsPending ? <LoaderCircle className="animate-spin" /> : <Clock3 />} Undo QC pass</Button>
+                    <Button size="lg" variant="outline" className="h-11" onClick={() => mutateUndoReview(selected)} disabled={!workAllowed(operation) || undoReviewIsPending || notesArePending}>{undoReviewIsPending ? <LoaderCircle className="animate-spin" /> : <Clock3 />} Undo QC pass</Button>
                   </>
                 ) : (
                   <div className="rounded-xl bg-rose-50 p-3 text-center text-sm font-medium text-rose-800 dark:bg-rose-400/15 dark:text-rose-200">Complete the reopened route to request QC again.</div>

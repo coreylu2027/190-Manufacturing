@@ -76,7 +76,8 @@ function parseQuantityLedger(value: unknown): OperationAllocation[] {
 function quantitiesForRow(row: SourceRow, requiredQuantity: number, status: OperationStatus) {
   const rawLedger = row["Quantity Ledger"];
   if (typeof rawLedger === "string" && rawLedger.trim()) {
-    const ledger: unknown = JSON.parse(rawLedger);
+    let ledger: unknown = null;
+    try { ledger = JSON.parse(rawLedger); } catch { /* reported as invalid below */ }
     if (!Array.isArray(ledger) || ledger.some(a => !a || !a.userId || !a.name ||
       !Number.isSafeInteger(a.claimed) || a.claimed < 0 || !Number.isSafeInteger(a.completed) || a.completed < 0)) {
       throw new Error("Invalid existing quantity ledger; reconciliation is required before editing");

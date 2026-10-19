@@ -177,6 +177,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
         quantity: parsed.data.quantity,
         becameReadyForQc: notificationContext.previousRequirementStatus !== "Ready for QC"
           && notificationContext.requirementStatus === "Ready for QC",
+        postQcWorkReady: notificationContext.postQcWorkReady,
         becameComplete: notificationContext.previousRequirementStatus !== "Complete"
           && notificationContext.requirementStatus === "Complete",
       });
@@ -211,10 +212,9 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     }
     return NextResponse.json({ updated });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Unable to update operation";
-    const status = error instanceof ManufacturingWriteError ? error.status : message.includes("cannot be reopened") || message.includes("print claims changed") ? 409
-      : message.includes("single task") ? 400
-        : 502;
-    return NextResponse.json({ error: message }, { status });
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Unable to update operation" },
+      { status: error instanceof ManufacturingWriteError ? error.status : 502 },
+    );
   }
 }

@@ -109,6 +109,9 @@ test("Force QC can fail an unfinished batch and return it to manufacturing atomi
   const qc = commits[0].p_qc as Record<string, unknown>;
   assert.equal(qc.result, "failed");
   assert.equal(qc.notes, "Rejected batch");
+  // The commit RPC rejects a failed review without a whole-number rejected quantity.
+  assert.equal(qc.rejected_quantity, 2);
+  assert.equal(review.rejectedQuantity, 2);
   const changes = commits[0].p_changes as Array<{ entity: string; id: number; patch: Record<string, unknown> }>;
   const machining = changes.find(change => change.entity === "operations" && change.id === 10)!.patch;
   assert.equal(machining.status, "Ready");
@@ -118,6 +121,55 @@ test("Force QC can fail an unfinished batch and return it to manufacturing atomi
   const requirement = changes.find(change => change.entity === "requirements")!.patch;
   assert.equal(requirement.qc_outcome, "Failed");
   assert.equal(changes.find(change => change.entity === "operations" && change.id === 11), undefined);
+});
+
+test("Force QC failure requires a reason and passes send no rejected quantity", async () => {
+  const blank = harness(fixture());
+  const preview = await blank.adapter.previewForceQuality(20);
+  await assert.rejects(blank.adapter.forceQualityReview(20, "   ", preview.token, ACTOR, "failed"),
+    (error) => error instanceof ManufacturingWriteError && error.status === 400 && /reason/.test(error.message));
+  assert.equal(blank.commits.length, 0);
+
+  const passed = harness(fixture());
+  const review = await passed.adapter.forceQualityReview(20, "", (await passed.adapter.previewForceQuality(20)).token, ACTOR);
+  assert.equal(review.rejectedQuantity, null);
+  assert.equal("rejected_quantity" in (passed.commits[0].p_qc as Record<string, unknown>), false);
+});
+
+test("workflow rule violations are conflicts and invalid CAM quantities are bad requests", async () => {
+  const claimed = harness(fixture());
+  await assert.rejects(claimed.adapter.applyQuantityAction(10, "claim", 3, ACTOR),
+    (error) => error instanceof ManufacturingWriteError && error.status === 409 && /Only 2 part\(s\) remain available/.test(error.message));
+  const cam = harness(fixture({ operation: { "Work Type": { value: "CAM" } } }));
+  await assert.rejects(cam.adapter.applyQuantityAction(10, "claim", 2, ACTOR),
+    (error) => error instanceof ManufacturingWriteError && error.status === 400 && /single task/.test(error.message));
+
+  const prints = harness(fixture({ operation: {
+    Machine: { value: "Bambu 3D Printer" }, Status: { value: "In Progress" }, "Claimed Quantity": 1,
+    "Quantity Ledger": JSON.stringify([{ userId: "other", name: "Other", claimed: 1, completed: 0 }]),
+  } }));
+  await assert.rejects(prints.adapter.applyQuantityAction(10, "complete", 2, ACTOR, { completeAllClaims: true }),
+    (error) => error instanceof ManufacturingWriteError && error.status === 409 && /print claims changed/.test(error.message));
+
+  const camState = fixture({ operation: {
+    "Work Type": { value: "CAM" }, Status: { value: "Complete" }, "Completed Quantity": 1,
+    "Quantity Ledger": JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 1 }]),
+  } });
+  camState.rows.operations.push(normalized("operations", {
+    id: 13, Operation: "fixture|OP1|Manufacturing", "Production Requirement": [{ id: 20 }],
+    "Operation Number": { value: "OP1" }, Machine: { value: "Haas CNC" }, "Work Type": { value: "Manufacturing" },
+    "Active in Routing": true, Status: { value: "In Progress" }, "Claimed Quantity": 1,
+    "Quantity Ledger": JSON.stringify([{ userId: "other", name: "Other", claimed: 1, completed: 0 }]),
+  }));
+  const reopenCam = harness(camState);
+  await assert.rejects(reopenCam.adapter.applyQuantityAction(10, "undo_complete", 1, ACTOR),
+    (error) => error instanceof ManufacturingWriteError && error.status === 409 && /cannot be reopened/.test(error.message));
+
+  // Unparseable and malformed ledgers get the same reconciliation message, not a parser error.
+  const corrupt = harness(fixture({ operation: { "Claimed Quantity": 1, "Quantity Ledger": "{not json" } }));
+  await assert.rejects(corrupt.adapter.applyQuantityAction(10, "claim", 1, ACTOR),
+    (error) => error instanceof ManufacturingWriteError && error.status === 409 && /reconciliation is required/.test(error.message));
+  assert.equal(claimed.commits.length + cam.commits.length + prints.commits.length + reopenCam.commits.length + corrupt.commits.length, 0);
 });
 
 test("Force QC routes finishing and post-QC work without completing inserts", async () => {
@@ -337,6 +389,7 @@ test("quantity claims are planned and sent as one compare-and-swap transaction",
     machine: "Mill",
     previousRequirementStatus: "Ready for Manufacturing",
     requirementStatus: "On Machine",
+    postQcWorkReady: false,
   });
   assert.equal(commits.length, 1);
   const commit = commits[0];
@@ -474,6 +527,7 @@ test("CAM completion, finishing, claim stealing, and QC use their atomic action 
     assemblyNumber: "A-1",
     previousRequirementStatus: "Ready for QC",
     requirementStatus: "Complete",
+    postQcWorkReady: false,
   });
   assert.equal(qc.commits[0].p_action, "qc_review");
   assert.equal((qc.commits[0].p_qc as { result: string }).result, "passed");
@@ -680,7 +734,8 @@ test("QC releases threaded inserts only after any required finishing completes",
     requirement: { Status: { value: "Ready for QC" }, "QC Outcome": { value: "Not Inspected" } },
   }));
   const uncoated = harness(readyForQc);
-  await uncoated.adapter.recordQualityReview(20, "passed", "Primary work accepted", ACTOR);
+  const uncoatedReview = await uncoated.adapter.recordQualityReview(20, "passed", "Primary work accepted", ACTOR);
+  assert.equal(uncoatedReview.notificationContext.postQcWorkReady, true);
   const uncoatedChanges = uncoated.commits[0].p_changes as Array<{ entity: string; id: number; patch: Record<string, unknown> }>;
   assert.equal(uncoatedChanges.find(({ entity, id }) => entity === "operations" && id === 11)?.patch.status, "Ready");
   assert.equal(uncoatedChanges.find(({ entity }) => entity === "requirements")?.patch.status, "Ready for Manufacturing");
@@ -696,9 +751,91 @@ test("QC releases threaded inserts only after any required finishing completes",
   const coated = harness(coatedState);
   const result = await coated.adapter.applyFabricationAction(30, "complete", ACTOR);
   assert.equal(result.status, "Complete");
+  assert.equal(result.notificationContext.postQcWorkReady, true);
   assert.equal(result.requirementStatus, "Ready for Manufacturing");
   const coatedChanges = coated.commits[0].p_changes as Array<{ entity: string; id: number; patch: Record<string, unknown> }>;
   assert.equal(coatedChanges.find(({ entity, id }) => entity === "operations" && id === 11)?.patch.status, "Ready");
+});
+
+test("post-QC readiness reflects released work, not the requirement status", async () => {
+  const completeFirstStage = {
+    Status: { value: "Complete" }, "Completed Quantity": 2, "Completed At": "2026-09-05T12:00:00Z",
+    "Quantity Ledger": JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 2 }]),
+  };
+  // Finishing comes first, so a pass releases nothing yet.
+  const coated = harness(withThreadedInsert(fixture({ operation: completeFirstStage,
+    requirement: { Status: { value: "Ready for QC" }, Finishing: { value: "Black" } } })));
+  assert.equal((await coated.adapter.recordQualityReview(20, "passed", "", ACTOR)).notificationContext.postQcWorkReady, false);
+
+  // A failure reopens the route and never releases post-QC work.
+  const failed = harness(withThreadedInsert(fixture({ operation: completeFirstStage, requirement: { Status: { value: "Ready for QC" } } })));
+  assert.equal((await failed.adapter.recordQualityReview(20, "failed", "Bad bore", ACTOR)).notificationContext.postQcWorkReady, false);
+
+  // QC after OP1 with a Haas OP2: the requirement can say Ready for Manufacturing while OP2 still waits on CAM.
+  const camGated = fixture({ operation: completeFirstStage, requirement: { Status: { value: "Ready for QC" } } });
+  camGated.rows.requirements[0].qc_after_operation = 1;
+  camGated.rows.operations.push(
+    normalized("operations", { id: 11, Operation: "fixture|OP2|Manufacturing", "Production Requirement": [{ id: 20 }],
+      "Operation Number": { value: "OP2" }, Machine: { value: "Haas CNC" }, "Work Type": { value: "Manufacturing" },
+      "Active in Routing": true, Status: { value: "Planned" } }),
+    normalized("operations", { id: 12, Operation: "fixture|OP2|CAM", "Production Requirement": [{ id: 20 }],
+      "Operation Number": { value: "OP2" }, "Work Type": { value: "CAM" }, "Active in Routing": true, Status: { value: "Ready" } }),
+  );
+  const gated = harness(camGated);
+  const gatedReview = await gated.adapter.recordQualityReview(20, "passed", "", ACTOR);
+  assert.equal(gatedReview.notificationContext.requirementStatus, "Ready for Manufacturing");
+  assert.equal(gatedReview.notificationContext.postQcWorkReady, false);
+
+  // A forced pass from unstarted pre-QC work still announces the released inserts.
+  const forced = harness(withThreadedInsert(fixture()));
+  const review = await forced.adapter.forceQualityReview(20, "", (await forced.adapter.previewForceQuality(20)).token, ACTOR);
+  assert.equal(review.notificationContext.previousRequirementStatus, "Ready for Manufacturing");
+  assert.equal(review.notificationContext.requirementStatus, "Ready for Manufacturing");
+  assert.equal(review.notificationContext.postQcWorkReady, true);
+});
+
+test("post-QC readiness covers stale Ready rows and CAM completion that releases gated work", async () => {
+  const completeFirstStage = {
+    Status: { value: "Complete" }, "Completed Quantity": 2, "Completed At": "2026-09-05T12:00:00Z",
+    "Quantity Ledger": JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 2 }]),
+  };
+  // The insert row already says Ready, but QC is what makes it claimable.
+  const stale = harness(withThreadedInsert(fixture({ operation: completeFirstStage, requirement: { Status: { value: "Ready for QC" } } }),
+    { Status: { value: "Ready" } }));
+  assert.equal((await stale.adapter.recordQualityReview(20, "passed", "", ACTOR)).notificationContext.postQcWorkReady, true);
+
+  // QC passed after OP1; completing the CAM for the Haas OP2 is what releases it.
+  const gated = fixture({ operation: completeFirstStage,
+    requirement: { Status: { value: "Ready for Manufacturing" }, "QC Outcome": { value: "Passed" } } });
+  gated.rows.requirements[0].qc_after_operation = 1;
+  gated.rows.operations.push(
+    normalized("operations", { id: 11, Operation: "fixture|OP2|Manufacturing", "Production Requirement": [{ id: 20 }],
+      "Operation Number": { value: "OP2" }, Machine: { value: "Haas CNC" }, "Work Type": { value: "Manufacturing" },
+      "Active in Routing": true, Status: { value: "Planned" } }),
+    normalized("operations", { id: 12, Operation: "fixture|OP2|CAM", "Production Requirement": [{ id: 20 }],
+      "Operation Number": { value: "OP2" }, "Work Type": { value: "CAM" }, "Active in Routing": true, Status: { value: "In Progress" },
+      "Claimed Quantity": 1, "Quantity Ledger": JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 1, completed: 0 }]) }),
+  );
+  const cam = harness(gated);
+  const completed = await cam.adapter.applyQuantityAction(12, "complete", 1, ACTOR);
+  const changes = cam.commits[0].p_changes as Array<{ entity: string; id: number; patch: Record<string, unknown> }>;
+  assert.equal(changes.find(({ entity, id }) => entity === "operations" && id === 11)?.patch.status, "Ready");
+  assert.equal(completed.notificationContext.postQcWorkReady, true);
+});
+
+test("a part with a current QC pass cannot be reviewed again until the pass is undone", async () => {
+  const passed = fixture({
+    operation: { Status: { value: "Complete" }, "Completed Quantity": 2, "Completed At": "2026-09-05T12:00:00Z",
+      "Quantity Ledger": JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 2 }]) },
+    requirement: { Status: { value: "Complete" }, "QC Outcome": { value: "Passed" } },
+    reviews: [{ id: 1, production_requirement_id: 20, operation_id: null, result: "passed", reviewed_at: "2026-09-06T12:00:00Z" }],
+  });
+  for (const result of ["failed", "passed"] as const) {
+    const { adapter, commits } = harness(structuredClone(passed));
+    await assert.rejects(adapter.recordQualityReview(20, result, "Stale page", ACTOR),
+      (error) => error instanceof ManufacturingWriteError && error.status === 409 && /Undo the pass/.test(error.message));
+    assert.equal(commits.length, 0);
+  }
 });
 
 test("threaded inserts cannot be claimed before QC even if a stale row says Ready", async () => {

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { APP_ROLES, getAdminActor } from "@/lib/auth";
+import { APP_ROLES, findShopNameOwner, getAdminActor } from "@/lib/auth";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 const userUpdateSchema = z.object({
@@ -33,8 +33,25 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   const { data: authData, error: authError } = await admin.auth.admin.getUserById(id);
   if (authError || !authData.user) return NextResponse.json({ error: authError?.message ?? "User not found" }, { status: 404 });
 
+  const { data: profile, error: profileError } = await admin.from("profiles").select("display_name, approved").eq("id", id).maybeSingle();
+  if (profileError) return NextResponse.json({ error: profileError.message }, { status: 502 });
+
   const email = authData.user.email ?? "";
-  const displayName = authData.user.user_metadata.full_name ?? authData.user.user_metadata.name ?? email.split("@")[0] ?? "Machinist";
+  // Auth metadata is editable by the user, so it only names a profile that does not exist yet.
+  const profileName = profile ? String(profile.display_name ?? "").trim() : authData.user.user_metadata.full_name ?? authData.user.user_metadata.name ?? "";
+  const displayName = profileName || email.split("@")[0] || "Machinist";
+  if (parsed.data.approved && !profile?.approved) {
+    try {
+      if (await findShopNameOwner(admin, displayName, id)) {
+        return NextResponse.json(
+          { error: `Another account already uses the shop name "${displayName}". Ask this person to change their shop name on the Pending page first.` },
+          { status: 409 },
+        );
+      }
+    } catch (error) {
+      return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to check shop names" }, { status: 502 });
+    }
+  }
   const { error } = await admin.from("profiles").upsert({
     id,
     email,

@@ -74,8 +74,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       assemblyNumber: notificationContext.assemblyNumber,
       color: notificationContext.color,
       quantity: notificationContext.quantity,
-      postQcWorkReady: notificationContext.previousRequirementStatus !== "Ready for Manufacturing"
-        && notificationContext.requirementStatus === "Ready for Manufacturing",
+      postQcWorkReady: notificationContext.postQcWorkReady,
       becameComplete: notificationContext.previousRequirementStatus !== "Complete"
         && notificationContext.requirementStatus === "Complete",
     });

@@ -10,13 +10,12 @@ import { notificationPartContext as resolvePartContext } from "./identity.ts";
 import { EngineeringOverrideError, planEngineeringOverrides } from "./engineering-override-plan.ts";
 import type { EngineeringCorrection, EngineeringOverrideFields, EngineeringOverrideState, OverrideFileKind } from "../engineering-overrides.ts";
 import type { RequirementHistoryPayload } from "../requirement-history.ts";
+import { ManufacturingWriteError } from "./errors.ts";
+
+export { ManufacturingWriteError };
 
 const STALE_OVERRIDE_MESSAGE = "Onshape data or another adjustment changed. Review the latest values and try again.";
 
-export class ManufacturingWriteError extends Error {
-  status: number;
-  constructor(message: string, status: number) { super(message); this.status = status; }
-}
 export interface WriteState {
   token: string;
   rows: Record<string, NormalizedRow[]>;
@@ -36,6 +35,10 @@ export interface WriteState {
 type Actor = { id: string; name: string };
 type Plan = ReturnType<typeof createWritePlan>;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+/** The planner rejects workflow-rule violations with plain Errors; they conflict with the current state rather than being upstream failures. */
+function asConflict(error: unknown) {
+  return error instanceof Error && error.constructor === Error ? new ManufacturingWriteError(error.message, 409) : error;
+}
 function sourceSelectValue(value: unknown, fallback = "") {
   return typeof value === "object" && value !== null && "value" in value
     ? String((value as { value: unknown }).value ?? fallback)
@@ -84,7 +87,9 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     ]);
     state.rows = { ...state.rows, parts, assemblies };
     const plan = createWritePlan(state.rows);
-    const result = await build(plan, state);
+    let result: T;
+    try { result = await build(plan, state); }
+    catch (error) { throw asConflict(error); }
     const qualityPayload = typeof qc === "function" ? qc(state, result) : qc;
     const body = { p_request_id: crypto.randomUUID(), p_actor: actor.id, p_action: action,
       p_expected: state.token, p_changes: plan.changes(), p_qc: qualityPayload, p_result: result ?? null };
@@ -142,6 +147,26 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       { machine: String(row.machine ?? ""), operationNumber: String(row.operation_number ?? "OP1") },
       qcAfter == null ? null : Number(qcAfter));
   }
+  /**
+   * Whether the plan makes post-QC manufacturing work claimable that was not before. Such work
+   * is claimable once its requirement passed QC and finished any finishing, and its operation is
+   * Ready or In Progress (so not while it still waits on CAM).
+   */
+  function releasesPostQcWork(state: WriteState, plan: Plan) {
+    const changes = plan.changes();
+    const planned = (entity: string, row: NormalizedRow) =>
+      ({ ...row, ...changes.find((change) => change.entity === entity && change.id === row.id)?.patch });
+    const released = (requirement: NormalizedRow | undefined) => requirement?.qc_outcome === "Passed"
+      && !(requirement.finishing && requirement.finishing !== "None" && requirement.status === "Ready for Finishing");
+    const claimable = (operation: NormalizedRow, requirement: NormalizedRow | undefined) =>
+      Boolean(operation.active_in_routing) && afterQc(state, operation) && released(requirement)
+      && (operation.status === "Ready" || operation.status === "In Progress");
+    return state.rows.operations.some((operation) => {
+      const requirement = state.rows.requirements.find((row) => row.id === operation.requirement_id);
+      return !claimable(operation, requirement)
+        && claimable(planned("operations", operation), requirement && planned("requirements", requirement));
+    });
+  }
   function assertEffectivePassedReview(
     state: WriteState,
     requirementId: number,
@@ -170,49 +195,61 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     }
     return review;
   }
+  function hasCurrentPass(state: WriteState, requirementId: number) {
+    try { assertEffectivePassedReview(state, requirementId); return true; }
+    catch (error) { if (error instanceof ManufacturingWriteError) return false; throw error; }
+  }
   function assertForceEligible(state: WriteState, requirementId: number) {
     assertWorkAllowed(state, requirementId);
-    let passed = false;
-    try { assertEffectivePassedReview(state, requirementId); passed = true; }
-    catch (error) { if (!(error instanceof ManufacturingWriteError)) throw error; }
-    if (passed) throw new ManufacturingWriteError("This requirement already has a current QC pass", 409);
+    if (hasCurrentPass(state, requirementId)) throw new ManufacturingWriteError("This requirement already has a current QC pass", 409);
   }
   return {
     async previewForceQuality(requirementId: number) {
       const state = await rpc<WriteState>("manufacturing_write_state");
       assertForceEligible(state, requirementId);
       try { return { ...await createWritePlan(state.rows).previewForceQuality(requirementId), token: state.token }; }
-      catch (error) { throw new ManufacturingWriteError(error instanceof Error ? error.message : "Unable to preview Force QC", 409); }
+      catch (error) { throw asConflict(error); }
     },
     forceQualityReview(requirementId: number, notes: string, token: string, actor: Actor, result: "passed" | "failed" = "passed", completeFinishing = false) {
       const reviewedAt = new Date().toISOString();
       if (completeFinishing && result !== "passed") return Promise.reject(new ManufacturingWriteError("Finishing can only be completed when QC passes", 400));
+      if (result === "failed" && !notes.trim()) return Promise.reject(new ManufacturingWriteError("Enter a reason for the QC failure", 400));
       return transact(actor, "qc_review", async (plan, state) => {
         if (token !== state.token) throw new ManufacturingWriteError("Manufacturing changed. Refresh the preview and review the affected work before submitting again.", 409);
         assertForceEligible(state, requirementId);
-        try { await plan.forceCompletePrerequisites(requirementId, actor, reviewedAt); }
-        catch (error) { throw new ManufacturingWriteError(error instanceof Error ? error.message : "Unable to force complete work", 409); }
-        const updatedRequirement = await plan.patchRequirementQualityOutcome(requirementId, result, actor.name, notes, reviewedAt);
+        await plan.forceCompletePrerequisites(requirementId, actor, reviewedAt);
+        // A forced failure rejects the whole batch, which the database requires as an explicit quantity.
+        const rejectedQuantity = result === "failed"
+          ? Math.max(1, Math.floor(Number(requirement(state, requirementId).required_quantity ?? 1)))
+          : null;
+        const updatedRequirement = await plan.patchRequirementQualityOutcome(requirementId, result, actor.name, notes, reviewedAt, rejectedQuantity ?? undefined);
         let requirementStatus = sourceSelectValue(updatedRequirement.Status, "Needs Triage");
         let finishingCompleted = false;
         if (completeFinishing) {
-          try {
-            const finished = await plan.forceCompleteFinishing(requirementId, actor);
-            if (finished) { requirementStatus = finished.requirementStatus; finishingCompleted = true; }
-          } catch (error) { throw new ManufacturingWriteError(error instanceof Error ? error.message : "Unable to complete finishing", 409); }
+          const finished = await plan.forceCompleteFinishing(requirementId, actor);
+          if (finished) { requirementStatus = finished.requirementStatus; finishingCompleted = true; }
         }
         return {
           requirementId,
           result,
           notes,
+          rejectedQuantity,
           finishingCompleted,
           notificationContext: {
             ...notificationPartContext(state, requirementId),
             previousRequirementStatus: String(requirement(state, requirementId).status ?? "Needs Triage"),
             requirementStatus,
+            postQcWorkReady: releasesPostQcWork(state, plan),
           },
         };
-      }, { requirement_id: requirementId, result, notes, reviewed_at: reviewedAt, location: null });
+      }, (_state, review) => ({
+        requirement_id: requirementId,
+        result,
+        notes,
+        ...(review.rejectedQuantity === null ? {} : { rejected_quantity: review.rejectedQuantity }),
+        reviewed_at: reviewedAt,
+        location: null,
+      }));
     },
     async retractedReviewIds() {
       return (await rpc<WriteState>("manufacturing_write_state")).retractions.map(row => row.review_id);
@@ -235,7 +272,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
           assertEffectivePassedReview(state, Number(row.requirement_id), "Work after QC requires a current passed QC review");
         }
         const result = await plan.applyQuantityAction(id, action, quantity, actor, handoff);
-        return { ...result, ...(handoff?.location === undefined ? {} : {
+        return { ...result, notificationContext: { ...result.notificationContext, postQcWorkReady: releasesPostQcWork(state, plan) }, ...(handoff?.location === undefined ? {} : {
           storageLocation: handoff.location,
           locationUpdatedBy: actor.name,
           locationUpdatedAt: new Date().toISOString(),
@@ -272,7 +309,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       return transact(actor, "cam_handoff", async (plan, state) => { operation(state, id); return plan.updateCamHandoff(id, patch); });
     },
     applyFabricationAction(id: number, action: FabricationAction, actor: Actor) {
-      return transact(actor, action === "steal" ? "steal" : `finishing_${action}`, (plan, state) => {
+      return transact(actor, action === "steal" ? "steal" : `finishing_${action}`, async (plan, state) => {
         const finishing = state.rows.finishing.find((candidate) => candidate.id === id);
         if (!finishing?.active) throw new ManufacturingWriteError("This finishing job is no longer active", 409);
         assertWorkAllowed(state, Number(finishing.requirement_id));
@@ -283,7 +320,8 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
             throw new ManufacturingWriteError("Move the part off the robot before reopening finishing", 409);
           }
         }
-        return plan.applyFabricationAction(id, action, actor);
+        const result = await plan.applyFabricationAction(id, action, actor);
+        return { ...result, notificationContext: { ...result.notificationContext, postQcWorkReady: releasesPostQcWork(state, plan) } };
       });
     },
     renameMachinistAllocations(userId: string, oldName: string, newName: string) {
@@ -304,6 +342,10 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       const reviewedAt = new Date().toISOString();
       return transact(actor, "qc_review", async (plan, state) => {
         const requirementRow = assertWorkAllowed(state, requirementId);
+        // A second review (e.g. from a stale page) would leave released post-QC work in place.
+        if (hasCurrentPass(state, requirementId)) {
+          throw new ManufacturingWriteError("This part already passed QC. Undo the pass before reviewing it again.", 409);
+        }
         const maximumQuantity = Math.max(1, Math.floor(Number(requirementRow.required_quantity ?? 1)));
         const effectiveRejectedQuantity = result === "failed" ? rejectedQuantity ?? maximumQuantity : null;
         if (result === "failed") {
@@ -333,6 +375,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
             ...notificationPartContext(state, requirementId),
             previousRequirementStatus: String(requirement(state, requirementId).status ?? "Needs Triage"),
             requirementStatus: sourceSelectValue(updatedRequirement.Status, "Needs Triage"),
+            postQcWorkReady: releasesPostQcWork(state, plan),
           },
         };
       }, (_state, review) => ({
