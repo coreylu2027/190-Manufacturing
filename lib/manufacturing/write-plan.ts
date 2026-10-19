@@ -652,11 +652,16 @@ async function renameMachinistAllocations(userId: string, oldName: string, newNa
     if (!changed) return;
 
     const summary = machinistSummary(allocations, taskQuantity);
+    const previousSummaries = new Set([machinistSummary(current.allocations, taskQuantity), String(operation.Machinist ?? "").trim()]);
     await patchRow(OPERATIONS, operation.id, {
       Machinist: summary,
       "Quantity Ledger": JSON.stringify(allocations),
     });
-    if (requirementId) await patchRow(REQUIREMENTS, requirementId, { Machinist: summary });
+    // The requirement shows the manufacturing operation that last assigned it, so only that
+    // operation's rename carries over; another operation or a CAM task must not replace it.
+    if (requirementId && previousSummaries.has(String((await getRow(REQUIREMENTS, requirementId)).Machinist ?? "").trim())) {
+      await patchRow(REQUIREMENTS, requirementId, { Machinist: summary });
+    }
   }));
 
   const finishingRows = await listAllRows(FINISHING);

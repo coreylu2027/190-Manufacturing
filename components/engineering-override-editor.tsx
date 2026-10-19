@@ -200,6 +200,18 @@ export function EngineeringOverrides({ requirementId, partNumber, obsolete, acti
       ...MANUFACTURING_QUERY_KEYS.map((key) => queryClient.invalidateQueries({ queryKey: [key] })),
     ]);
   }
+  /**
+   * The editor's own file change also moves the token. Keep the open draft current when none of
+   * the fields it was built from changed, so unsaved edits stay valid and the next action has the
+   * new token; a concurrent field edit still leaves the draft stale for review.
+   */
+  async function refreshAfterFileChange(opened: EngineeringOverrideState | null) {
+    await refresh();
+    const latest = queryClient.getQueryData<EngineeringOverrideState>(queryKey);
+    if (opened?.requirement && latest?.requirement && JSON.stringify(draftFrom(latest)) === JSON.stringify(draftFrom(opened))) {
+      setDraftState(latest);
+    }
+  }
   function handleConflict(caught: unknown) {
     const message = caught instanceof Error ? caught.message : "Unable to save";
     setError(message);
@@ -241,7 +253,7 @@ export function EngineeringOverrides({ requirementId, partNumber, obsolete, acti
         method: "PUT", body: JSON.stringify({ stagingPath: staged.path, name: file.name, expectedToken: state.token, reason: draft?.reason.trim() ?? "" }),
       });
       toast.success(`${kind === "step" ? "STEP file" : "Drawing PDF"} replaced for ${partNumber}`);
-      await refresh();
+      await refreshAfterFileChange(draftState);
     } catch (caught) { handleConflict(caught); }
     finally { setUploading(null); }
   }
@@ -255,7 +267,7 @@ export function EngineeringOverrides({ requirementId, partNumber, obsolete, acti
         method: "DELETE", body: JSON.stringify({ expectedToken: state.token, reason: draft?.reason.trim() ?? "" }),
       });
       toast.success(`Restored the Onshape ${kind === "step" ? "STEP file" : "drawing PDF"} for ${partNumber}`);
-      await refresh();
+      await refreshAfterFileChange(draftState);
     } catch (caught) { handleConflict(caught); }
     finally { setUploading(null); }
   }

@@ -75,7 +75,8 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
         ? `CAM for ${stolen.context.operationNumber}`
         : stolen.context.operationNumber;
       const recipients = stolen.displaced.filter((claimant) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(claimant.userId));
-      const deliveries = await Promise.all(recipients.map((claimant) => createNotification({
+      // The steal is committed; notification problems are reported in the response, never as a failure.
+      const settled = await Promise.allSettled(recipients.map((claimant) => createNotification({
         recipientId: claimant.userId,
         type: "production_requirement_stolen",
         title: "Your production requirement was stolen",
@@ -92,6 +93,10 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
           stolenByName: machinist,
         },
       })));
+      for (const outcome of settled) if (outcome.status === "rejected") console.error("Unable to notify a displaced claimant", outcome.reason);
+      const deliveries = settled.map((outcome) => outcome.status === "fulfilled"
+        ? outcome.value
+        : { stored: false, email: "failed" as const });
       scheduleSlackManufacturingEvent({
         type: "operation_claimed",
         actorName: machinist,

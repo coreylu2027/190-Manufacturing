@@ -13,6 +13,7 @@ import type { ManufacturingOperation, OperationsResponse } from "@/lib/types";
 import type { createWritePlan } from "@/lib/manufacturing/write-plan";
 import { isPostQcOperation } from "@/lib/manufacturing-workflow";
 import { settleSequentially } from "@/lib/bulk-selection";
+import { operationsQuery } from "@/lib/operations-query";
 
 type Preview = Awaited<ReturnType<ReturnType<typeof createWritePlan>["previewForceQuality"]>> & { token: string };
 const FINISHING_NOTE = "Finishing marked complete by Admin Force QC.";
@@ -70,19 +71,23 @@ export function BulkForceQcDialog({ open, onOpenChange, requirements, onFinished
   const client = useQueryClient();
   const [notes, setNotes] = useState("");
   const [completeFinishing, setCompleteFinishing] = useState(false);
-  const [busy, setBusy] = useState(false);
+  // The batch being forced. Live data refreshes as each part passes, so the dialog keeps showing
+  // the batch it started with instead of moving finished parts to "Skipped".
+  const [running, setRunning] = useState<BulkForceQcRequirement[] | null>(null);
   const [progress, setProgress] = useState(0);
   const [errors, setErrors] = useState<string[]>([]);
-  const eligible = requirements.filter(requirement => !forceQcBlocker(requirement));
+  const busy = running !== null;
+  const eligible = running ?? requirements.filter(requirement => !forceQcBlocker(requirement));
   const finishingCount = eligible.filter(requirement => requirement.finishing && requirement.finishing !== "None").length;
-  const skipped = requirements.flatMap(requirement => {
+  const skipped = running ? [] : requirements.flatMap(requirement => {
     const reason = forceQcBlocker(requirement);
     return reason ? [`${requirement.partNumber} (${reason})`] : [];
   });
   async function submit(result: "passed" | "failed") {
-    setBusy(true); setErrors([]); setProgress(0);
+    const batch = eligible;
+    setRunning(batch); setErrors([]); setProgress(0);
     const extra = notes.trim();
-    const results = await settleSequentially(eligible, async (requirement, index) => {
+    const results = await settleSequentially(batch, async (requirement, index) => {
       try {
         const previewResponse = await fetch(`/api/admin/qc/${requirement.requirementId}/force`, { cache: "no-store" });
         const preview = await previewResponse.json();
@@ -107,7 +112,7 @@ export function BulkForceQcDialog({ open, onOpenChange, requirements, onFinished
     const succeeded = results.flatMap(item => item.status === "fulfilled" ? [item.value] : []);
     const failures = results.flatMap(item => item.status === "rejected" ? [item.reason instanceof Error ? item.reason.message : "Unable to force QC"] : []);
     for (const key of ["production", "operations", "qc", "admin", "fabrication"]) void client.invalidateQueries({ queryKey: [key] });
-    setBusy(false);
+    setRunning(null);
     onFinished(succeeded);
     const verb = result === "passed" ? "passed" : "failed";
     if (failures.length) {
@@ -262,12 +267,7 @@ export function ForceQcButton({ requirementId, label, storageLocation, locationU
 export function ForceQcPicker() {
   const [search, setSearch] = useState("");
   const [open, setOpen] = useState(false);
-  const query = useQuery<OperationsResponse>({ queryKey: ["operations"], queryFn: async () => {
-    const response = await fetch("/api/operations", { cache: "no-store" });
-    const body = await response.json();
-    if (!response.ok) throw new Error(body.error ?? "Unable to load parts");
-    return body;
-  } });
+  const query = useQuery(operationsQuery);
   const groups = new Map<number, OperationsResponse["operations"]>();
   for (const operation of query.data?.operations ?? []) {
     if (operation.requirementId !== null && !operation.obsolete && operation.activeInBom && operation.effectiveQcResult !== "passed") {

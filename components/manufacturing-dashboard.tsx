@@ -1,5 +1,6 @@
 "use client";
 import { robotPlacementAllowed, workAllowed } from "@/lib/obsoletion";
+import { operationsQuery } from "@/lib/operations-query";
 import type { ObsoletionFields } from "@/lib/types";
 import { HiddenBadge, ObsoleteBadge, ObsoleteWarning, RequirementObsoletion, RequirementVisibility } from "@/components/requirement-obsoletion";
 import { CopyPartNumber, PartNumberCell } from "@/components/copy-part-number";
@@ -288,21 +289,6 @@ function ProductionProgressCell({ data }: { data?: ProductionRequirement }) {
 function ProductionActionCell({ data, onOpen }: { data?: ProductionRequirement; onOpen: (requirement: ProductionRequirement) => void }) {
   if (!data) return null;
   return <div className="flex h-full items-center justify-end"><Button size="sm" variant="outline" onClick={() => onOpen(data)}>More details<ChevronRight /></Button></div>;
-}
-
-async function fetchOperations(): Promise<OperationsResponse> {
-  const response = await fetch("/api/operations", { cache: "no-store" });
-  if (response.status === 401) {
-    throw new Error("AUTH_REQUIRED");
-  }
-  if (response.status === 403) {
-    throw new Error("APPROVAL_REQUIRED");
-  }
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    throw new Error(body.error ?? "Unable to load manufacturing operations");
-  }
-  return response.json();
 }
 
 function initials(name: string) {
@@ -1034,7 +1020,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
       : "disconnected"
   ));
 
-  const query = useQuery({ queryKey: ["operations"], queryFn: fetchOperations });
+  const query = useQuery(operationsQuery);
   const userName = query.data?.user?.name ?? "Machinist";
 
   const refreshManufacturingData = useCallback(() => {

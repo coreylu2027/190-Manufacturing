@@ -838,6 +838,40 @@ test("a part with a current QC pass cannot be reviewed again until the pass is u
   }
 });
 
+test("a rename updates the requirement assignment only when the renamed operation set it", async () => {
+  const OTHER = { id: "00000000-0000-4000-8000-000000000191", name: "Bea B." };
+  const done = (actor: { id: string; name: string }) => ({
+    Status: { value: "Complete" }, "Completed Quantity": 2, Machinist: `${actor.name} (2)`,
+    "Quantity Ledger": JSON.stringify([{ userId: actor.id, name: actor.name, claimed: 0, completed: 2 }]),
+  });
+  const secondStage = (actor: { id: string; name: string }, overrides: Partial<RawRow> = {}) => normalized("operations", {
+    id: 11, Operation: "fixture|OP2|Manufacturing", "Production Requirement": [{ id: 20 }], "Operation Number": { value: "OP2" },
+    Machine: { value: "Lathe" }, "Work Type": { value: "Manufacturing" }, "Active in Routing": true, ...done(actor), ...overrides,
+  });
+  const requirementPatch = async (state: WriteState) => {
+    const { adapter, commits } = harness(state);
+    await adapter.renameMachinistAllocations(ACTOR.id, ACTOR.name, "Alexis A.");
+    const changes = commits[0].p_changes as Array<{ entity: string; id: number; patch: Record<string, unknown> }>;
+    return changes.find(({ entity }) => entity === "requirements")?.patch;
+  };
+
+  // OP1 by Alex, OP2 by Bea, who assigned the requirement last: Alex's rename leaves it alone.
+  const laterStage = fixture({ operation: done(ACTOR), requirement: { Machinist: "Bea B. (2)" } });
+  laterStage.rows.operations.push(secondStage(OTHER));
+  assert.equal(await requirementPatch(laterStage), undefined);
+
+  // Alex did the CAM, Bea machined the part.
+  const cam = fixture({ operation: done(OTHER), requirement: { Machinist: "Bea B. (2)" } });
+  cam.rows.operations.push(secondStage(ACTOR, { "Work Type": { value: "CAM" }, "Operation Number": { value: "OP1" }, Machine: null,
+    "Completed Quantity": 1, Machinist: ACTOR.name,
+    "Quantity Ledger": JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 1 }]) }));
+  assert.equal(await requirementPatch(cam), undefined);
+
+  // When Alex's operation is the one that set it, the assignment follows the rename.
+  const own = fixture({ operation: done(ACTOR), requirement: { Machinist: "Alex A. (2)" } });
+  assert.deepEqual(await requirementPatch(own), { machinist: "Alexis A. (2)" });
+});
+
 test("threaded inserts cannot be claimed before QC even if a stale row says Ready", async () => {
   const state = withThreadedInsert(fixture(), { Status: { value: "Ready" } });
   const { adapter, commits } = harness(state);

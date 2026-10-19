@@ -7,7 +7,7 @@ import { z } from "zod";
 
 import * as profileName from "./profile-name.ts";
 
-function route(path: string, dependencies: Record<string, unknown>) {
+function route(path: string, dependencies: Record<string, unknown>, globals: Record<string, unknown> = {}) {
   const exports: Record<string, (...args: unknown[]) => Promise<{ status: number; body: Record<string, unknown> }>> = {};
   const source = ts.transpileModule(readFileSync(new URL(path, import.meta.url), "utf8"), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -16,7 +16,7 @@ function route(path: string, dependencies: Record<string, unknown>) {
     "next/server": { NextResponse: { json: (body: unknown, options?: { status: number }) => ({ body, status: options?.status ?? 200 }) } },
     ...dependencies,
   };
-  runInNewContext(source, { exports, process, require: (name: string) => {
+  runInNewContext(source, { exports, process, ...globals, require: (name: string) => {
     assert.ok(name in modules, `Unexpected import ${name}`);
     return modules[name as keyof typeof modules];
   } });
@@ -267,4 +267,45 @@ test("Force QC forwards post-QC readiness and the rejected quantity to Slack", a
   assert.equal((await force({ notes: "Bad", token: "t", result: "failed" })).status, 200);
   assert.equal(events[1].postQcWorkReady, false);
   assert.equal(events[1].rejectedQuantity, 2);
+});
+
+test("a committed steal still succeeds when notifying a displaced claimant fails", async () => {
+  const events: Array<Record<string, unknown>> = [];
+  const errors: unknown[][] = [];
+  const displaced = [
+    { userId: "00000000-0000-4000-8000-000000000001", name: "Bob B.", quantity: 1 },
+    { userId: "00000000-0000-4000-8000-000000000002", name: "Cam C.", quantity: 1 },
+  ];
+  const api = route("../app/api/operations/[id]/route.ts", {
+    zod: { z },
+    "@/lib/auth": { getAppUser: async () => ({ id: "alex", name: "Alex A.", approved: true, role: "machinist" }) },
+    "@/lib/manufacturing": {
+      stealOperationClaim: async () => ({
+        updated: { id: 10, status: "In Progress" },
+        displaced,
+        context: { operationId: 10, requirementId: 20, partNumber: "P-1", partName: "Fixture", assemblyNumber: "A-1", operationNumber: "OP1", workType: "Manufacturing", machine: "Mill", quantity: 2 },
+      }),
+    },
+    "@/lib/notifications": {
+      createNotification: async ({ recipientId }: { recipientId: string }) => {
+        if (recipientId === displaced[0].userId) throw new Error("notification store unavailable");
+        return { stored: true, email: "sent" };
+      },
+    },
+    "@/lib/profile-name": profileName,
+    "@/lib/slack-notifications": { scheduleSlackManufacturingEvent: (event: Record<string, unknown>) => events.push(event) },
+    "@/lib/types": { OPERATION_STATUSES: ["Planned", "Ready", "In Progress", "Blocked", "Complete"] },
+    "@/lib/manufacturing/write-adapter": { ManufacturingWriteError: class extends Error {} },
+    "@/lib/storage-locations": { storageLocationSchema: z.string() },
+  }, { console: { error: (...args: unknown[]) => errors.push(args) } });
+  const response = await api.PATCH(
+    new Request("https://example.com/api/operations/10", { method: "PATCH", body: JSON.stringify({ action: "steal", confirmed: true }) }),
+    { params: Promise.resolve({ id: "10" }) },
+  );
+  assert.equal(response.status, 200);
+  // The body was built inside the sandbox, so compare its plain JSON shape.
+  assert.deepEqual(JSON.parse(JSON.stringify(response.body.notificationDelivery)),
+    { alertsStored: 1, emailsSent: 1, emailsFailed: 1, emailsSkipped: 0, unmappedRecipients: 0 });
+  assert.equal(events.length, 1);
+  assert.equal(errors.length, 1);
 });
