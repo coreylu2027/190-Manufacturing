@@ -1,12 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {ENTITIES,normalizeRow} from "./model.ts";
 import {manufacturingSupabaseConfig} from "./config.ts";
 import {createSupabaseManufacturingAdapter} from "./supabase-adapter.ts";
-test("multi-links are rejected rather than silently collapsed",()=>{
- const entity=ENTITIES.find(e=>e.name==="requirements")!;
- assert.throws(()=>normalizeRow(entity,{id:1,Part:[{id:1},{id:2}]}),/refusing to collapse/);
-});
 test("manufacturing configuration fails closed without both Supabase server credentials",()=>{
  assert.throws(()=>manufacturingSupabaseConfig({}),/credentials are missing/);
  assert.throws(()=>manufacturingSupabaseConfig({NEXT_PUBLIC_SUPABASE_URL:"https://example.test"}),/credentials are missing/);

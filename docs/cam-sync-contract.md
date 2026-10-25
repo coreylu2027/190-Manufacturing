@@ -19,9 +19,11 @@ task to `Ready`; do not disrupt a target that has already started.
 
 After route reconciliation, apply `planRequirementWorkflow` from
 `lib/manufacturing-workflow.ts` (or equivalent logic) to set unstarted
-operation readiness and the Production Requirement status. This makes future
-syncs idempotent and keeps CAM for a later operation independent of earlier
-physical work.
+operation readiness and the Production Requirement status. It always takes the
+requirement's QC and finishing context (QC passed, finishing required and
+complete, and the QC point); the stored requirement status is not an input.
+This makes future syncs idempotent and keeps CAM for a later operation
+independent of earlier physical work.
 
 ## Initializing new Supabase routes
 

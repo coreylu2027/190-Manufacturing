@@ -1,8 +1,10 @@
 # Native manufacturing data
 
 Runtime reads and write planning use current Supabase columns only. The read
-projections take the normalized rows as they are; the write planner maps them to
-workflow field names with `runtimeRow`, without copying `source_row`.
+projections and the write planner both work on the normalized rows as they are,
+and share their column and quantity-ledger helpers (`lib/manufacturing/rows.ts`).
+The planner patches copies of those rows and commits only the shop columns that
+`manufacturing_commit` accepts; any `source_row` a row still carries is ignored.
 Part names, numbers, assemblies, drawing links, and revisions never fall back to
 archived lookup labels. Notifications and display projections share the same
 identity resolver.
@@ -26,5 +28,5 @@ imported.
 ## Verification
 
 Run `npm test` and `npx tsc --noEmit`. Write-adapter fixtures omit migration
-metadata, and regression tests also inject stale labels to verify they cannot
-influence CAM notifications.
+metadata, and a regression test injects stale `source_row` labels to verify they
+cannot influence CAM notifications.

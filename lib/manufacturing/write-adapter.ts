@@ -1,9 +1,9 @@
 import { createWritePlan } from "./write-plan.ts";
-import { deduplicateOperations, isPostQcOperation } from "../manufacturing-workflow.ts";
+import { deduplicateOperations, isFinishingComplete, isPostQcOperation, normalizeOperationStatus } from "../manufacturing-workflow.ts";
 import { createSupabaseManufacturingAdapter, supabaseApiHeaders, type AdapterConfig } from "./supabase-adapter.ts";
 import type { NormalizedRow } from "./model.ts";
-import type { FabricationAction, OperationPatch, OperationQuantityAction, QualityResult } from "../types.ts";
-import { ROBOT_LOCATION, canUseOnRobotLocation, isStorageLocation, isPrintingOperation, type StorageLocation } from "../storage-locations.ts";
+import type { FabricationAction, OperationPatch, OperationQuantityAction, OperationStatus, QualityResult } from "../types.ts";
+import { ROBOT_LOCATION, isStorageLocation, isPrintingOperation, type StorageLocation } from "../storage-locations.ts";
 import { robotPlacementAllowed } from "../obsoletion.ts";
 import type { QualityReviewRow } from "../quality-control.ts";
 
@@ -29,11 +29,6 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3
 /** The planner rejects workflow-rule violations with plain Errors; they conflict with the current state rather than being upstream failures. */
 function asConflict(error: unknown) {
   return error instanceof Error && error.constructor === Error ? new ManufacturingWriteError(error.message, 409) : error;
-}
-function sourceSelectValue(value: unknown, fallback = "") {
-  return typeof value === "object" && value !== null && "value" in value
-    ? String((value as { value: unknown }).value ?? fallback)
-    : fallback;
 }
 export function createSupabaseWriteAdapter(config: AdapterConfig) {
   const request = config.fetch ?? fetch;
@@ -65,7 +60,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
   async function transact<T>(
     actor: Actor,
     action: string,
-    build: (plan: Plan, state: WriteState) => Promise<T>,
+    build: (plan: Plan, state: WriteState) => T,
     qc: object | ((state: WriteState, result: T) => object | null) | null = null,
     commitRpc = "manufacturing_commit_with_qc_quantities",
   ) {
@@ -79,7 +74,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     state.rows = { ...state.rows, parts, assemblies };
     const plan = createWritePlan(state.rows);
     let result: T;
-    try { result = await build(plan, state); }
+    try { result = build(plan, state); }
     catch (error) { throw asConflict(error); }
     const qualityPayload = typeof qc === "function" ? qc(state, result) : qc;
     const body = { p_request_id: crypto.randomUUID(), p_actor: actor.id, p_action: action,
@@ -95,7 +90,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     assertWorkAllowed(state, Number(row.requirement_id));
     const canonical = deduplicateOperations(state.rows.operations.filter(row => row.active_in_routing).map(row => ({
       id: row.id, operationKey: String(row.operation_key ?? ""), workType: row.work_type === "CAM" ? "CAM" as const : "Manufacturing" as const,
-      status: (row.status === "Needs Rework" ? "Ready" : row.status) as import("../types.ts").OperationStatus, claimedQuantity: Number(row.claimed_quantity ?? 0), completedQuantity: Number(row.completed_quantity ?? 0),
+      status: normalizeOperationStatus(row.status), claimedQuantity: Number(row.claimed_quantity ?? 0), completedQuantity: Number(row.completed_quantity ?? 0),
       startedAt: row.started_at as string | null, completedAt: row.completed_at as string | null,
     })));
     if (!canonical.some(row => row.id === id)) throw new ManufacturingWriteError("This duplicate operation is not the active production record", 409);
@@ -174,7 +169,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       id: row.id,
       operationKey: String(row.operation_key ?? ""),
       workType: "Manufacturing" as const,
-      status: row.status as import("../types.ts").OperationStatus,
+      status: row.status as OperationStatus,
       completedAt: row.completed_at as string | null,
     })));
     const stale = manufacturingOperations.length === 0
@@ -198,26 +193,25 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     async previewForceQuality(requirementId: number) {
       const state = await rpc<WriteState>("manufacturing_write_state");
       assertForceEligible(state, requirementId);
-      try { return { ...await createWritePlan(state.rows).previewForceQuality(requirementId), token: state.token }; }
+      try { return { ...createWritePlan(state.rows).previewForceQuality(requirementId), token: state.token }; }
       catch (error) { throw asConflict(error); }
     },
     forceQualityReview(requirementId: number, notes: string, token: string, actor: Actor, result: "passed" | "failed" = "passed", completeFinishing = false) {
       const reviewedAt = new Date().toISOString();
       if (completeFinishing && result !== "passed") return Promise.reject(new ManufacturingWriteError("Finishing can only be completed when QC passes", 400));
       if (result === "failed" && !notes.trim()) return Promise.reject(new ManufacturingWriteError("Enter a reason for the QC failure", 400));
-      return transact(actor, "qc_review", async (plan, state) => {
+      return transact(actor, "qc_review", (plan, state) => {
         if (token !== state.token) throw new ManufacturingWriteError("Manufacturing changed. Refresh the preview and review the affected work before submitting again.", 409);
         assertForceEligible(state, requirementId);
-        await plan.forceCompletePrerequisites(requirementId, actor, reviewedAt);
+        plan.forceCompletePrerequisites(requirementId, actor, reviewedAt);
         // A forced failure rejects the whole batch, which the database requires as an explicit quantity.
         const rejectedQuantity = result === "failed"
           ? Math.max(1, Math.floor(Number(requirement(state, requirementId).required_quantity ?? 1)))
           : null;
-        const updatedRequirement = await plan.patchRequirementQualityOutcome(requirementId, result, actor.name, notes, reviewedAt, rejectedQuantity ?? undefined);
-        let requirementStatus = sourceSelectValue(updatedRequirement.Status, "Needs Triage");
+        let requirementStatus = plan.patchRequirementQualityOutcome(requirementId, result, actor.name, notes, reviewedAt, rejectedQuantity ?? undefined);
         let finishingCompleted = false;
         if (completeFinishing) {
-          const finished = await plan.forceCompleteFinishing(requirementId, actor);
+          const finished = plan.forceCompleteFinishing(requirementId, actor);
           if (finished) { requirementStatus = finished.requirementStatus; finishingCompleted = true; }
         }
         return {
@@ -248,7 +242,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       return { reviews, retractedIds: retractions.map(row => row.review_id) };
     },
     applyQuantityAction(id: number, action: OperationQuantityAction, quantity: number, actor: Actor, handoff?: { programPath?: string; notes?: string; location?: StorageLocation; completeAllClaims?: boolean }) {
-      return transact(actor, action, async (plan, state) => {
+      return transact(actor, action, (plan, state) => {
         const row = operation(state, id);
         const printing = isPrintingOperation({ machine: String(row.machine ?? ""), workType: String(row.work_type ?? "Manufacturing") });
         if (handoff?.completeAllClaims && (action !== "complete" || !printing)) {
@@ -264,7 +258,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
         if (afterQc(state, row) && ["claim", "complete"].includes(action)) {
           assertEffectivePassedReview(state, Number(row.requirement_id), "Work after QC requires a current passed QC review");
         }
-        const result = await plan.applyQuantityAction(id, action, quantity, actor, handoff);
+        const result = plan.applyQuantityAction(id, action, quantity, actor, handoff);
         return { ...result, notificationContext: { ...result.notificationContext, postQcWorkReady: releasesPostQcWork(state, plan) }, ...(handoff?.location === undefined ? {} : {
           storageLocation: handoff.location,
           locationUpdatedBy: actor.name,
@@ -273,7 +267,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       }, null, handoff?.location === undefined ? "manufacturing_commit_with_qc_quantities" : "manufacturing_commit_with_operation_location");
     },
     stealOperationClaim(id: number, actor: Actor) {
-      return transact(actor, "steal", async (plan, state) => {
+      return transact(actor, "steal", (plan, state) => {
         const row = operation(state, id);
         if (afterQc(state, row)) {
           assertEffectivePassedReview(state, Number(row.requirement_id), "Work after QC requires a current passed QC review");
@@ -282,7 +276,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       });
     },
     patchOperation(id: number, patch: OperationPatch, actor: Actor) {
-      return transact(actor, "patch_operation", async (plan, state) => {
+      return transact(actor, "patch_operation", (plan, state) => {
         const row = operation(state, id);
         const requirement = state.rows.requirements.find(r => r.id === row.requirement_id);
         if (requirement?.qc_outcome === "Passed" && !afterQc(state, row)) {
@@ -295,25 +289,21 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
         if (Number(row.claimed_quantity ?? 0) + Number(row.completed_quantity ?? 0) > 0 && ["Planned", "Ready"].includes(patch.status ?? "")) {
           throw new ManufacturingWriteError("Release or undo allocated work before resetting its status", 409);
         }
-        return plan.patchOperation(id, patch, actor.name);
+        return plan.patchOperation(id, patch);
       });
     },
     updateCamHandoff(id: number, patch: { completedBy: string; programPath: string; notes: string }, actor: Actor) {
-      return transact(actor, "cam_handoff", async (plan, state) => { operation(state, id); return plan.updateCamHandoff(id, patch); });
+      return transact(actor, "cam_handoff", (plan, state) => { operation(state, id); return plan.updateCamHandoff(id, patch); });
     },
     applyFabricationAction(id: number, action: FabricationAction, actor: Actor) {
-      return transact(actor, action === "steal" ? "steal" : `finishing_${action}`, async (plan, state) => {
+      return transact(actor, action === "steal" ? "steal" : `finishing_${action}`, (plan, state) => {
         const finishing = state.rows.finishing.find((candidate) => candidate.id === id);
         if (!finishing?.active) throw new ManufacturingWriteError("This finishing job is no longer active", 409);
-        assertWorkAllowed(state, Number(finishing.requirement_id));
-        if (action === "undo_complete") {
-          const finishingRow = state.rows.finishing.find((candidate) => candidate.id === id);
-          const requirementRow = finishingRow ? requirement(state, Number(finishingRow.requirement_id)) : null;
-          if (requirementRow?.part_location === ROBOT_LOCATION) {
-            throw new ManufacturingWriteError("Move the part off the robot before reopening finishing", 409);
-          }
+        const requirementRow = assertWorkAllowed(state, Number(finishing.requirement_id));
+        if (action === "undo_complete" && requirementRow.part_location === ROBOT_LOCATION) {
+          throw new ManufacturingWriteError("Move the part off the robot before reopening finishing", 409);
         }
-        const result = await plan.applyFabricationAction(id, action, actor);
+        const result = plan.applyFabricationAction(id, action, actor);
         return { ...result, notificationContext: { ...result.notificationContext, postQcWorkReady: releasesPostQcWork(state, plan) } };
       });
     },
@@ -333,7 +323,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       if (result === "failed" && !notes.trim()) throw new ManufacturingWriteError("Enter a reason for the QC failure", 400);
       if (location === ROBOT_LOCATION) throw new ManufacturingWriteError("On Robot becomes available after QC passes and finishing is complete", 409);
       const reviewedAt = new Date().toISOString();
-      return transact(actor, "qc_review", async (plan, state) => {
+      return transact(actor, "qc_review", (plan, state) => {
         const requirementRow = assertWorkAllowed(state, requirementId);
         // A second review (e.g. from a stale page) would leave released post-QC work in place.
         if (hasCurrentPass(state, requirementId)) {
@@ -348,7 +338,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
             throw new ManufacturingWriteError(`Rejected quantity must be a whole number from 1 to ${maximumQuantity}`, 400);
           }
         }
-        const updatedRequirement = await plan.patchRequirementQualityOutcome(
+        const requirementStatus = plan.patchRequirementQualityOutcome(
           requirementId,
           result,
           actor.name,
@@ -367,7 +357,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
           notificationContext: {
             ...notificationPartContext(state, requirementId),
             previousRequirementStatus: String(requirement(state, requirementId).status ?? "Needs Triage"),
-            requirementStatus: sourceSelectValue(updatedRequirement.Status, "Needs Triage"),
+            requirementStatus,
             postQcWorkReady: releasesPostQcWork(state, plan),
           },
         };
@@ -489,9 +479,9 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     },
     updatePassedQualityNotes(requirementId: number, notes: string, actor: Actor) {
       const reviewedAt = new Date().toISOString();
-      return transact(actor, "qc_review", async (plan, state) => {
+      return transact(actor, "qc_review", (plan, state) => {
         assertEffectivePassedReview(state, requirementId, "Only a current passed QC review can have its inspection notes updated");
-        await plan.patchRequirementQualityNote(requirementId, actor.name, notes, reviewedAt);
+        plan.patchRequirementQualityNote(requirementId, actor.name, notes, reviewedAt);
         return {
           requirementId,
           result: "passed" as const,
@@ -504,19 +494,19 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     updatePartLocation(requirementId: number, location: StorageLocation | null, actor: Actor) {
       if (location !== null && !isStorageLocation(location)) throw new ManufacturingWriteError("Invalid storage location", 400);
       const updatedAt = new Date().toISOString();
-      return transact(actor, "part_location", async (_plan, state) => {
+      return transact(actor, "part_location", (_plan, state) => {
         const requirementRow = requirement(state, requirementId);
         const finishingRequired = Boolean(requirementRow.finishing && requirementRow.finishing !== "None");
-        const finishingComplete = !finishingRequired
-          || requirementRow.qc_outcome === "Passed"
-            && !["Ready for QC", "Ready for Finishing"].includes(String(requirementRow.status ?? ""));
+        const finishingComplete = isFinishingComplete({
+          finishingRequired, qcPassed: requirementRow.qc_outcome === "Passed", status: String(requirementRow.status ?? ""),
+        });
         if (location === ROBOT_LOCATION) {
           if (requirementRow.obsolete) throw new ManufacturingWriteError("This requirement is obsolete. Do not manufacture or install it.", 409);
           if (!robotPlacementAllowed({ activeInBom: Boolean(requirementRow.active_in_bom), obsoletionVersion: Number(requirementRow.obsoletion_version ?? 0) })) {
             throw new ManufacturingWriteError("This requirement is inactive in the BOM", 409);
           }
           assertEffectivePassedReview(state, requirementId, "On Robot requires a current passed QC review");
-          if (!canUseOnRobotLocation(true, finishingComplete)) {
+          if (!finishingComplete) {
             throw new ManufacturingWriteError("Complete finishing before moving this part onto the robot", 409);
           }
         }
@@ -532,14 +522,14 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       }, { requirement_id: requirementId, location, location_updated_at: updatedAt });
     },
     undoQualityReview(requirementId: number, actor: Actor) {
-      return transact(actor, "qc_undo", async (plan, state) => {
+      return transact(actor, "qc_undo", (plan, state) => {
         assertWorkAllowed(state, requirementId);
         if (requirement(state, requirementId).part_location === ROBOT_LOCATION) {
           throw new ManufacturingWriteError("Move the part off the robot before undoing QC", 409);
         }
         const review = latestReview(state, requirementId);
         if (!review || review.result !== "passed" || state.retractions.some(r => r.review_id === review.id)) throw new ManufacturingWriteError("Only the latest passed QC review can be undone", 409);
-        await plan.clearPassedRequirementQualityOutcome(requirementId);
+        plan.clearPassedRequirementQualityOutcome(requirementId);
         return {
           undone: true,
           requirementId,
