@@ -39,8 +39,7 @@ without a routed OP1 receive `Needs Triage`; the initializer does not invent
 machine selections. Reconciliation of changes to already initialized routes
 remains subject to the contract above.
 
-Test with `node scripts/manufacturing-migration/initialize-routing.test.mjs`.
-Set `PGLITE_MODULE` to an installed PGlite module entrypoint if it is not in
-`node_modules`. Optionally set `ROUTING_SNAPSHOT` to a private local JSON export
-of the five normalized manufacturing entities to verify that initialized work
-is preserved. Tests run only in memory and never call Supabase or Onshape.
+`npm test` runs `scripts/manufacturing-migration/initialize-routing.test.mjs`
+against the complete current schema: CAM task creation, stage ordering, the QC
+gate, preserved work, idempotence, grants, and the trigger on failed and partial
+syncs. It runs only in memory and never calls Supabase or Onshape.

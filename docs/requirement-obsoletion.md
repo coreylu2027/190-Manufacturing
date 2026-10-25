@@ -129,11 +129,10 @@ requirements. There is no alphabetical comparison of revision names.
 
 ## Verification
 
-- `npm test`
-- `npm run manufacturing:test-migration`
-- `npm run manufacturing:test-obsoletion` — isolated PostgreSQL via PGlite;
-  permissions, retry/CAS, Undo, immutable work history, revision scope, repeated
-  sync, restoration, and failed/partial/incomplete sync coverage.
+- `npm test`, which includes `scripts/manufacturing-migration/obsoletion.test.mjs`
+  — isolated PostgreSQL via PGlite; permissions, retry/CAS, Undo, immutable work
+  history, revision scope, repeated sync, restoration, and failed/partial/incomplete
+  sync coverage.
 - `npm run lint`, `npx tsc --noEmit`, and `npm run build`.
 
 Browser verification uses synthetic records, covering production controls,

@@ -51,5 +51,6 @@ change any rows.
 
 - `npm test` includes `lib/requirement-history.test.mts` and
   `lib/document-progress.test.mts`.
-- `npm run manufacturing:test-overrides` checks the SQL function in PGlite: scope
-  to one requirement, part-level corrections, QC reviews, and permissions.
+- `npm test` also runs `scripts/manufacturing-migration/engineering-overrides.test.mts`,
+  which checks the SQL function in PGlite: scope to one requirement, part-level
+  corrections, QC reviews, and permissions.

@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { projectCotsRequirements, projectFinishing, projectOperations, projectProduction } from "./projections.ts";
+import { projectCotsRequirements, projectFinishing, projectOperations } from "./projections.ts";
+import { requirementStatus } from "../production-status.ts";
 
 const requirement = {
   id: 2,
@@ -37,18 +38,18 @@ test("production stays pending until required powder coating completes, includin
   const coatedRequirement = { ...requirement, Finishing: { value: "Black" }, "QC Outcome": { value: "Passed" } };
   const completedOperation = { ...operation, Status: { value: "Complete" } };
   const [pendingQc] = projectOperations([completedOperation], [coatedRequirement], [part]);
-  assert.equal(projectProduction([pendingQc])[0].status, "QC Pending");
+  assert.equal(requirementStatus([pendingQc]), "QC Pending");
   const passed = { ...pendingQc, effectiveQcResult: "passed" as const };
-  assert.equal(projectProduction([passed])[0].status, "Finishing Pending");
-  assert.equal(projectProduction([{ ...passed, status: "In Progress" }])[0].status, "In Progress");
+  assert.equal(requirementStatus([passed]), "Finishing Pending");
+  assert.equal(requirementStatus([{ ...passed, status: "In Progress" }]), "In Progress");
   const inserts = { ...passed, id: 5, machine: "Threaded Insert", status: "Planned" as const };
-  assert.equal(projectProduction([passed, inserts])[0].status, "Finishing Pending");
+  assert.equal(requirementStatus([passed, inserts]), "Finishing Pending");
 
   const finished = projectOperations([completedOperation], [{ ...coatedRequirement, Status: { value: "Complete" } }], [part])
     .map(row => ({ ...row, effectiveQcResult: "passed" as const }));
-  assert.equal(projectProduction(finished)[0].status, "Complete");
-  assert.equal(projectProduction([...finished, { ...inserts, finishingComplete: true, status: "Ready" }])[0].status, "Ready");
-  assert.equal(projectProduction([{ ...passed, finishingRequired: false }])[0].status, "Complete");
+  assert.equal(requirementStatus(finished), "Complete");
+  assert.equal(requirementStatus([...finished, { ...inserts, finishingComplete: true, status: "Ready" }]), "Ready");
+  assert.equal(requirementStatus([{ ...passed, finishingRequired: false }]), "Complete");
 });
 const finishing = {
   id: 4,
@@ -158,16 +159,15 @@ test("requirement projections include independent location and lifecycle details
   assert.equal(projectedFinishing.productionNotes, "Keep masking installed");
 });
 
- test("production status identifies pending QC before completion and post-QC inserts", async () => {
-  const { projectProduction } = await import("./projections.ts");
+ test("production status identifies pending QC before completion and post-QC inserts", () => {
   const completed = projectOperations([{ ...operation, Status: { value: "Complete" } }], [requirement], [part]);
-  assert.equal(projectProduction(completed)[0].status, "QC Pending");
+  assert.equal(requirementStatus(completed), "QC Pending");
   const inserts = { ...completed[0], id: 5, machine: "Threaded Insert", status: "Planned" as const };
-  assert.equal(projectProduction([...completed, inserts])[0].status, "QC Pending");
-  assert.equal(projectProduction(completed.map(row => ({ ...row, effectiveQcResult: "passed" as const })))[0].status, "Complete");
-  assert.equal(projectProduction(completed.map(row => ({ ...row, status: "In Progress" as const })))[0].status, "In Progress");
-  assert.equal(projectProduction(completed.map(row => ({ ...row, workType: "CAM" as const })))[0].status, "Complete");
-  assert.notEqual(projectProduction(completed.map(row => ({ ...row, effectiveQcResult: "failed" as const })))[0].status, "QC Pending");
+  assert.equal(requirementStatus([...completed, inserts]), "QC Pending");
+  assert.equal(requirementStatus(completed.map(row => ({ ...row, effectiveQcResult: "passed" as const }))), "Complete");
+  assert.equal(requirementStatus(completed.map(row => ({ ...row, status: "In Progress" as const }))), "In Progress");
+  assert.equal(requirementStatus(completed.map(row => ({ ...row, workType: "CAM" as const }))), "Complete");
+  assert.notEqual(requirementStatus(completed.map(row => ({ ...row, effectiveQcResult: "failed" as const }))), "QC Pending");
 });
 
 test("off-the-shelf requirements keep their retired routes visible with an Off the Shelf production status", () => {
@@ -175,7 +175,7 @@ test("off-the-shelf requirements keep their retired routes visible with an Off t
   const [op] = projectOperations([{ ...operation, "Active in Routing": false }], [bought], [part]);
   assert.equal(op.offTheShelf, true);
   assert.equal(op.activeInRouting, false);
-  assert.equal(projectProduction([op])[0].status, "Off the Shelf");
+  assert.equal(requirementStatus([op]), "Off the Shelf");
   assert.equal(projectOperations([{ ...operation, "Active in Routing": false }], [{ ...requirement, "Active in BOM": true }], [part]).length, 0);
 });
 

@@ -1,10 +1,8 @@
-import { requirementStatus } from "../production-status.ts";
 import { projectObsoletion } from "../obsoletion.ts";
 import { requirementIdentity } from "./identity.ts";
 // Pure projections from normalized manufacturing rows and the Supabase attachment catalog.
 import { deduplicateOperations, isPostQcOperation } from "../manufacturing-workflow.ts";
 import type { CotsRequirement, ManufacturingOperation, FabricationJob, OperationWorkType, OperationStatus, OperationAllocation } from "../types.ts";
-import { projectQualityControl, qualityMetadataByRequirement, type QualityReviewRow } from "../quality-control.ts";
 import { isStorageLocation } from "../storage-locations.ts";
 import type { ManufacturingAttachment, RawRow as SourceRow } from "./model.ts";
 function selectValue(value: unknown, fallback = ""): string {
@@ -394,61 +392,4 @@ export function projectFinishing(
   });
 
   return jobs.filter(job => job.active || job.obsolete || job.obsoletionVersion > 0);
-}
-export type ReviewRow = Omit<QualityReviewRow, "storage_location" | "location_updated_by" | "location_updated_at" | "rejected_quantity"> &
-  Partial<Pick<QualityReviewRow, "storage_location" | "location_updated_by" | "location_updated_at" | "rejected_quantity">>;
-
-function normalizedReviews(reviews: ReviewRow[]): QualityReviewRow[] {
-  return reviews.map((review) => ({
-    ...review,
-    storage_location: review.storage_location ?? null,
-    location_updated_by: review.location_updated_by ?? null,
-    location_updated_at: review.location_updated_at ?? null,
-    rejected_quantity: review.rejected_quantity ?? null,
-  }));
-}
-
-export function projectQc(operations: ManufacturingOperation[], reviews: ReviewRow[], users: Array<{id:string;name:string}>) {
-  return projectQualityControl(
-    operations,
-    normalizedReviews(reviews),
-    [],
-    users.map((user) => ({ id: user.id, display_name: user.name })),
-  );
-}
-
-
-export function withFinishingQc(jobs: FabricationJob[], reviews: ReviewRow[], operations: ManufacturingOperation[]) {
-  const metadata = qualityMetadataByRequirement(operations, normalizedReviews(reviews), [], []).metadata;
-  return jobs.map((job) => ({ ...job, qcNotes: metadata.get(job.requirementId)?.notes ?? "" }));
-}
-
-export function projectProduction(operations: ManufacturingOperation[]) {
-    const grouped = new Map<string, ManufacturingOperation[]>();
-
-    for (const operation of operations) {
-      const key = `${operation.assemblyNumber}|${operation.partNumber}|${operation.revision ?? ""}`;
-      grouped.set(key, [...(grouped.get(key) ?? []), operation]);
-    }
-
-    return [...grouped.entries()].map(([key, routedOperations]) => {
-        const first = routedOperations[0];
-        return {
-          key,
-          partNumber: first.partNumber,
-          revision: first.revision,
-          partName: first.partName,
-          assemblyNumber: first.assemblyNumber,
-          documentName: first.documentName,
-          quantity: first.quantity,
-          completedOperations: routedOperations.filter((operation) => operation.status === "Complete").length,
-          totalOperations: routedOperations.length,
-          completedCamTasks: routedOperations.filter((operation) => operation.workType === "CAM" && operation.status === "Complete").length,
-          totalCamTasks: routedOperations.filter((operation) => operation.workType === "CAM").length,
-          completedManufacturingOperations: routedOperations.filter((operation) => operation.workType === "Manufacturing" && operation.status === "Complete").length,
-          totalManufacturingOperations: routedOperations.filter((operation) => operation.workType === "Manufacturing").length,
-          status: requirementStatus(routedOperations),
-        };
-      });
-
 }

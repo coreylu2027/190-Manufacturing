@@ -1,26 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync } from "node:fs";
-import { runInNewContext } from "node:vm";
-import ts from "typescript";
 import { z } from "zod";
 
 import * as profileName from "./profile-name.ts";
+import { loadModule } from "./test-module-loader.mts";
+
+const nextServer = { NextResponse: { json: (body: unknown, options?: { status: number }) => ({ body, status: options?.status ?? 200 }) } };
 
 function route(path: string, dependencies: Record<string, unknown>, globals: Record<string, unknown> = {}) {
-  const exports: Record<string, (...args: unknown[]) => Promise<{ status: number; body: Record<string, unknown> }>> = {};
-  const source = ts.transpileModule(readFileSync(new URL(path, import.meta.url), "utf8"), {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-  }).outputText;
-  const modules = {
-    "next/server": { NextResponse: { json: (body: unknown, options?: { status: number }) => ({ body, status: options?.status ?? 200 }) } },
-    ...dependencies,
-  };
-  runInNewContext(source, { exports, process, ...globals, require: (name: string) => {
-    assert.ok(name in modules, `Unexpected import ${name}`);
-    return modules[name as keyof typeof modules];
-  } });
-  return exports;
+  return loadModule<Record<string, (...args: unknown[]) => Promise<{ status: number; body: Record<string, unknown> }>>>(
+    new URL(path, import.meta.url), { "next/server": nextServer, ...dependencies }, { process, ...globals });
 }
 
 test("only approved admins can hide requirements through the API", async () => {

@@ -1,4 +1,4 @@
-import { ENTITIES, runtimeRow, type ManufacturingAttachment, type NormalizedRow, type RawRow } from "./model.ts";
+import { ENTITIES, runtimeRow, type Entity, type ManufacturingAttachment, type NormalizedRow, type RawRow } from "./model.ts";
 import { projectCotsRequirements, projectOperations, projectFinishing } from "./projections.ts";
 export interface AdapterConfig { url: string; serviceKey: string; fetch?: typeof fetch }
 export type ManufacturingRows = Record<string, RawRow[]>;
@@ -79,7 +79,7 @@ export function createSupabaseManufacturingAdapter(config: AdapterConfig) {
     }
     return data;
   }
-  async function readRows(entities = ENTITIES): Promise<ManufacturingRows> {
+  async function readRows(entities: readonly Entity[]): Promise<ManufacturingRows> {
     const entries: Array<readonly [string, RawRow[]]> = [];
     // Keep cold-cache reconstruction from opening one database statement per
     // entity at the same instant. A small amount of bounded parallelism is
@@ -121,7 +121,7 @@ export function createSupabaseManufacturingAdapter(config: AdapterConfig) {
     };
   }
   return {
-    readEntity, readAttachments, readDataVersion, readRows, readSnapshot,
+    readEntity, readAttachments, readDataVersion, readSnapshot,
     async getOperations() {
       const { operations } = await readSnapshot();
       return { operations };

@@ -1,16 +1,13 @@
 // Runs in isolated PostgreSQL/WASM; never contacts Supabase.
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import test from "node:test";
-import { PGlite } from "@electric-sql/pglite";
+import test, { type TestContext } from "node:test";
+import { createDatabase } from "./pglite-fixture.mts";
 
 const ALICE = "00000000-0000-4000-8000-00000000000a";
 const BOB = "00000000-0000-4000-8000-00000000000b";
 
-async function database() {
-  const db = new PGlite();
-  const install = async (path: string) => db.exec(await readFile(new URL(`../../${path}`, import.meta.url), "utf8"));
-  await db.exec(`
+async function database(t: TestContext) {
+  const { db, install } = await createDatabase(`
     create role anon; create role authenticated; create role service_role;
     create schema auth;
     create table auth.users(id uuid primary key, email text, raw_user_meta_data jsonb not null default '{}');
@@ -20,6 +17,7 @@ async function database() {
     -- Supabase's default: every new public table is fully granted to the API roles.
     alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
   `);
+  t.after(() => db.close());
   for (const migration of ["202609010001_admin_approval_and_qc", "202609010002_profile_permissions",
     "202609010003_notifications", "202609010005_profile_last_seen", "202609040001_requirement_level_qc",
     "202609040002_qc_legacy_compatibility"]) await install(`supabase/migrations/${migration}.sql`);
@@ -37,15 +35,15 @@ async function database() {
   return { db, lockDown, as };
 }
 
-test("with Supabase default grants, a signed-in user can approve and promote themselves", async () => {
-  const { db, as } = await database();
+test("with Supabase default grants, a signed-in user can approve and promote themselves", async (t) => {
+  const { db, as } = await database(t);
   await as("authenticated", "update public.profiles set approved = true, role = 'admin', display_name = 'Bob B.' where id = $1", [ALICE]);
   const [profile] = (await db.query<{ approved: boolean; role: string }>("select approved, role from public.profiles where id = $1", [ALICE])).rows;
   assert.deepEqual(profile, { approved: true, role: "admin" });
 });
 
-test("the lockdown leaves users only reading their own rows and stamping last seen / read", async () => {
-  const { db, lockDown, as } = await database();
+test("the lockdown leaves users only reading their own rows and stamping last seen / read", async (t) => {
+  const { db, lockDown, as } = await database(t);
   await lockDown();
   for (const statement of [
     "update public.profiles set approved = true where id = $1",

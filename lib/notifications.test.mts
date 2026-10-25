@@ -1,20 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync } from "node:fs";
-import { runInNewContext } from "node:vm";
 import { timingSafeEqual } from "node:crypto";
-import ts from "typescript";
+
+import { loadModule } from "./test-module-loader.mts";
 
 function load(path: string, dependencies: Record<string, unknown>, globals: Record<string, unknown> = {}) {
-  const exports: Record<string, (...args: unknown[]) => Promise<Record<string, unknown>>> = {};
-  const source = ts.transpileModule(readFileSync(new URL(path, import.meta.url), "utf8"), {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-  }).outputText;
-  runInNewContext(source, { exports, require: (name: string) => {
-    assert.ok(name in dependencies, `Unexpected import ${name}`);
-    return dependencies[name];
-  }, AbortSignal, Buffer, Date, ...globals });
-  return exports;
+  return loadModule<Record<string, (...args: unknown[]) => Promise<Record<string, unknown>>>>(
+    new URL(path, import.meta.url), dependencies, { AbortSignal, Buffer, Date, ...globals });
 }
 
 test("stored notifications reuse the email framework, escaping and idempotency key", async () => {

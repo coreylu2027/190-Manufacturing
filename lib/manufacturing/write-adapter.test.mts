@@ -10,10 +10,8 @@ const ACTOR = { id: "00000000-0000-4000-8000-000000000190", name: "Alex A." };
 for (const metadata of ["absent", "stale"] as const) {
   test(`native CAM claims resolve current identities with ${metadata} migration metadata`, async () => {
     const state = fixture({ operation: { "Work Type": { value: "CAM" } } });
-    for (const records of Object.values(state.rows)) for (const row of records) {
-      delete row.baserow_id;
-      delete row.source_row;
-      if (metadata === "stale") row.source_row = { id: row.id,
+    if (metadata === "stale") for (const records of Object.values(state.rows)) for (const row of records) {
+      row.source_row = { id: row.id,
         "Production Requirement": [{ id: 20, value: "OLD — Obsolete [OLD-ASSEMBLY]" }],
         Status: { value: "Complete" }, "Claimed Quantity": 999 };
     }
@@ -269,10 +267,7 @@ test("Force QC normalizes legacy rework rows and propagates database permission 
 function normalized(entityName: string, raw: RawRow): NormalizedRow {
   const entity = ENTITIES.find((candidate) => candidate.name === entityName);
   assert.ok(entity);
-  const row = normalizeRow(entity, raw) as NormalizedRow;
-  delete row.source_row;
-  delete row.baserow_id;
-  return row;
+  return normalizeRow(entity, raw);
 }
 
 function fixture(options: {
