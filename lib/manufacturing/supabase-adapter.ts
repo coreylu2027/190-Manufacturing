@@ -3,24 +3,28 @@ import { projectCotsRequirements, projectOperations, projectFinishing } from "./
 export interface AdapterConfig { url: string; serviceKey: string; fetch?: typeof fetch }
 const SNAPSHOT_ENTITIES = ["assemblies", "parts", "requirements", "operations", "finishing"] as const;
 const READ_CONCURRENCY = 2;
-export function supabaseApiHeaders(key: string): Record<string, string> {
+function supabaseApiHeaders(key: string): Record<string, string> {
   const headers: Record<string, string> = { apikey: key };
   if (!key.startsWith("sb_")) headers.Authorization = `Bearer ${key}`;
   return headers;
 }
-export function createSupabaseManufacturingAdapter(config: AdapterConfig) {
-  const request = config.fetch ?? fetch;
-  const baseUrl = config.url.replace(/\/$/, "");
+/** Calls a PostgREST RPC with the service key: a POST with a JSON body, or a GET with query params. */
+export function postgrestRpc(config: AdapterConfig, name: string, { body, params }: { body?: unknown; params?: URLSearchParams } = {}) {
   const headers = supabaseApiHeaders(config.serviceKey);
+  return (config.fetch ?? fetch)(`${config.url.replace(/\/$/, "")}/rest/v1/rpc/${name}${params ? `?${params}` : ""}`, {
+    method: body === undefined ? "GET" : "POST",
+    headers: body === undefined ? headers : { ...headers, "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    cache: "no-store", redirect: "error", signal: AbortSignal.timeout(30_000),
+  });
+}
+export function createSupabaseManufacturingAdapter(config: AdapterConfig) {
   async function readEntity(entity: string): Promise<NormalizedRow[]> {
     const rows: NormalizedRow[] = [];
     let expected: number | undefined;
     for (let offset=0; ; ) {
       const params = new URLSearchParams({p_entity:entity,p_offset:String(offset),p_limit:"500"});
-      const response = await request(baseUrl+"/rest/v1/rpc/manufacturing_read_entity?"+params, {
-        method:"GET", headers,
-        cache:"no-store", redirect:"error", signal:AbortSignal.timeout(30_000)
-      });
+      const response = await postgrestRpc(config, "manufacturing_read_entity", { params });
       if (!response.ok) throw new Error("Supabase manufacturing read failed ("+response.status+")");
       const page = await response.json() as {rows:NormalizedRow[];total:number};
       if (!Array.isArray(page.rows) || !Number.isSafeInteger(page.total) || page.total<0) throw new Error("Invalid manufacturing page");
@@ -35,14 +39,7 @@ export function createSupabaseManufacturingAdapter(config: AdapterConfig) {
     return rows;
   }
   async function readAttachments(): Promise<ManufacturingAttachment[]> {
-    const response = await request(`${baseUrl}/rest/v1/rpc/manufacturing_attachment_manifest`, {
-      method: "POST",
-      headers: { ...headers, "Content-Type": "application/json" },
-      body: "{}",
-      cache: "no-store",
-      redirect: "error",
-      signal: AbortSignal.timeout(30_000),
-    });
+    const response = await postgrestRpc(config, "manufacturing_attachment_manifest", { body: {} });
     if (!response.ok) throw new Error(`Supabase manufacturing attachment read failed (${response.status})`);
     const data = await response.json() as unknown;
     if (!Array.isArray(data)) throw new Error("Invalid manufacturing attachment manifest");
@@ -63,14 +60,7 @@ export function createSupabaseManufacturingAdapter(config: AdapterConfig) {
     });
   }
   async function readDataVersion(): Promise<string> {
-    const response = await request(`${baseUrl}/rest/v1/rpc/manufacturing_data_version`, {
-      method: "POST",
-      headers: { ...headers, "Content-Type": "application/json" },
-      body: "{}",
-      cache: "no-store",
-      redirect: "error",
-      signal: AbortSignal.timeout(30_000),
-    });
+    const response = await postgrestRpc(config, "manufacturing_data_version", { body: {} });
     if (!response.ok) throw new Error(`Supabase manufacturing version read failed (${response.status})`);
     const data = await response.json() as unknown;
     if (typeof data !== "string" || !/^\d+$/.test(data)) {

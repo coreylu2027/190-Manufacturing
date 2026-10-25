@@ -35,3 +35,11 @@ export async function settleSequentially<Item, Result>(
 
   return results;
 }
+
+/** Splits settled results into fulfilled values and rejection reasons, each in their original order. */
+export function partitionSettled<Result>(results: readonly PromiseSettledResult<Result>[]) {
+  return {
+    succeeded: results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []),
+    failures: results.flatMap((result): unknown[] => result.status === "rejected" ? [result.reason] : []),
+  };
+}

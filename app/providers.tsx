@@ -5,7 +5,6 @@ import { useEffect, useState } from "react";
 import { ThemeProvider } from "next-themes";
 
 import { Toaster } from "@/components/ui/sonner";
-import { TooltipProvider } from "@/components/ui/tooltip";
 import { colorThemeScript, useColorTheme } from "@/lib/color-theme-preference";
 
 export function Providers({ children }: { children: React.ReactNode }) {
@@ -27,7 +26,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
     <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
       <script dangerouslySetInnerHTML={{ __html: colorThemeScript }} />
       <QueryClientProvider client={queryClient}>
-        <TooltipProvider>{children}</TooltipProvider>
+        {children}
         <Toaster position="bottom-left" mobileOffset={{ bottom: "88px", left: "16px", right: "16px" }} richColors />
       </QueryClientProvider>
     </ThemeProvider>

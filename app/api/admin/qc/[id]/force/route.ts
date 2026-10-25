@@ -1,8 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { getAdminActor } from "@/lib/auth";
+import { errorResponse, parseId, readJson, requireUser } from "@/lib/api-route";
 import { forceQualityReview, previewForceQuality } from "@/lib/manufacturing";
-import { ManufacturingWriteError } from "@/lib/manufacturing/write-adapter";
 import { scheduleSlackManufacturingEvent } from "@/lib/slack-notifications";
 
 const schema = z.object({
@@ -13,20 +12,19 @@ const schema = z.object({
 }).strict().refine(value => !value.completeFinishing || value.result === "passed", { message: "Finishing can only be completed when QC passes" });
 type Context = { params: Promise<{ id: string }> };
 async function handle(request: Request, context: Context) {
-  const actor = await getAdminActor();
-  if (!actor) return NextResponse.json({ error: "Authentication required" }, { status: 401 });
-  if (!actor.approved || actor.role !== "admin") return NextResponse.json({ error: "Administrator access required" }, { status: 403 });
-  const id = Number((await context.params).id);
-  if (!Number.isSafeInteger(id) || id <= 0) return NextResponse.json({ error: "Invalid production requirement ID" }, { status: 400 });
+  const { user, response } = await requireUser({ admin: true });
+  if (response) return response;
+  const id = parseId((await context.params).id);
+  if (id === null) return NextResponse.json({ error: "Invalid production requirement ID" }, { status: 400 });
   try {
     if (request.method === "GET") return NextResponse.json(await previewForceQuality(id));
-    const parsed = schema.safeParse(await request.json().catch(() => null));
+    const parsed = await readJson(request, schema);
     if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message }, { status: 400 });
-    const result = await forceQualityReview(id, parsed.data.notes, parsed.data.token, actor, parsed.data.result, parsed.data.completeFinishing);
+    const result = await forceQualityReview(id, parsed.data.notes, parsed.data.token, user, parsed.data.result, parsed.data.completeFinishing);
     const { notificationContext, ...review } = result;
     scheduleSlackManufacturingEvent({
       type: "qc_reviewed",
-      actorName: actor.name,
+      actorName: user.name,
       result: parsed.data.result,
       notes: parsed.data.notes,
       storageLocation: null,
@@ -40,7 +38,7 @@ async function handle(request: Request, context: Context) {
     });
     return NextResponse.json(review);
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to force QC" }, { status: error instanceof ManufacturingWriteError ? error.status : 502 });
+    return errorResponse(error, "Unable to force QC");
   }
 }
 export const GET = handle;

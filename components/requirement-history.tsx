@@ -6,6 +6,7 @@ import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import type { HistoryEntry, HistoryTone } from "@/lib/requirement-history";
+import { requestJson } from "@/lib/request-json";
 import { cn } from "@/lib/utils";
 
 const COLLAPSED_COUNT = 6;
@@ -19,11 +20,8 @@ const TONE_DOT: Record<HistoryTone, string> = {
   status: "bg-slate-500",
 };
 
-async function fetchHistory(requirementId: number): Promise<{ entries: HistoryEntry[] }> {
-  const response = await fetch(`/api/requirements/${requirementId}/history`, { cache: "no-store" });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error ?? "Unable to load history");
-  return body;
+function fetchHistory(requirementId: number) {
+  return requestJson<{ entries: HistoryEntry[] }>(`/api/requirements/${requirementId}/history`, { cache: "no-store" }, "Unable to load history");
 }
 
 function relativeTime(value: string) {

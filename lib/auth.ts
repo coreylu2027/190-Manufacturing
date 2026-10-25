@@ -1,18 +1,10 @@
 import "server-only";
 
+import type { User } from "@supabase/supabase-js";
+
 import { createAdminClient } from "@/lib/supabase/admin";
-import { createClient, getCurrentUser } from "@/lib/supabase/server";
-
-export const APP_ROLES = ["machinist", "admin"] as const;
-export type AppRole = (typeof APP_ROLES)[number];
-
-export interface AppUser {
-  id: string;
-  name: string;
-  email: string | null;
-  role: AppRole;
-  approved: boolean;
-}
+import { createClient } from "@/lib/supabase/server";
+import type { AppUser } from "@/lib/types";
 
 const persistedBootstrapAdmins = new Set<string>();
 
@@ -41,22 +33,27 @@ export function isBootstrapAdminEmail(email: string | null | undefined) {
   return configured.includes(email.toLowerCase());
 }
 
+/**
+ * The shop name decides who owns claimed work, so it comes from the profile,
+ * which only the server writes. Auth metadata is editable from the browser and
+ * only names an account that has no profile yet.
+ */
+export function accountName(user: Pick<User, "email" | "user_metadata">, profile: { display_name?: unknown } | null | undefined, lastResort = "Machinist"): string {
+  const profileName = profile ? String(profile.display_name ?? "").trim() : user.user_metadata.full_name ?? user.user_metadata.name ?? "";
+  return profileName || user.email?.split("@")[0] || lastResort;
+}
+
 export async function getAppUser(): Promise<AppUser | null> {
-  const user = await getCurrentUser();
+  const supabase = await createClient();
+  if (!supabase) return null;
+  const { data: { user } } = await supabase.auth.getUser();
   if (!user) return null;
 
   const email = user.email ?? null;
-  const supabase = await createClient();
-  const { data, error } = supabase
-    ? await supabase.from("profiles").select("display_name, role, approved").eq("id", user.id).maybeSingle()
-    : { data: null, error: null };
+  const { data, error } = await supabase.from("profiles").select("display_name, role, approved").eq("id", user.id).maybeSingle();
   // Without the profile the shop name is unknown; never fall back to metadata for an existing account.
   if (error) throw new Error(`Unable to load your profile: ${error.message}`);
-  // The shop name decides who owns claimed work, so it comes from the profile,
-  // which only the server writes. Auth metadata is editable from the browser and
-  // only names an account that has no profile yet.
-  const profileName = data ? String(data.display_name ?? "").trim() : user.user_metadata.full_name ?? user.user_metadata.name ?? "";
-  const name = profileName || email?.split("@")[0] || "Machinist";
+  const name = accountName(user, data);
   if (isBootstrapAdminEmail(email)) {
     await persistBootstrapAdmin(user.id, email, name);
     return { id: user.id, name, email, role: "admin", approved: true };
@@ -94,8 +91,4 @@ export async function recordSiteVisit(userId: string) {
     .from("profiles")
     .update({ last_seen_at: new Date().toISOString() })
     .eq("id", userId);
-}
-
-export async function getAdminActor() {
-  return getAppUser();
 }

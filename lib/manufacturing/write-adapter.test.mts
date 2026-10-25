@@ -850,38 +850,87 @@ test("a part with a current QC pass cannot be reviewed again until the pass is u
   }
 });
 
-test("a rename updates the requirement assignment only when the renamed operation set it", async () => {
+test("a rename changes only the renamer's entries in a requirement assignment", async () => {
   const OTHER = { id: "00000000-0000-4000-8000-000000000191", name: "Bea B." };
+  const ADMIN = { id: "00000000-0000-4000-8000-000000000192", name: "Admin Z." };
+  const ledger = (...entries: Array<[{ id: string; name: string }, number]>) =>
+    JSON.stringify(entries.map(([actor, completed]) => ({ userId: actor.id, name: actor.name, claimed: 0, completed })));
   const done = (actor: { id: string; name: string }) => ({
-    status: "Complete", completed_quantity: 2, machinist: `${actor.name} (2)`,
-    quantity_ledger: JSON.stringify([{ userId: actor.id, name: actor.name, claimed: 0, completed: 2 }]),
+    status: "Complete", completed_quantity: 2, machinist: `${actor.name} (2)`, quantity_ledger: ledger([actor, 2]),
   });
   const secondStage = (actor: { id: string; name: string }, overrides: Partial<NormalizedRow> = {}) => ({
     id: 11, operation_key: "fixture|OP2|Manufacturing", requirement_id: 20, operation_number: "OP2",
     machine: "Lathe", work_type: "Manufacturing", active_in_routing: true, ...done(actor), ...overrides,
   });
-  const requirementPatch = async (state: WriteState) => {
+  const rename = async (state: WriteState) => {
     const { adapter, commits } = harness(state);
     await adapter.renameMachinistAllocations(ACTOR.id, ACTOR.name, "Alexis A.");
     const changes = commits[0].p_changes as Array<{ entity: string; id: number; patch: Record<string, unknown> }>;
-    return changes.find(({ entity }) => entity === "requirements")?.patch;
+    return {
+      requirement: changes.find(({ entity }) => entity === "requirements")?.patch,
+      finishing: changes.find(({ entity }) => entity === "finishing")?.patch,
+      operation: (id: number) => changes.find(({ entity, id: changed }) => entity === "operations" && changed === id)?.patch,
+    };
   };
 
   // OP1 by Alex, OP2 by Bea, who assigned the requirement last: Alex's rename leaves it alone.
   const laterStage = fixture({ operation: done(ACTOR), requirement: { machinist: "Bea B. (2)" } });
   laterStage.rows.operations.push(secondStage(OTHER));
-  assert.equal(await requirementPatch(laterStage), undefined);
+  assert.equal((await rename(laterStage)).requirement, undefined);
 
-  // Alex did the CAM, Bea machined the part.
+  // Alex did the CAM, Bea machined the part: the CAM credit is renamed, the assignment is Bea's.
   const cam = fixture({ operation: done(OTHER), requirement: { machinist: "Bea B. (2)" } });
   cam.rows.operations.push(secondStage(ACTOR, { work_type: "CAM", operation_number: "OP1", machine: null,
-    completed_quantity: 1, machinist: ACTOR.name,
-    quantity_ledger: JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 1 }]) }));
-  assert.equal(await requirementPatch(cam), undefined);
+    completed_quantity: 1, machinist: ACTOR.name, quantity_ledger: ledger([ACTOR, 1]) }));
+  const camRename = await rename(cam);
+  assert.equal(camRename.requirement, undefined);
+  assert.equal(camRename.operation(11)?.machinist, "Alexis A.");
 
-  // When Alex's operation is the one that set it, the assignment follows the rename.
-  const own = fixture({ operation: done(ACTOR), requirement: { machinist: "Alex A. (2)" } });
-  assert.deepEqual(await requirementPatch(own), { machinist: "Alexis A. (2)" });
+  // The assignment Alex set follows the rename, keeping its count, even after Force QC rewrote the
+  // operation's credit, and alongside someone else's entry.
+  const own = fixture({ operation: done(ACTOR), requirement: { machinist: "Alex A. (2)" }, finishing: { machinist: ACTOR.name } });
+  const ownRename = await rename(own);
+  assert.deepEqual(ownRename.requirement, { machinist: "Alexis A. (2)" });
+  assert.deepEqual(ownRename.finishing, { machinist: "Alexis A." });
+  const forced = fixture({ requirement: { machinist: "Alex A. (2)" }, operation: {
+    status: "Complete", completed_quantity: 2, machinist: "Alex A. (1), Admin Z. (1)", quantity_ledger: ledger([ACTOR, 1], [ADMIN, 1]),
+  } });
+  const forcedRename = await rename(forced);
+  assert.deepEqual(forcedRename.requirement, { machinist: "Alexis A. (2)" });
+  assert.equal(forcedRename.operation(10)?.machinist, "Alexis A. (1), Admin Z. (1)");
+  const shared = fixture({ requirement: { machinist: "Alex A. (1), Bea B. (1)" } });
+  assert.deepEqual((await rename(shared)).requirement, { machinist: "Alexis A. (1), Bea B. (1)" });
+
+  // A partial QC failure left OP1 with one of Alex's two parts; the assignment still follows.
+  const partialFail = fixture({ requirement: { machinist: "Alex A. (2)", qc_outcome: "Failed" }, operation: {
+    status: "Ready", completed_quantity: 1, machinist: "Alex A. (1)", quantity_ledger: ledger([ACTOR, 1]),
+  } });
+  assert.deepEqual((await rename(partialFail)).requirement, { machinist: "Alexis A. (2)" });
+
+  // An admin credited Alex's CAM to Bea through "Completed by"; the rename keeps that correction.
+  const corrected = fixture({ requirement: { required_quantity: 1, machinist: "Bea B." }, operation: {
+    work_type: "CAM", status: "Complete", completed_quantity: 1, machinist: "Bea B.",
+    quantity_ledger: JSON.stringify([{ userId: ACTOR.id, name: "Bea B.", claimed: 0, completed: 1 }]),
+  } });
+  const correctedRename = await rename(corrected);
+  assert.equal(correctedRename.operation(10), undefined);
+  assert.equal(correctedRename.requirement, undefined);
+
+  // An earlier rename skipped this requirement while it was obsolete, so it still shows the name
+  // before that; the account's credit there carries the same name, which identifies it.
+  const restored = fixture({ requirement: { machinist: "Al A. (2)" }, operation: {
+    status: "Complete", completed_quantity: 2, machinist: "Al A. (2)",
+    quantity_ledger: JSON.stringify([{ userId: ACTOR.id, name: "Al A.", claimed: 0, completed: 2 }]),
+  } });
+  const restoredRename = await rename(restored);
+  assert.deepEqual(restoredRename.requirement, { machinist: "Alexis A. (2)" });
+  assert.equal(restoredRename.operation(10)?.machinist, "Alexis A. (2)");
+
+  // Obsolete requirements are frozen.
+  const frozen = fixture({ operation: done(ACTOR), requirement: { machinist: "Alex A. (2)", obsolete: true } });
+  const frozenRename = await rename(frozen);
+  assert.equal(frozenRename.requirement, undefined);
+  assert.equal(frozenRename.operation(10), undefined);
 });
 
 test("threaded inserts cannot be claimed before QC even if a stale row says Ready", async () => {

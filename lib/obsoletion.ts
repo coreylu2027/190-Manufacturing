@@ -23,6 +23,11 @@ export function robotPlacementAllowed(requirement: { obsolete?: boolean; activeI
   return !requirement.obsolete && (requirement.activeInBom || Number(requirement.obsoletionVersion ?? 0) > 0);
 }
 
+/** On Robot also needs a passed QC review and completed finishing. */
+export function onRobotAllowed(requirement: Parameters<typeof robotPlacementAllowed>[0], qcPassed: boolean, finishingComplete: boolean) {
+  return robotPlacementAllowed(requirement) && qcPassed && finishingComplete;
+}
+
 export function workAllowed(operation: { obsolete?: boolean; activeInBom: boolean; activeInRouting: boolean }) {
   return !operation.obsolete && operation.activeInBom && operation.activeInRouting;
 }

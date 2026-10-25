@@ -6,6 +6,7 @@ import { type FormEvent, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { shopNameSchema } from "@/lib/profile-name";
+import { errorStatus, requestJson } from "@/lib/request-json";
 
 /** Lets a pending account move off a shop name another account already holds, which blocks its approval. */
 export function PendingShopName({ name }: { name: string }) {
@@ -22,16 +23,10 @@ export function PendingShopName({ name }: { name: string }) {
     if (!parsed.success) return setError(parsed.error.issues[0]?.message ?? "Enter a valid shop name.");
     setSaving(true);
     try {
-      const response = await fetch("/api/account", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(parsed.data),
-      });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) return setError(body.error ?? "Unable to update your shop name.");
+      await requestJson("/api/account", { method: "PATCH", body: JSON.stringify(parsed.data) }, "Unable to update your shop name.");
       router.refresh();
-    } catch {
-      setError("Unable to reach the server. Try again.");
+    } catch (caught) {
+      setError(errorStatus(caught) === undefined ? "Unable to reach the server. Try again." : (caught as Error).message);
     } finally {
       setSaving(false);
     }

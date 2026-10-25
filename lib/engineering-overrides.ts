@@ -25,7 +25,6 @@ export const FINISH_COLORS = ["None", "Red", "Black"] as const;
 export type FinishColor = (typeof FINISH_COLORS)[number];
 
 export const ROUTING_FIELDS = ["machine_op1", "machine_op2", "machine_op3", "machine_op4"] as const;
-export type RoutingField = (typeof ROUTING_FIELDS)[number];
 export type Routing = [string | null, string | null, string | null, string | null];
 
 export const REQUIREMENT_OVERRIDE_FIELDS = ["required_quantity", "finishing", ...ROUTING_FIELDS] as const;
@@ -118,16 +117,12 @@ export interface EngineeringOverrideState {
   file_overrides: EngineeringFileOverride[];
 }
 
-export function isMachineName(value: unknown): value is (typeof MACHINE_NAMES)[number] {
+function isMachineName(value: unknown): value is (typeof MACHINE_NAMES)[number] {
   return typeof value === "string" && (MACHINE_NAMES as readonly string[]).includes(value);
 }
 
 export function normalizeFinishColor(value: unknown): FinishColor {
   return value === "Red" || value === "Black" ? value : "None";
-}
-
-export function routingOf(requirement: Pick<NonNullable<EngineeringOverrideState["requirement"]>, RoutingField>): Routing {
-  return ROUTING_FIELDS.map((field) => requirement[field] || null) as Routing;
 }
 
 /** Operations must be listed from OP1 without gaps. */

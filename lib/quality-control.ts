@@ -149,16 +149,11 @@ export function projectQualityControl(
       operations.filter((operation) => !isPostQcOperation(operation, operation.qcAfterOperation)),
     ] as const)
     .filter(([requirementId, operations]) => operations.length > 0 && (
-      operations.every((operation) => operation.status === "Complete") || metadata.get(requirementId)?.effectiveQcResult !== "pending"
+      operations.every((operation) => operation.status === "Complete") || metadata.get(requirementId)!.effectiveQcResult !== "pending"
     ))
     .map(([requirementId, operations]) => {
-      const quality = metadata.get(requirementId) ?? {
-        effectiveQcResult: "pending" as const,
-        notes: "",
-        reviewedAt: null,
-        reviewedBy: null,
-        lastQualityFailure: null,
-      };
+      // Metadata covers every requirement in operationsByRequirement.
+      const quality = metadata.get(requirementId)!;
       return {
         requirementId,
         operations: [...operations].sort((a, b) => a.operationNumber.localeCompare(b.operationNumber) || a.id - b.id),

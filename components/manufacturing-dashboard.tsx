@@ -1,23 +1,15 @@
 "use client";
-import { robotPlacementAllowed, workAllowed } from "@/lib/obsoletion";
+import { onRobotAllowed, robotPlacementAllowed, workAllowed } from "@/lib/obsoletion";
 import { operationsQuery } from "@/lib/operations-query";
-import type { ObsoletionFields } from "@/lib/types";
 import { HiddenBadge, ObsoleteBadge, ObsoleteWarning, RequirementObsoletion, RequirementVisibility } from "@/components/requirement-obsoletion";
-import { CopyPartNumber, PartNumberCell } from "@/components/copy-part-number";
-import { BulkForceQcDialog, ForceQcButton, forceQcBlocker, hasUnfinishedQcPrerequisites } from "@/components/force-qc";
+import { CopyPartNumber } from "@/components/copy-part-number";
+import { BulkForceQcDialog, ForceQcButton, forceQcBlocker } from "@/components/force-qc";
 
-import {
-  AllCommunityModule,
-  ModuleRegistry,
-  themeQuartz,
-  type ColDef,
-} from "ag-grid-community";
+import type { ColDef } from "ag-grid-community";
 import { AgGridReact } from "ag-grid-react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import dynamic from "next/dynamic";
+import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import {
-  ArrowUpRight,
   Check,
   ChevronDown,
   ChevronRight,
@@ -47,6 +39,7 @@ import {
   TriangleAlert,
   Wrench,
   XCircle,
+  type LucideIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -57,7 +50,7 @@ import { AdminDashboard } from "@/components/admin-dashboard";
 import { DocumentProgressPanel } from "@/components/document-progress";
 import { ExpandableText } from "@/components/expandable-text";
 import { FabricationDashboard } from "@/components/fabrication-dashboard";
-import { ManufacturingFileLink } from "@/components/manufacturing-file-link";
+import { FilesAndSource } from "@/components/manufacturing-file-link";
 import { EngineeringOverrides } from "@/components/engineering-override-editor";
 import { NotificationInbox } from "@/components/notification-inbox";
 import { ProductionRequirementNotes } from "@/components/production-requirement-notes";
@@ -101,14 +94,20 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
+import { BASE_ROW_SELECTION, DEFAULT_COL_DEF, isUserSelectionSource, partNumberColumn, SELECTION_COLUMN_DEF, syncGridSelection, workspaceGridTheme } from "@/components/workspace-grid";
+import { EmptyState, PartModelPreview, QualityFailureCallout, StatTiles, StatusBadge, StatusCell } from "@/components/workspace-ui";
 import { documentProgress, syncedFrom } from "@/lib/document-progress";
-import { mergeVisibleSelection, settleSequentially } from "@/lib/bulk-selection";
+import { mergeVisibleSelection, partitionSettled, settleSequentially } from "@/lib/bulk-selection";
+import { formatShortDateTime } from "@/lib/date-format";
 import { safeManufacturingFileName } from "@/lib/manufacturing/file-names";
 import { requirementStatus, type ProductionStatus } from "@/lib/production-status";
 import { nextWorkflowAction } from "@/lib/manufacturing-workflow";
 import { isShopName } from "@/lib/profile-name";
-import { createClient } from "@/lib/supabase/client";
-import { canUseOnRobotLocation, isPrintingOperation, PRINTER_LOCATIONS, STORAGE_LOCATIONS, type StorageLocation } from "@/lib/storage-locations";
+import { invalidateManufacturingQueries, MANUFACTURING_QUERY_KEYS } from "@/lib/query-keys";
+import { errorStatus, requestJson } from "@/lib/request-json";
+import { isSupabaseConfigured } from "@/lib/supabase/client";
+import { joinAuthorizedChannel } from "@/lib/supabase/realtime";
+import { isPrintingOperation, PRINTER_LOCATIONS, STORAGE_LOCATIONS, type StorageLocation } from "@/lib/storage-locations";
 import { cn } from "@/lib/utils";
 import { PreferencesPage } from "@/components/preferences-page";
 import { WORKSPACE_ROUTES, type WorkspaceView } from "@/lib/workspace-routes";
@@ -121,65 +120,42 @@ import {
   type OperationStatus,
   type OperationWorkType,
   type OperationsResponse,
-  type QualityFailureSummary,
 } from "@/lib/types";
-
-ModuleRegistry.registerModules([AllCommunityModule]);
 
 type QueueView = "available" | "mine" | "all";
 type WorkTypeFilter = "all" | OperationWorkType;
 type ManufacturingRealtimeStatus = "connecting" | "subscribed" | "disconnected";
 
-const MANUFACTURING_QUERY_KEYS = ["operations", "fabrication", "qc", "admin"] as const;
 const UNSYNCED = "__unsynced";
-/** COTS parts stay hidden until the sync enables SYNC_COTS_PARTS; flip this to offer the toggle. */
+/**
+ * Only the external Onshape sync marks parts as COTS, behind its SYNC_COTS_PARTS flag; apply the
+ * 20260926000000_cots_parts migration before enabling that flag. Flip this to offer the "Show COTS" toggle.
+ */
 const COTS_TOGGLE_ENABLED = false;
 const REALTIME_REFRESH_DEBOUNCE_MS = 300;
 const REALTIME_REFRESH_JITTER_MS = 1_200;
 
-const PartModelPreview = dynamic(
-  () => import("@/components/part-model-preview").then((module) => module.PartModelPreview),
-  {
-    ssr: false,
-    loading: () => <Skeleton className="h-[22rem] rounded-xl sm:h-[26rem]" />,
-  },
-);
+const NAV_ITEMS: { id: Exclude<WorkspaceView, "preferences">; label: string; icon: LucideIcon; adminOnly?: boolean }[] = [
+  { id: "operations", label: "Operations", icon: LayoutList },
+  { id: "fabrication", label: "Finishing", icon: Paintbrush },
+  { id: "production", label: "Production", icon: PackageCheck },
+  { id: "qc", label: "QC", icon: ClipboardCheck, adminOnly: true },
+  { id: "admin", label: "Admin", icon: ShieldCheck, adminOnly: true },
+];
 
 function activeManufacturingQueryKey(workspaceView: WorkspaceView) {
   if (workspaceView === "production") return "operations";
   return workspaceView;
 }
 
-interface ProductionRequirement extends ObsoletionFields {
+interface ProductionRequirement extends Omit<CotsRequirement, "requirementId"> {
   key: string;
   requirementId: number | null;
-  requirementKey: string | null;
-  partNumber: string;
-  revision: string | null;
-  partName: string;
-  assemblyNumber: string;
-  documentName: string | null;
-  syncedFromDocument: string | null;
-  sourceRoot: string | null;
-  sourceAssemblyRevision: string | null;
-  requiredPartRevision: string | null;
-  configuration: string | null;
-  bomPositions: string | null;
-  material: string | null;
   finishing: string | null;
   finishingComplete: boolean;
-  requirementStatus: string;
-  requirementMachinist: string | null;
-  activeInBom: boolean;
-  engineeringChanged: boolean;
-  disposition: string | null;
-  productionNotes: string;
-  effectiveQcResult: ManufacturingOperation["effectiveQcResult"];
   qualityNotes: string;
   qualityReviewedBy: string | null;
   qualityReviewedAt: string | null;
-  lastQualityFailure: QualityFailureSummary | null;
-  quantity: number;
   completedOperations: number;
   totalOperations: number;
   completedCamTasks: number;
@@ -188,13 +164,8 @@ interface ProductionRequirement extends ObsoletionFields {
   totalManufacturingOperations: number;
   routingProgress: number;
   status: ProductionStatus;
-  storageLocation: ManufacturingOperation["storageLocation"];
-  locationUpdatedBy: string | null;
-  locationUpdatedAt: string | null;
-  onshapeUrl: string | null;
   /** A purchased part with no routing; hidden unless "Show COTS" is on. */
   cots: boolean;
-  vendor: string | null;
   operations: ManufacturingOperation[];
 }
 
@@ -220,43 +191,7 @@ function cotsProductionRequirement(requirement: CotsRequirement): ProductionRequ
   };
 }
 
-const gridTheme = themeQuartz.withParams({
-  accentColor: "var(--primary)",
-  backgroundColor: "var(--card)",
-  borderColor: "var(--border)",
-  foregroundColor: "var(--foreground)",
-  headerBackgroundColor: "var(--muted)",
-  headerTextColor: "var(--muted-foreground)",
-  rowHoverColor: "var(--muted)",
-  selectedRowBackgroundColor: "var(--accent)",
-  fontFamily: "var(--font-geist-sans), ui-sans-serif",
-  fontSize: 13,
-  headerFontSize: 11,
-  headerFontWeight: 650,
-  rowHeight: 52,
-  headerHeight: 42,
-  wrapperBorderRadius: 0,
-  spacing: 6,
-});
-
-const statusStyles: Record<ProductionStatus, string> = {
-  Planned: "border-slate-200 bg-slate-100 text-slate-700 dark:border-slate-400/30 dark:bg-slate-400/15 dark:text-slate-200",
-  Ready: "border-emerald-200 bg-emerald-100 text-emerald-800 dark:border-emerald-400/30 dark:bg-emerald-400/15 dark:text-emerald-200",
-  "In Progress": "border-blue-200 bg-blue-100 text-blue-800 dark:border-blue-400/30 dark:bg-blue-400/15 dark:text-blue-200",
-  Blocked: "border-amber-200 bg-amber-100 text-amber-900 dark:border-amber-400/30 dark:bg-amber-400/15 dark:text-amber-100",
-  "QC Pending": "border-cyan-200 bg-cyan-100 text-cyan-800 dark:border-cyan-400/30 dark:bg-cyan-400/15 dark:text-cyan-200",
-  "Finishing Pending": "border-orange-200 bg-orange-100 text-orange-800 dark:border-orange-400/30 dark:bg-orange-400/15 dark:text-orange-200",
-  "Off the Shelf": "border-teal-200 bg-teal-50 text-teal-800 dark:border-teal-400/30 dark:bg-teal-400/15 dark:text-teal-200",
-  Complete: "border-violet-200 bg-violet-100 text-violet-800 dark:border-violet-400/30 dark:bg-violet-400/15 dark:text-violet-200",
-};
-
-function StatusBadge({ status }: { status: ProductionStatus }) {
-  return <Badge variant="outline" className={cn("font-semibold", statusStyles[status])}>{status}</Badge>;
-}
-
-function StatusCell({ value }: { value: ProductionStatus }) {
-  return <div className="flex h-full items-center"><StatusBadge status={value} /></div>;
-}
+const gridTheme = workspaceGridTheme(52);
 
 function ActionCell({ data, onOpen, user }: { data?: ManufacturingOperation; onOpen: (operation: ManufacturingOperation) => void; user: OperationsResponse["user"] }) {
   if (!data) return null;
@@ -270,6 +205,18 @@ function ActionCell({ data, onOpen, user }: { data?: ManufacturingOperation; onO
       </Button>
     </div>
   );
+}
+
+/**
+ * Why a part can't be placed On Robot; empty when it can. The bulk location dialog and the detail
+ * sheet share it so they agree, and it blocks exactly what onRobotAllowed rejects.
+ */
+function robotPlacementBlockers(part: ProductionRequirement) {
+  return [
+    part.obsolete ? "obsolete" : robotPlacementAllowed(part) ? "" : "inactive in the BOM",
+    part.effectiveQcResult === "passed" ? "" : "QC required",
+    part.finishingComplete ? "" : "finishing required",
+  ].filter(Boolean);
 }
 
 function ProductionProgressCell({ data }: { data?: ProductionRequirement }) {
@@ -293,24 +240,6 @@ function ProductionActionCell({ data, onOpen }: { data?: ProductionRequirement; 
 
 function initials(name: string) {
   return name.split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase();
-}
-
-function formatDate(value: string | null) {
-  if (!value) return "Not recorded";
-  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(value));
-}
-
-function QualityFailureCallout({ failure }: { failure: QualityFailureSummary | null }) {
-  if (!failure) return null;
-  return (
-    <section className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-rose-950 dark:border-rose-400/30 dark:bg-rose-400/10 dark:text-rose-50">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h3 className="text-xs font-bold uppercase tracking-[.14em] text-rose-800 dark:text-rose-300">Previous QC failure</h3>
-        <p className="text-xs text-rose-700 dark:text-rose-300">{failure.rejectedQuantity ? `${failure.rejectedQuantity} rejected · ` : ""}{formatDate(failure.reviewedAt)}{failure.reviewedBy ? ` · ${failure.reviewedBy}` : ""}</p>
-      </div>
-      <p className="mt-2 whitespace-pre-wrap text-sm leading-6">{failure.notes || "No failure reason was recorded."}</p>
-    </section>
-  );
 }
 
 function operationLabel(operation: Pick<ManufacturingOperation, "operationNumber" | "workType">) {
@@ -382,6 +311,24 @@ function saveBlobAs(blob: Blob, fileName: string) {
 
 type BulkAction = Extract<OperationQuantityAction, "claim" | "complete">;
 
+/** The parts of a PATCH /api/operations/:id response the dashboard reads. */
+interface OperationActionResponse {
+  updated?: Partial<ManufacturingOperation>;
+  displaced?: { quantity: number }[];
+  notificationDelivery?: { emailsFailed: number; emailsSkipped: number; unmappedRecipients: number };
+}
+
+/** Merges write responses into the cached operations; `patchFor` returns undefined for operations a write did not touch. */
+function mergeOperationUpdates(queryClient: QueryClient, patchFor: (operation: ManufacturingOperation) => Partial<ManufacturingOperation> | undefined) {
+  queryClient.setQueryData<OperationsResponse>(["operations"], (current) => current ? {
+    ...current,
+    operations: current.operations.map((operation) => {
+      const patch = patchFor(operation);
+      return patch ? { ...operation, ...patch } : operation;
+    }),
+  } : current);
+}
+
 function bulkActionPlan(operation: ManufacturingOperation, user: OperationsResponse["user"], view: QueueView) {
   if (!workAllowed(operation)) return null;
   const claimedQuantity = allocationForUser(operation, user).claimed;
@@ -452,65 +399,29 @@ function ProductionOverview({
     }
 
     const routed = [...grouped.entries()].map(([key, routedOperations]): ProductionRequirement => {
-        const first = routedOperations[0];
-        return {
-          key,
-          cots: false,
-          vendor: null,
-          onshapeUrl: first.onshapeUrl,
-          obsolete: first.obsolete,
-          hidden: first.hidden,
-          offTheShelf: first.offTheShelf,
-          visibilityVersion: first.visibilityVersion,
-          obsoletionVersion: first.obsoletionVersion,
-          obsoletionChangedAt: first.obsoletionChangedAt,
-          obsoletionChangedBy: first.obsoletionChangedBy,
-          obsoletionOrigin: first.obsoletionOrigin,
-          replacementRequirementId: first.replacementRequirementId,
-          requirementId: first.requirementId,
-          requirementKey: first.requirementKey,
-          partNumber: first.partNumber,
-          revision: first.revision,
-          partName: first.partName,
-          assemblyNumber: first.assemblyNumber,
-          documentName: first.documentName,
-          syncedFromDocument: first.syncedFromDocument,
-          sourceRoot: first.sourceRoot,
-          sourceAssemblyRevision: first.sourceAssemblyRevision,
-          requiredPartRevision: first.requiredPartRevision,
-          configuration: first.configuration,
-          bomPositions: first.bomPositions,
-          material: first.material,
-          finishing: first.finishing,
-          finishingComplete: first.finishingComplete,
-          requirementStatus: first.requirementStatus,
-          requirementMachinist: first.requirementMachinist,
-          activeInBom: first.activeInBom,
-          engineeringChanged: first.engineeringChanged,
-          disposition: first.disposition,
-          productionNotes: first.productionNotes,
-          effectiveQcResult: first.effectiveQcResult,
-          qualityNotes: first.qualityNotes,
-          qualityReviewedBy: first.qualityReviewedBy,
-          qualityReviewedAt: first.qualityReviewedAt,
-          lastQualityFailure: first.lastQualityFailure,
-          quantity: first.quantity,
-          completedOperations: routedOperations.filter((operation) => operation.status === "Complete").length,
-          totalOperations: routedOperations.length,
-          completedCamTasks: routedOperations.filter((operation) => operation.workType === "CAM" && operation.status === "Complete").length,
-          totalCamTasks: routedOperations.filter((operation) => operation.workType === "CAM").length,
-          completedManufacturingOperations: routedOperations.filter((operation) => operation.workType === "Manufacturing" && operation.status === "Complete").length,
-          totalManufacturingOperations: routedOperations.filter((operation) => operation.workType === "Manufacturing").length,
-          routingProgress: Math.round((routedOperations.filter((operation) => operation.status === "Complete").length / routedOperations.length) * 100),
-          status: requirementStatus(routedOperations),
-          storageLocation: first.storageLocation,
-          locationUpdatedBy: first.locationUpdatedBy,
-          locationUpdatedAt: first.locationUpdatedAt,
-          operations: [...routedOperations].sort((a, b) => a.operationNumber.localeCompare(b.operationNumber)
-            || Number(a.workType === "Manufacturing") - Number(b.workType === "Manufacturing")
-            || a.id - b.id),
-        };
-      });
+      const complete = (operation: ManufacturingOperation) => operation.status === "Complete";
+      const camTasks = routedOperations.filter((operation) => operation.workType === "CAM");
+      const manufacturingOperations = routedOperations.filter((operation) => operation.workType === "Manufacturing");
+      const completedOperations = routedOperations.filter(complete).length;
+      return {
+        // Requirement-level fields repeat on every operation, so take them from the first.
+        ...routedOperations[0],
+        key,
+        cots: false,
+        vendor: null,
+        completedOperations,
+        totalOperations: routedOperations.length,
+        completedCamTasks: camTasks.filter(complete).length,
+        totalCamTasks: camTasks.length,
+        completedManufacturingOperations: manufacturingOperations.filter(complete).length,
+        totalManufacturingOperations: manufacturingOperations.length,
+        routingProgress: Math.round((completedOperations / routedOperations.length) * 100),
+        status: requirementStatus(routedOperations),
+        operations: [...routedOperations].sort((a, b) => a.operationNumber.localeCompare(b.operationNumber)
+          || Number(a.workType === "Manufacturing") - Number(b.workType === "Manufacturing")
+          || a.id - b.id),
+      };
+    });
     return [...routed, ...cotsRequirements.map(cotsProductionRequirement)];
   }, [operations, cotsRequirements]);
 
@@ -567,7 +478,7 @@ function ProductionOverview({
   const selectedRequirement = requirements.find((requirement) => requirement.key === selectedRequirementKey) ?? null;
   const openRequirement = (requirement: ProductionRequirement) => setSelectedRequirementKey(requirement.key);
   const selectedParts = requirements.filter((part) => isListed(part) && part.requirementId !== null && locationIds.includes(part.requirementId));
-  const blockedParts = selectedParts.filter((part) => !robotPlacementAllowed(part) || !canUseOnRobotLocation(part.effectiveQcResult === "passed", part.finishingComplete));
+  const blockedParts = selectedParts.filter((part) => robotPlacementBlockers(part).length > 0);
   const forceQcParts = selectedParts.flatMap((part) => part.requirementId === null ? [] : [{ ...part, requirementId: part.requirementId }]);
   const forceQcEligibleCount = forceQcParts.filter((part) => !forceQcBlocker(part)).length;
   const visibleIds = visibleRequirements.flatMap((part) => part.requirementId === null ? [] : [part.requirementId]);
@@ -575,17 +486,8 @@ function ProductionOverview({
     setLocationIds((ids) => checked ? [...new Set([...ids, id])] : ids.filter((value) => value !== id));
   }, []);
   const syncRequirementSelection = useCallback(() => {
-    const api = requirementsGridRef.current?.api;
-    if (!api) return;
     const selectedIds = new Set(locationIds);
-    const toSelect: Parameters<typeof api.setNodesSelected>[0]["nodes"] = [];
-    const toDeselect: Parameters<typeof api.setNodesSelected>[0]["nodes"] = [];
-    api.forEachNode((node) => {
-      if (!node.data) return;
-      (node.data.requirementId !== null && selectedIds.has(node.data.requirementId) ? toSelect : toDeselect).push(node);
-    });
-    if (toSelect.length) api.setNodesSelected({ nodes: toSelect, newValue: true, source: "api" });
-    if (toDeselect.length) api.setNodesSelected({ nodes: toDeselect, newValue: false, source: "api" });
+    syncGridSelection(requirementsGridRef.current?.api, (part) => part.requirementId !== null && selectedIds.has(part.requirementId));
   }, [locationIds]);
   useEffect(() => { syncRequirementSelection(); }, [syncRequirementSelection, visibleRequirements]);
   const locationMutation = useMutation({
@@ -593,17 +495,15 @@ function ProductionOverview({
       if (!moveLocation || !selectedParts.length) throw new Error("Select parts and a location");
       if (moveLocation === "On Robot" && blockedParts.length) throw new Error("Selected parts still require QC or finishing");
       const results = await settleSequentially(selectedParts, async (part) => {
-        const response = await fetch(`/api/requirements/${part.requirementId}/location`, {
-          method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ location: moveLocation }),
+        await requestJson(`/api/requirements/${part.requirementId}/location`, {
+          method: "PATCH", body: JSON.stringify({ location: moveLocation }),
+        }, "Unable to update location").catch((error: Error) => {
+          throw errorStatus(error) === undefined ? error : new Error(`${part.partNumber}: ${error.message}`);
         });
-        const body = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(`${part.partNumber}: ${body.error ?? "Unable to update location"}`);
         return part.requirementId!;
       });
-      return {
-        succeeded: results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []),
-        errors: results.flatMap((result) => result.status === "rejected" ? [result.reason instanceof Error ? result.reason.message : "Unable to update location"] : []),
-      };
+      const { succeeded, failures } = partitionSettled(results);
+      return { succeeded, errors: failures.map((reason) => reason instanceof Error ? reason.message : "Unable to update location") };
     },
     onSuccess: ({ succeeded, errors }) => {
       setLocationIds((ids) => ids.filter((id) => !succeeded.includes(id)));
@@ -611,12 +511,10 @@ function ProductionOverview({
       else { toast.success(`Location updated for ${succeeded.length} part requirements`); setLocationDialogOpen(false); }
     },
     onError: (error) => toast.error(error.message),
-    onSettled: () => {
-      for (const queryKey of [["operations"], ["qc"], ["fabrication"], ["admin"]]) void queryClient.invalidateQueries({ queryKey });
-    },
+    onSettled: () => { void invalidateManufacturingQueries(queryClient); },
   });
   const columnDefs = useMemo<ColDef<ProductionRequirement>[]>(() => [
-    { field: "partNumber", equals: () => false, cellRenderer: PartNumberCell, cellRendererParams: { suppressMouseEventHandling: () => true }, headerName: "PART", minWidth: 155, pinned: "left", cellClass: "font-mono font-semibold" },
+    partNumberColumn,
     { field: "revision", headerName: "REVISION", width: 104, valueFormatter: ({ value }) => value || "—" },
     { field: "partName", headerName: "DESCRIPTION", minWidth: 230, flex: 1 },
     { field: "documentName", headerName: "SOURCE DOCUMENT", minWidth: 175, cellClass: "font-mono", valueFormatter: ({ value, data }) => value || (data?.cots ? "—" : "Not synced") },
@@ -628,12 +526,8 @@ function ProductionOverview({
     { headerName: "", width: 142, pinned: "right", sortable: false, filter: false, resizable: false, cellRenderer: ProductionActionCell, cellRendererParams: { onOpen: openRequirement } },
   ], []);
   const requirementRowSelection = useMemo(() => ({
-    mode: "multiRow" as const,
-    checkboxes: true,
-    headerCheckbox: true,
+    ...BASE_ROW_SELECTION,
     selectAll: "all" as const,
-    hideDisabledCheckboxes: false,
-    enableClickSelection: false,
     isRowSelectable: ({ data }: { data?: ProductionRequirement }) => data?.requirementId != null,
   }), []);
 
@@ -645,19 +539,12 @@ function ProductionOverview({
           <h1 className="text-3xl font-bold tracking-[-.035em] md:text-[2.55rem]">Production requirements</h1>
           <p className="mt-1.5 max-w-2xl text-sm leading-6 text-muted-foreground">Track each part through its routed operations and see what is complete, active, or needs attention.</p>
         </div>
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-          {[
-            { label: "Requirements", value: summary.total, icon: PackageCheck, tone: "text-slate-700 bg-slate-100 dark:text-slate-200 dark:bg-slate-400/15" },
-            { label: "In progress", value: summary.active, icon: Clock3, tone: "text-blue-700 bg-blue-50 dark:text-blue-300 dark:bg-blue-400/15" },
-            { label: "Attention", value: summary.attention, icon: TriangleAlert, tone: "text-amber-800 bg-amber-50 dark:text-amber-300 dark:bg-amber-400/15" },
-            { label: "Complete", value: summary.complete, icon: Check, tone: "text-violet-700 bg-violet-50 dark:text-violet-300 dark:bg-violet-400/15" },
-          ].map(({ label, value, icon: Icon, tone }) => (
-            <div key={label} className="flex min-w-32 items-center gap-3 rounded-xl border bg-card px-3 py-2.5 shadow-sm">
-              <div className={cn("grid size-8 place-items-center rounded-lg", tone)}><Icon className="size-4" /></div>
-              <div><div className="text-lg font-bold leading-none">{value}</div><div className="mt-1 text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{label}</div></div>
-            </div>
-          ))}
-        </div>
+        <StatTiles className="grid grid-cols-2 gap-2 sm:grid-cols-4" items={[
+          { label: "Requirements", value: summary.total, icon: PackageCheck, tone: "text-slate-700 bg-slate-100 dark:text-slate-200 dark:bg-slate-400/15" },
+          { label: "In progress", value: summary.active, icon: Clock3, tone: "text-blue-700 bg-blue-50 dark:text-blue-300 dark:bg-blue-400/15" },
+          { label: "Attention", value: summary.attention, icon: TriangleAlert, tone: "text-amber-800 bg-amber-50 dark:text-amber-300 dark:bg-amber-400/15" },
+          { label: "Complete", value: summary.complete, icon: Check, tone: "text-violet-700 bg-violet-50 dark:text-violet-300 dark:bg-violet-400/15" },
+        ]} />
       </div>
 
       {!isLoading && !isError && <DocumentProgressPanel documents={origins} selected={origin} onSelect={setOrigin} />}
@@ -713,11 +600,11 @@ function ProductionOverview({
         {isLoading ? (
           <div className="space-y-3 p-5">{Array.from({ length: 7 }).map((_, index) => <Skeleton key={index} className="h-11 w-full" />)}</div>
         ) : isError ? (
-          <div className="grid min-h-80 place-items-center p-6 text-center"><div><XCircle className="mx-auto mb-3 size-9 text-destructive" /><h2 className="font-semibold">Couldn’t load production requirements</h2><p className="mt-1 max-w-md text-sm text-muted-foreground">{errorMessage}</p><Button className="mt-4" onClick={onRetry}>Try again</Button></div></div>
+          <EmptyState icon={XCircle} iconClassName="size-9 text-destructive" title="Couldn’t load production requirements" message={errorMessage} messageClassName="max-w-md"><Button className="mt-4" onClick={onRetry}>Try again</Button></EmptyState>
         ) : requirements.length === 0 ? (
-          <div className="grid min-h-80 place-items-center p-6 text-center"><div><PackageCheck className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h2 className="font-semibold">No routed parts</h2><p className="mt-1 text-sm text-muted-foreground">Production requirements will appear after operations are added to an active routing.</p></div></div>
+          <EmptyState icon={PackageCheck} iconClassName="size-10 text-muted-foreground/60" title="No routed parts" message="Production requirements will appear after operations are added to an active routing." />
         ) : visibleRequirements.length === 0 ? (
-          <div className="grid min-h-80 place-items-center p-6 text-center"><div><Search className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h2 className="font-semibold">No requirements match</h2><p className="mt-1 text-sm text-muted-foreground">Try another status, source document, or location, or clear the search.</p><Button variant="outline" className="mt-4" onClick={() => { setSearch(""); setStatus("all"); setSourceDocument("all"); setLocation("all"); setOrigin(null); }}>Clear filters</Button></div></div>
+          <EmptyState icon={Search} iconClassName="size-10 text-muted-foreground/60" title="No requirements match" message="Try another status, source document, or location, or clear the search."><Button variant="outline" className="mt-4" onClick={() => { setSearch(""); setStatus("all"); setSourceDocument("all"); setLocation("all"); setOrigin(null); }}>Clear filters</Button></EmptyState>
         ) : (
           <>
             <div className="hidden h-[min(59vh,680px)] min-h-[430px] md:block">
@@ -727,15 +614,15 @@ function ProductionOverview({
                 rowData={visibleRequirements}
                 columnDefs={columnDefs}
                 rowSelection={requirementRowSelection}
-                selectionColumnDef={{ width: 48, pinned: "left", resizable: false }}
+                selectionColumnDef={SELECTION_COLUMN_DEF}
                 onGridReady={syncRequirementSelection}
                 onRowDataUpdated={syncRequirementSelection}
                 onSelectionChanged={({ api, source }) => {
-                  if (["api", "rowDataChanged", "gridInitializing", "selectableChanged"].includes(source)) return;
+                  if (!isUserSelectionSource(source)) return;
                   const selectedVisibleIds = api.getSelectedRows().flatMap((part) => part.requirementId === null ? [] : [part.requirementId]);
                   setLocationIds((current) => mergeVisibleSelection(current, visibleIds, selectedVisibleIds));
                 }}
-                defaultColDef={{ sortable: true, filter: false, resizable: true }}
+                defaultColDef={DEFAULT_COL_DEF}
                 initialState={{ sort: { sortModel: [{ colId: "documentName", sort: "asc" }] } }}
                 getRowId={({ data }) => data.key}
                 onRowDoubleClicked={({ data }) => data && openRequirement(data)}
@@ -746,19 +633,16 @@ function ProductionOverview({
               />
             </div>
             <div className="divide-y md:hidden">
-              {visibleRequirements.map((requirement) => {
-                const percent = requirement.totalOperations ? Math.round((requirement.completedOperations / requirement.totalOperations) * 100) : 0;
-                return (
-                  <article key={requirement.key} className="flex items-start gap-3 p-4 transition hover:bg-muted/40">
-                    <Checkbox className="mt-1" aria-label={`Select ${requirement.partNumber}`} checked={requirement.requirementId !== null && locationIds.includes(requirement.requirementId)} disabled={requirement.requirementId === null || locationMutation.isPending} onCheckedChange={(checked) => requirement.requirementId !== null && togglePart(requirement.requirementId, Boolean(checked))} />
-                    <div className="min-w-0 flex-1">
-                    <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary"><CopyPartNumber partNumber={requirement.partNumber} /> <ObsoleteBadge obsolete={requirement.obsolete} /> <HiddenBadge hidden={requirement.hidden} /></p><h3 className="mt-1 font-semibold">{requirement.partName}</h3><p className="mt-1 font-mono text-[11px] text-muted-foreground">Rev {requirement.revision ?? "—"} · {requirement.documentName ?? (requirement.cots ? "COTS" : "Document not synced")}{requirement.syncedFromDocument && requirement.syncedFromDocument !== requirement.documentName ? ` via ${requirement.syncedFromDocument}` : ""} · Qty {requirement.quantity}</p><p className="mt-1 text-xs text-muted-foreground">Location: {requirement.storageLocation ?? "Not recorded"}</p></div><StatusBadge status={requirement.status} /></div>
-                     {requirement.cots ? <p className="mt-3 text-xs text-muted-foreground">COTS · no routing</p> : <div className="mt-3"><div className="mb-1.5 flex justify-between text-xs text-muted-foreground"><span>Mfg {requirement.completedManufacturingOperations}/{requirement.totalManufacturingOperations}{requirement.totalCamTasks > 0 ? ` · CAM ${requirement.completedCamTasks}/${requirement.totalCamTasks}` : ""}</span><span className="font-semibold text-foreground">{percent}%</span></div><div className="h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary" style={{ width: `${percent}%` }} /></div></div>}
-                     <Button className="mt-3 w-full" variant="outline" onClick={() => setSelectedRequirementKey(requirement.key)}>More details<ChevronRight /></Button>
-                    </div>
-                   </article>
-                );
-              })}
+              {visibleRequirements.map((requirement) => (
+                <article key={requirement.key} className="flex items-start gap-3 p-4 transition hover:bg-muted/40">
+                  <Checkbox className="mt-1" aria-label={`Select ${requirement.partNumber}`} checked={requirement.requirementId !== null && locationIds.includes(requirement.requirementId)} disabled={requirement.requirementId === null || locationMutation.isPending} onCheckedChange={(checked) => requirement.requirementId !== null && togglePart(requirement.requirementId, Boolean(checked))} />
+                  <div className="min-w-0 flex-1">
+                  <div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-primary"><CopyPartNumber partNumber={requirement.partNumber} /> <ObsoleteBadge obsolete={requirement.obsolete} /> <HiddenBadge hidden={requirement.hidden} /></p><h3 className="mt-1 font-semibold">{requirement.partName}</h3><p className="mt-1 font-mono text-[11px] text-muted-foreground">Rev {requirement.revision ?? "—"} · {requirement.documentName ?? (requirement.cots ? "COTS" : "Document not synced")}{requirement.syncedFromDocument && requirement.syncedFromDocument !== requirement.documentName ? ` via ${requirement.syncedFromDocument}` : ""} · Qty {requirement.quantity}</p><p className="mt-1 text-xs text-muted-foreground">Location: {requirement.storageLocation ?? "Not recorded"}</p></div><StatusBadge status={requirement.status} /></div>
+                   {requirement.cots ? <p className="mt-3 text-xs text-muted-foreground">COTS · no routing</p> : <div className="mt-3"><div className="mb-1.5 flex justify-between text-xs text-muted-foreground"><span>Mfg {requirement.completedManufacturingOperations}/{requirement.totalManufacturingOperations}{requirement.totalCamTasks > 0 ? ` · CAM ${requirement.completedCamTasks}/${requirement.totalCamTasks}` : ""}</span><span className="font-semibold text-foreground">{requirement.routingProgress}%</span></div><div className="h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary" style={{ width: `${requirement.routingProgress}%` }} /></div></div>}
+                   <Button className="mt-3 w-full" variant="outline" onClick={() => setSelectedRequirementKey(requirement.key)}>More details<ChevronRight /></Button>
+                  </div>
+                 </article>
+              ))}
             </div>
           </>
         )}
@@ -768,7 +652,7 @@ function ProductionOverview({
         <DialogContent>
           <DialogHeader><DialogTitle>Change part locations</DialogTitle><DialogDescription>Set one location for {selectedParts.length} selected part requirements. This applies to all quantities and operations of each requirement.</DialogDescription></DialogHeader>
           <StorageLocationSelect showUnavailableOnRobot value={moveLocation} onChange={setMoveLocation} emptyLabel="Choose a location" disabled={locationMutation.isPending} allowOnRobot={selectedParts.length > 0 && blockedParts.length === 0} />
-          {blockedParts.length > 0 && <p className="max-h-40 overflow-y-auto text-sm text-muted-foreground">On Robot requires passed QC and completed finishing: {blockedParts.map((part) => `${part.partNumber} (${[part.effectiveQcResult !== "passed" ? "QC required" : "", !part.finishingComplete ? "finishing required" : ""].filter(Boolean).join(", ")})`).join("; ")}.</p>}
+          {blockedParts.length > 0 && <p className="max-h-40 overflow-y-auto text-sm text-muted-foreground">On Robot requires passed QC and completed finishing: {blockedParts.map((part) => `${part.partNumber} (${robotPlacementBlockers(part).join(", ")})`).join("; ")}.</p>}
           {selectedParts.some((part) => !visibleIds.includes(part.requirementId!)) && <p className="text-sm text-amber-700 dark:text-amber-300">Includes selected parts hidden by the current filters.</p>}
           <DialogFooter><Button variant="outline" disabled={locationMutation.isPending} onClick={() => setLocationDialogOpen(false)}>Cancel</Button><Button disabled={!moveLocation || !selectedParts.length || locationMutation.isPending || (moveLocation === "On Robot" && blockedParts.length > 0)} onClick={() => locationMutation.mutate()}>{locationMutation.isPending && <LoaderCircle className="animate-spin" />}Set location</Button></DialogFooter>
         </DialogContent>
@@ -885,10 +769,9 @@ function ProductionOverview({
                       value={selectedRequirement.storageLocation}
                       updatedBy={selectedRequirement.locationUpdatedBy}
                       updatedAt={selectedRequirement.locationUpdatedAt}
-                      canEdit
-                      allowOnRobot={robotPlacementAllowed(selectedRequirement) && canUseOnRobotLocation(selectedRequirement.effectiveQcResult === "passed", selectedRequirement.finishingComplete)}
+                      allowOnRobot={robotPlacementBlockers(selectedRequirement).length === 0}
                     />
-                    {!selectedRequirement.cots && !canUseOnRobotLocation(selectedRequirement.effectiveQcResult === "passed", selectedRequirement.finishingComplete) && (
+                    {!selectedRequirement.cots && !(selectedRequirement.effectiveQcResult === "passed" && selectedRequirement.finishingComplete) && (
                       <p className="mt-2 text-xs text-muted-foreground">“On Robot” becomes available after QC passes and any required finishing is complete.</p>
                     )}
                   </section>
@@ -897,7 +780,7 @@ function ProductionOverview({
                 {!selectedRequirement.cots && <section>
                   <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                     <h3 className="text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Quality review</h3>
-                    {canForceQc && !selectedRequirement.obsolete && selectedRequirement.requirementId !== null && selectedRequirement.activeInBom && selectedRequirement.effectiveQcResult !== "passed" && hasUnfinishedQcPrerequisites(selectedRequirement.operations) && (
+                    {canForceQc && selectedRequirement.requirementId !== null && !forceQcBlocker({ ...selectedRequirement, requirementId: selectedRequirement.requirementId }) && (
                       <ForceQcButton
                         key={`force-qc:${selectedRequirement.requirementId}`}
                         requirementId={selectedRequirement.requirementId}
@@ -911,33 +794,13 @@ function ProductionOverview({
                   <div className="rounded-xl border bg-muted/20 p-4">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <p className="text-sm font-semibold">{selectedRequirement.effectiveQcResult === "passed" ? "Passed" : selectedRequirement.effectiveQcResult === "failed" ? "Failed" : "Not yet inspected"}</p>
-                      {selectedRequirement.qualityReviewedAt && <p className="text-xs text-muted-foreground">{formatDate(selectedRequirement.qualityReviewedAt)}{selectedRequirement.qualityReviewedBy ? ` · ${selectedRequirement.qualityReviewedBy}` : ""}</p>}
+                      {selectedRequirement.qualityReviewedAt && <p className="text-xs text-muted-foreground">{formatShortDateTime(selectedRequirement.qualityReviewedAt)}{selectedRequirement.qualityReviewedBy ? ` · ${selectedRequirement.qualityReviewedBy}` : ""}</p>}
                     </div>
                     <p className={cn("mt-2 whitespace-pre-wrap text-sm", selectedRequirement.qualityNotes ? "text-foreground" : "text-muted-foreground")}>{selectedRequirement.qualityNotes || "No inspection notes recorded."}</p>
                   </div>
                 </section>}
 
-                <section>
-                  <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Files & source</h3>
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    {(() => {
-                      const operation = selectedRequirement.operations[0];
-                      return [
-                        ...(operation ? [
-                          { label: "Drawing PDF", href: operation.hasDrawingPdf ? `/api/operations/${operation.id}/files/drawing-pdf` : null, fileName: operation.drawingPdfName, icon: FileText, preload: true },
-                          { label: "STEP file", href: operation.hasStepFile ? `/api/operations/${operation.id}/files/step` : null, fileName: operation.stepName, icon: Download, preload: true },
-                          { label: "Onshape drawing", href: operation.drawingUrl, fileName: null, icon: ArrowUpRight, preload: false },
-                        ] : []),
-                        { label: "BOM source", href: selectedRequirement.onshapeUrl, fileName: null, icon: Cloud, preload: false },
-                      ].map(({ label, href, fileName, icon: Icon, preload }) => href ? (
-                        preload ? <ManufacturingFileLink key={label} href={href} download={label === "STEP file" ? fileName ?? true : undefined} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-3 rounded-xl border p-3 text-sm font-semibold transition hover:border-primary/40 hover:bg-accent/40"><div className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary"><Icon className="size-4" /></div><span className="min-w-0"><span className="block">{label}</span>{fileName && <span className="block truncate text-[10px] font-normal text-muted-foreground">{fileName}</span>}</span><ChevronRight className="ml-auto size-4 shrink-0 text-muted-foreground" /></ManufacturingFileLink>
-                          : <a key={label} href={href} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-3 rounded-xl border p-3 text-sm font-semibold transition hover:border-primary/40 hover:bg-accent/40"><div className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary"><Icon className="size-4" /></div><span className="min-w-0"><span className="block">{label}</span>{fileName && <span className="block truncate text-[10px] font-normal text-muted-foreground">{fileName}</span>}</span><ChevronRight className="ml-auto size-4 shrink-0 text-muted-foreground" /></a>
-                      ) : (
-                        <div key={label} className="flex items-center gap-3 rounded-xl border border-dashed p-3 text-sm text-muted-foreground"><div className="grid size-8 place-items-center rounded-lg bg-muted"><Icon className="size-4" /></div>{label}<span className="ml-auto text-[10px] uppercase">Missing</span></div>
-                      ));
-                    })()}
-                  </div>
-                </section>
+                <FilesAndSource basePath="/api/operations" part={selectedRequirement.operations[0]} onshapeUrl={selectedRequirement.onshapeUrl} />
 
                 {selectedRequirement.cots ? <p className="rounded-xl border border-dashed p-4 text-sm text-muted-foreground">COTS parts are purchased, so they have no operations. Record where they are stored above.</p> : <section>
                   <div className="mb-3 flex items-center justify-between gap-3">
@@ -960,7 +823,7 @@ function ProductionOverview({
                           <div><span className="text-muted-foreground">Completed</span><p className="mt-0.5 font-semibold">{operation.completedQuantity}</p></div>
                           <div><span className="text-muted-foreground">Machinist</span><p className="mt-0.5 font-semibold">{operation.machinist || "Unclaimed"}</p></div>
                         </div>
-                        {(operation.startedAt || operation.completedAt) && <p className="mt-3 text-xs text-muted-foreground">Started {formatDate(operation.startedAt)} · Finished {formatDate(operation.completedAt)}</p>}
+                        {(operation.startedAt || operation.completedAt) && <p className="mt-3 text-xs text-muted-foreground">Started {formatShortDateTime(operation.startedAt)} · Finished {formatShortDateTime(operation.completedAt)}</p>}
                         {operation.workType === "CAM" && (operation.camProgramPath || operation.camNotes) && (
                           <div className="mt-3 rounded-lg bg-muted/50 p-3 text-xs"><p className="font-semibold">CAM handoff</p>{operation.camProgramPath && <p className="mt-1 break-all font-mono text-muted-foreground">{operation.camProgramPath}</p>}{operation.camNotes && <p className="mt-1 whitespace-pre-wrap text-muted-foreground">{operation.camNotes}</p>}</div>
                         )}
@@ -1013,15 +876,14 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
   const [profileOpen, setProfileOpen] = useState(false);
   const [firstName, setFirstName] = useState("");
   const [lastInitial, setLastInitial] = useState("");
-  const [realtimeStatus, setRealtimeStatus] = useState<ManufacturingRealtimeStatus>(() => (
-    process.env.NEXT_PUBLIC_SUPABASE_URL
-      && (process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY)
-      ? "connecting"
-      : "disconnected"
-  ));
+  const [realtimeStatus, setRealtimeStatus] = useState<ManufacturingRealtimeStatus>(() => isSupabaseConfigured() ? "connecting" : "disconnected");
 
   const query = useQuery(operationsQuery);
-  const userName = query.data?.user?.name ?? "Machinist";
+  // The operations route answers only approved users, so loaded data always carries an approved user.
+  const user = query.data?.user ?? null;
+  const isAdmin = user?.role === "admin";
+  const userName = user?.name ?? "Machinist";
+  const navItems = NAV_ITEMS.filter((item) => isAdmin || !item.adminOnly);
 
   const refreshManufacturingData = useCallback(() => {
     const activeKey = activeManufacturingQueryKey(workspaceView);
@@ -1039,16 +901,12 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
     }
   }, [queryClient, workspaceView]);
 
+  const userId = user?.id;
   useEffect(() => {
-    const userId = query.data?.user?.id;
     if (!userId) return;
-
-    const supabase = createClient();
-    if (!supabase) return;
 
     let cancelled = false;
     let refreshTimer: ReturnType<typeof setTimeout> | undefined;
-    let channel: ReturnType<typeof supabase.channel> | null = null;
     const scheduleRefresh = () => {
       if (refreshTimer) clearTimeout(refreshTimer);
       refreshTimer = setTimeout(() => {
@@ -1056,40 +914,23 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
       }, REALTIME_REFRESH_DEBOUNCE_MS + Math.random() * REALTIME_REFRESH_JITTER_MS);
     };
 
-    const subscribe = async () => {
-      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
-      if (sessionError || !session) {
-        if (!cancelled) setRealtimeStatus("disconnected");
-        console.error("Manufacturing realtime authentication failed", sessionError);
-        return;
-      }
-
-      await supabase.realtime.setAuth(session.access_token);
-      if (cancelled) return;
-
-      channel = supabase
-        .channel("manufacturing:changes", { config: { private: true } })
-        .on("broadcast", { event: "changed" }, scheduleRefresh)
-        .subscribe((status, error) => {
-          if (cancelled) return;
-          if (status === "SUBSCRIBED") {
-            setRealtimeStatus("subscribed");
-            // Close the gap between the initial HTTP read and channel join.
-            scheduleRefresh();
-          } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
-            setRealtimeStatus("disconnected");
-            if (status !== "CLOSED") console.error("Manufacturing realtime subscription failed", error);
-          }
-        });
-    };
-    void subscribe();
+    const leave = joinAuthorizedChannel("Manufacturing", (supabase) => supabase
+      .channel("manufacturing:changes", { config: { private: true } })
+      .on("broadcast", { event: "changed" }, scheduleRefresh), {
+      onSubscribed: () => {
+        setRealtimeStatus("subscribed");
+        // Close the gap between the initial HTTP read and channel join.
+        scheduleRefresh();
+      },
+      onDisconnected: () => setRealtimeStatus("disconnected"),
+    });
 
     return () => {
       cancelled = true;
       if (refreshTimer) clearTimeout(refreshTimer);
-      if (channel) void supabase.removeChannel(channel);
+      leave();
     };
-  }, [query.data?.user?.id, refreshManufacturingData]);
+  }, [userId, refreshManufacturingData]);
 
   useEffect(() => {
     if (query.error instanceof Error && query.error.message === "AUTH_REQUIRED") router.replace("/login");
@@ -1097,29 +938,14 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
   }, [query.error, router]);
 
   const mutation = useMutation({
-    mutationFn: async ({ id, patch }: { id: number; patch: OperationActionPatch; suppressUndo?: boolean; workType?: OperationWorkType }) => {
-      const response = await fetch(`/api/operations/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(patch),
-      });
-      if (!response.ok) {
-        const body = await response.json().catch(() => ({}));
-        throw new Error(body.error ?? "Update failed");
-      }
-      return response.json();
-    },
+    mutationFn: ({ id, patch }: { id: number; patch: OperationActionPatch; suppressUndo?: boolean; workType?: OperationWorkType }) =>
+      requestJson<OperationActionResponse>(`/api/operations/${id}`, { method: "PATCH", body: JSON.stringify(patch) }, "Update failed"),
     onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to update operation"),
     onSuccess: (data, variables) => {
       toast.dismiss(`next-action-${variables.id}`);
-      if (data.updated?.status) {
-        queryClient.setQueryData<OperationsResponse>(["operations"], (current) => current ? {
-          ...current,
-          operations: current.operations.map((operation) => operation.id === variables.id ? { ...operation, ...data.updated } : operation),
-        } : current);
-      }
+      if (data.updated?.status) mergeOperationUpdates(queryClient, (operation) => operation.id === variables.id ? data.updated : undefined);
       if (variables.patch.action === "steal") {
-        const stolenQuantity = data.displaced?.reduce((sum: number, claimant: { quantity: number }) => sum + claimant.quantity, 0) ?? 0;
+        const stolenQuantity = data.displaced?.reduce((sum, claimant) => sum + claimant.quantity, 0) ?? 0;
         toast.success(`Production requirement stolen${stolenQuantity ? `: ${stolenQuantity} ${stolenQuantity === 1 ? "part" : "parts"}` : ""}`);
         const delivery = data.notificationDelivery;
         if (delivery && (delivery.emailsFailed > 0 || delivery.emailsSkipped > 0 || delivery.unmappedRecipients > 0)) {
@@ -1182,14 +1008,14 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
     }: {
       action: BulkAction;
       items: { id: number; quantity: number; workType: OperationWorkType; printing: boolean; completeAllClaims: boolean }[];
+      hiddenCount: number;
       programPath: string;
       notes: string;
       location: StorageLocation | null;
     }) => {
       const results = await settleSequentially(items, async (item) => {
-        const response = await fetch(`/api/operations/${item.id}`, {
+        const body = await requestJson<OperationActionResponse>(`/api/operations/${item.id}`, {
           method: "PATCH",
-          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             action,
             quantity: item.quantity,
@@ -1200,27 +1026,16 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
               notes,
             } : {}),
           }),
-        });
-        const body = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(body.error ?? (action === "claim" ? "Claim failed" : "Completion failed"));
-        return { item, updated: body.updated as Partial<ManufacturingOperation> | undefined };
+        }, action === "claim" ? "Claim failed" : "Completion failed");
+        return { item, updated: body.updated };
       });
-      const succeeded = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
-      const failed = results.length - succeeded.length;
-      if (succeeded.length === 0) {
-        const firstFailure = results.find((result) => result.status === "rejected");
-        throw new Error(firstFailure?.status === "rejected" && firstFailure.reason instanceof Error
-          ? firstFailure.reason.message
-          : `Unable to ${action} selected operations`);
-      }
-      return { action, succeeded, failed };
+      const { succeeded, failures } = partitionSettled(results);
+      if (succeeded.length === 0) throw new Error(failures[0] instanceof Error ? failures[0].message : `Unable to ${action} selected operations`);
+      return { action, succeeded, failed: failures.length };
     },
     onSuccess: ({ action, succeeded, failed }) => {
       const updates = new Map(succeeded.map(({ item, updated }) => [item.id, updated]));
-      queryClient.setQueryData<OperationsResponse>(["operations"], (current) => current ? {
-        ...current,
-        operations: current.operations.map((operation) => updates.has(operation.id) ? { ...operation, ...updates.get(operation.id) } : operation),
-      } : current);
+      mergeOperationUpdates(queryClient, (operation) => updates.get(operation.id));
       const workUnits = succeeded.reduce((total, result) => total + result.item.quantity, 0);
       const actionLabel = action === "claim" ? "Claimed" : "Completed";
       if (failed > 0) toast.warning(`${actionLabel} ${workUnits} ${workUnits === 1 ? "work unit" : "work units"} across ${succeeded.length} operations; ${failed} failed.`);
@@ -1235,28 +1050,18 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
   const bulkLocationMutation = useMutation({
     mutationFn: async ({ selectedOperations, location }: { selectedOperations: ManufacturingOperation[]; location: StorageLocation }) => {
       const requirementIds = [...new Set(selectedOperations.flatMap((operation) => operation.requirementId === null ? [] : [operation.requirementId]))];
-      const results = await settleSequentially(requirementIds, async (requirementId) => {
-        const response = await fetch(`/api/requirements/${requirementId}/location`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ location }),
-        });
-        const body = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(body.error ?? "Unable to set part location");
-        return { requirementId, updated: body as Pick<ManufacturingOperation, "storageLocation" | "locationUpdatedBy" | "locationUpdatedAt"> };
-      });
-      const succeeded = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
-      const failures = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
+      const results = await settleSequentially(requirementIds, async (requirementId) => ({
+        requirementId,
+        updated: await requestJson<Pick<ManufacturingOperation, "storageLocation" | "locationUpdatedBy" | "locationUpdatedAt">>(
+          `/api/requirements/${requirementId}/location`, { method: "PATCH", body: JSON.stringify({ location }) }, "Unable to set part location"),
+      }));
+      const { succeeded, failures } = partitionSettled(results);
       if (succeeded.length === 0) throw new Error(failures[0] instanceof Error ? failures[0].message : "No part locations were updated");
       return { succeeded, failed: failures.length, selectedOperations };
     },
     onSuccess: ({ succeeded, failed, selectedOperations }) => {
       const updates = new Map(succeeded.map(({ requirementId, updated }) => [requirementId, updated]));
-      queryClient.setQueryData<OperationsResponse>(["operations"], (current) => current ? {
-        ...current,
-        operations: current.operations.map((operation) => operation.requirementId !== null && updates.has(operation.requirementId)
-          ? { ...operation, ...updates.get(operation.requirementId) } : operation),
-      } : current);
+      mergeOperationUpdates(queryClient, (operation) => operation.requirementId === null ? undefined : updates.get(operation.requirementId));
       const completedIds = new Set(selectedOperations.filter((operation) => operation.requirementId !== null && updates.has(operation.requirementId)).map((operation) => operation.id));
       setBulkSelectedIds((ids) => ids.filter((id) => !completedIds.has(id)));
       if (failed) toast.warning(`Updated ${succeeded.length} part locations; ${failed} failed and remain selected.`);
@@ -1268,28 +1073,20 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
   });
 
   const bulkReleaseMutation = useMutation({
-    mutationFn: async (items: { operation: ManufacturingOperation; quantity: number }[]) => {
+    mutationFn: async ({ items }: { items: { operation: ManufacturingOperation; quantity: number }[]; includesHidden: boolean }) => {
       const results = await settleSequentially(items, async ({ operation, quantity }) => {
-        const response = await fetch(`/api/operations/${operation.id}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "release", quantity }),
-        });
-        const body = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(body.error ?? `Unable to release ${operation.partNumber}`);
-        return { id: operation.id, quantity, updated: body.updated as Partial<ManufacturingOperation> | undefined };
+        const body = await requestJson<OperationActionResponse>(`/api/operations/${operation.id}`, {
+          method: "PATCH", body: JSON.stringify({ action: "release", quantity }),
+        }, `Unable to release ${operation.partNumber}`);
+        return { id: operation.id, quantity, updated: body.updated };
       });
-      const succeeded = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
-      const failures = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
+      const { succeeded, failures } = partitionSettled(results);
       if (succeeded.length === 0) throw new Error(failures[0] instanceof Error ? failures[0].message : "No claims were released");
       return { succeeded, failed: failures.length };
     },
     onSuccess: ({ succeeded, failed }) => {
       const updates = new Map(succeeded.map(({ id, updated }) => [id, updated]));
-      queryClient.setQueryData<OperationsResponse>(["operations"], (current) => current ? {
-        ...current,
-        operations: current.operations.map((operation) => updates.has(operation.id) ? { ...operation, ...updates.get(operation.id) } : operation),
-      } : current);
+      mergeOperationUpdates(queryClient, (operation) => updates.get(operation.id));
       const workUnits = succeeded.reduce((total, result) => total + result.quantity, 0);
       if (failed) toast.warning(`Released ${workUnits} ${workUnits === 1 ? "work unit" : "work units"} across ${succeeded.length} operations; ${failed} failed and remain selected.`);
       else toast.success(`Released ${workUnits} ${workUnits === 1 ? "work unit" : "work units"} across ${succeeded.length} ${succeeded.length === 1 ? "operation" : "operations"}.`);
@@ -1314,10 +1111,9 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
         saveBlobAs(await response.blob(), uniqueFileName(operation, kind, usedNames));
         return operation.id;
       });
-      const succeeded = results.filter((result) => result.status === "fulfilled").length;
-      const failures = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
-      if (succeeded === 0) throw new Error(failures[0] instanceof Error ? failures[0].message : `No ${label}s were downloaded`);
-      return { kind, succeeded, failed: failures.length };
+      const { succeeded, failures } = partitionSettled(results);
+      if (succeeded.length === 0) throw new Error(failures[0] instanceof Error ? failures[0].message : `No ${label}s were downloaded`);
+      return { kind, succeeded: succeeded.length, failed: failures.length };
     },
     onSuccess: ({ kind, succeeded, failed }) => {
       const files = `${BULK_FILE_LABELS[kind]}${succeeded === 1 ? "" : "s"}`;
@@ -1328,16 +1124,8 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
   });
 
   const camHandoffMutation = useMutation({
-    mutationFn: async ({ id, patch }: { id: number; patch: CamHandoffPatch }) => {
-      const response = await fetch(`/api/operations/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(patch),
-      });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(body.error ?? "Unable to update the CAM handoff");
-      return body;
-    },
+    mutationFn: ({ id, patch }: { id: number; patch: CamHandoffPatch }) =>
+      requestJson(`/api/operations/${id}`, { method: "PATCH", body: JSON.stringify(patch) }, "Unable to update the CAM handoff"),
     onSuccess: () => {
       toast.success("CAM handoff updated");
       setCamHandoffEditOpen(false);
@@ -1347,20 +1135,14 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
   });
 
   const profileMutation = useMutation({
-    mutationFn: async () => {
-      const response = await fetch("/api/account", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ firstName, lastInitial }),
-      });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(body.error ?? "Unable to update profile");
-      return body;
-    },
+    mutationFn: () => requestJson<{ user: NonNullable<OperationsResponse["user"]> }>("/api/account", {
+      method: "PATCH", body: JSON.stringify({ firstName, lastInitial }),
+    }, "Unable to update profile"),
     onSuccess: (body) => {
       queryClient.setQueryData<OperationsResponse>(["operations"], (current) => current ? { ...current, user: body.user } : current);
-      queryClient.invalidateQueries({ queryKey: ["operations"] });
-      queryClient.invalidateQueries({ queryKey: ["admin"] });
+      // The rename rewrites claims and finishing jobs recorded under the old name, so every workspace
+      // that compares names to decide ownership needs fresh data.
+      void invalidateManufacturingQueries(queryClient);
       setProfileOpen(false);
       toast.success(`Shop name updated to ${body.user.name}`);
     },
@@ -1377,8 +1159,8 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
     programPath: selected.camProgramPath,
     notes: selected.camNotes,
   } : selected?.camDependency ?? null;
-  const selectedAllocation = selected ? allocationForUser(selected, query.data?.user ?? null) : { claimed: 0, completed: 0 };
-  const selectedOtherClaimants = selected ? otherClaimants(selected, query.data?.user ?? null) : [];
+  const selectedAllocation = selected ? allocationForUser(selected, user) : { claimed: 0, completed: 0 };
+  const selectedOtherClaimants = selected ? otherClaimants(selected, user) : [];
   const machines = useMemo(() => [...new Set(operations.map((operation) => operation.machine))].sort(), [operations]);
   const sourceDocuments = useMemo(() => [...new Set(operations.flatMap((operation) => operation.documentName ? [operation.documentName] : []))].sort(), [operations]);
 
@@ -1391,29 +1173,28 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
       if (locationFilter !== "all" && locationFilter !== "missing" && operation.storageLocation !== locationFilter) return false;
       if (sourceDocument === "missing" && operation.documentName) return false;
       if (sourceDocument !== "all" && sourceDocument !== "missing" && operation.documentName !== sourceDocument) return false;
-      const allocation = allocationForUser(operation, query.data?.user ?? null);
+      const allocation = allocationForUser(operation, user);
       const claimable = isOperationClaimable(operation);
-      if (view === "available" && !claimable && !isOperationStealable(operation, query.data?.user ?? null)) return false;
+      if (view === "available" && !claimable && !isOperationStealable(operation, user)) return false;
       if (view === "mine" && allocation.claimed === 0 && !(showCompletedWork && allocation.completed > 0)) return false;
       if (term && ![operation.partNumber, operation.revision, operation.partName, operation.assemblyNumber, operation.documentName, operation.material, operation.machine, operation.operationNumber, operation.workType, operation.camProgramPath, operation.storageLocation, operation.qualityNotes, operation.lastQualityFailure?.notes].join(" ").toLowerCase().includes(term)) return false;
       return true;
     });
-  }, [machine, locationFilter, operations, query.data?.user, search, sourceDocument, view, workType, showCompletedWork]);
+  }, [machine, locationFilter, operations, user, search, sourceDocument, view, workType, showCompletedWork]);
 
   const bulkItems = useMemo(() => operations.flatMap((operation) => {
     if (!bulkSelectedIds.includes(operation.id)) return [];
-    const plan = bulkActionPlan(operation, query.data?.user ?? null, view);
+    const plan = bulkActionPlan(operation, user, view);
     return plan ? [{ operation, ...plan }] : [];
-  }), [bulkSelectedIds, operations, query.data?.user, view]);
+  }), [bulkSelectedIds, operations, user, view]);
   const selectedBulkOperations = operations.filter((operation) => bulkSelectedIds.includes(operation.id));
   const selectedLocationOperations = selectedBulkOperations.filter((operation) => operation.requirementId !== null);
   const selectedLocationRequirementCount = new Set(selectedLocationOperations.map((operation) => operation.requirementId)).size;
   const selectedReleaseItems = selectedBulkOperations.flatMap((operation) => {
     if (!workAllowed(operation)) return [];
-    const { claimed } = allocationForUser(operation, query.data?.user ?? null);
+    const { claimed } = allocationForUser(operation, user);
     return claimed > 0 ? [{ operation, quantity: claimed }] : [];
   });
-  const selectedReleaseQuantity = selectedReleaseItems.reduce((total, item) => total + item.quantity, 0);
   // One file per production requirement, since its operations share the part's files.
   const selectedFileOperations = (hasFile: (operation: ManufacturingOperation) => boolean) => {
     const seen = new Set<number>();
@@ -1429,16 +1210,33 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
   const selectedBulkActions = new Set(bulkItems.map((item) => item.action));
   const bulkAction = selectedBulkActions.size === 1 ? [...selectedBulkActions][0] : null;
   const hasMixedBulkActions = selectedBulkActions.size > 1;
-  const bulkWorkUnits = bulkItems.reduce((total, item) => total + item.quantity, 0);
-  const bulkCamCount = bulkAction === "complete"
-    ? bulkItems.filter(({ operation }) => operation.workType === "CAM").length
-    : 0;
-  const bulkLocationCount = bulkItems.filter(({ operation }) => bulkAction === "complete"
-    ? operation.workType === "Manufacturing" : isPrintingOperation(operation)).length;
-  const bulkSharedPrintCount = view === "all" && bulkAction === "complete"
-    ? bulkItems.filter(({ operation }) => isPrintingOperation(operation)).length : 0;
   const visibleOperationIds = new Set(filtered.map((operation) => operation.id));
-  const hiddenBulkCount = bulkItems.filter(({ operation }) => !visibleOperationIds.has(operation.id)).length;
+  // Each claim, completion or release changes the operations it touched, so while a batch runs the
+  // live selection would shrink or switch action (and drop out of the filters); the bulk dialogs
+  // keep showing the batch they started with, read back from the mutation's variables.
+  const bulkBatch = bulkActionMutation.isPending ? bulkActionMutation.variables : {
+    action: bulkAction,
+    items: bulkItems.map(({ operation, quantity }) => ({
+      id: operation.id,
+      quantity,
+      workType: operation.workType,
+      printing: isPrintingOperation(operation),
+      completeAllClaims: bulkAction === "complete" && view === "all" && isPrintingOperation(operation),
+    })),
+    hiddenCount: bulkItems.filter(({ operation }) => !visibleOperationIds.has(operation.id)).length,
+  };
+  const bulkWorkUnits = bulkBatch.items.reduce((total, item) => total + item.quantity, 0);
+  const bulkCamCount = bulkBatch.action === "complete"
+    ? bulkBatch.items.filter((item) => item.workType === "CAM").length
+    : 0;
+  const bulkLocationCount = bulkBatch.items.filter((item) => bulkBatch.action === "complete"
+    ? item.workType === "Manufacturing" : item.printing).length;
+  const bulkSharedPrintCount = bulkBatch.items.filter((item) => item.completeAllClaims).length;
+  const releaseBatch = bulkReleaseMutation.isPending ? bulkReleaseMutation.variables : {
+    items: selectedReleaseItems,
+    includesHidden: selectedReleaseItems.some(({ operation }) => !visibleOperationIds.has(operation.id)),
+  };
+  const releaseQuantity = releaseBatch.items.reduce((total, item) => total + item.quantity, 0);
   const bulkButtonLabel = hasMixedBulkActions
     ? "Mixed selection"
     : bulkAction === "claim" || (!bulkAction && view === "available")
@@ -1447,20 +1245,11 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
         ? "Mark complete"
         : "Bulk action";
 
-  useEffect(() => {
-    const api = operationsGridRef.current?.api;
-    if (!api) return;
-
+  const syncOperationSelection = useCallback(() => {
     const selectedIds = new Set(bulkSelectedIds);
-    const toSelect: Parameters<typeof api.setNodesSelected>[0]["nodes"] = [];
-    const toDeselect: Parameters<typeof api.setNodesSelected>[0]["nodes"] = [];
-    api.forEachNode((node) => {
-      if (!node.data) return;
-      (selectedIds.has(node.data.id) ? toSelect : toDeselect).push(node);
-    });
-    if (toSelect.length > 0) api.setNodesSelected({ nodes: toSelect, newValue: true, source: "api" });
-    if (toDeselect.length > 0) api.setNodesSelected({ nodes: toDeselect, newValue: false, source: "api" });
-  }, [bulkSelectedIds, filtered]);
+    syncGridSelection(operationsGridRef.current?.api, (operation) => selectedIds.has(operation.id));
+  }, [bulkSelectedIds]);
+  useEffect(() => { syncOperationSelection(); }, [syncOperationSelection, filtered]);
 
   const stats = useMemo(() => ({
     ready: operations.filter(isOperationClaimable).length,
@@ -1475,12 +1264,21 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
     if (!selected) return;
     mutation.mutate({ id: selected.id, patch: { action, quantity, location, completeAllClaims }, workType: selected.workType });
   };
+  const openProfile = () => {
+    const match = userName.match(/^(.+?)\s+([\p{L}])\.$/u);
+    setFirstName(match?.[1] ?? userName.split(/\s+/)[0] ?? "");
+    setLastInitial(match?.[2] ?? "");
+    setProfileOpen(true);
+  };
+  /** Work is recorded under the shop name, so ask for one before any claim or completion. */
+  const ensureShopName = () => {
+    if (isShopName(userName)) return true;
+    openProfile();
+    toast.info("Set your first name and last initial before recording work");
+    return false;
+  };
   const requestQuantityAction = (action: OperationQuantityAction, max: number, completeAllClaims = false) => {
-    if (!isShopName(userName)) {
-      openProfile();
-      toast.info("Set your first name and last initial before recording work");
-      return;
-    }
+    if (!ensureShopName()) return;
     if (selected?.workType === "CAM" && action === "complete") {
       setCamProgramPath(selected.camProgramPath ?? "");
       setCamNotes(selected.camNotes);
@@ -1534,37 +1332,20 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
     }
   };
   const requestSteal = () => {
-    if (!isShopName(userName)) {
-      openProfile();
-      toast.info("Set your first name and last initial before recording work");
-      return;
-    }
+    if (!ensureShopName()) return;
     setStealDialogOpen(true);
   };
   const requestBulkAction = () => {
     if (bulkItems.length === 0 || !bulkAction) return;
-    if (!isShopName(userName)) {
-      openProfile();
-      toast.info("Set your first name and last initial before recording work");
-      return;
-    }
+    if (!ensureShopName()) return;
     setBulkCamProgramPath("");
     setBulkCamNotes("");
     setBulkLocation(null);
     setBulkActionDialogOpen(true);
   };
-  const changeQueueView = (nextView: QueueView) => {
-    setView(nextView);
-  };
-  const openProfile = () => {
-    const match = userName.match(/^(.+?)\s+([\p{L}])\.$/u);
-    setFirstName(match?.[1] ?? userName.split(/\s+/)[0] ?? "");
-    setLastInitial(match?.[2] ?? "");
-    setProfileOpen(true);
-  };
 
   const columnDefs = useMemo<ColDef<ManufacturingOperation>[]>(() => [
-    { field: "partNumber", equals: () => false, cellRenderer: PartNumberCell, cellRendererParams: { suppressMouseEventHandling: () => true }, headerName: "PART", minWidth: 155, pinned: "left", cellClass: "font-mono font-semibold" },
+    partNumberColumn,
     { field: "revision", headerName: "REVISION", width: 104, valueFormatter: ({ value }) => value || "—" },
     { field: "partName", headerName: "DESCRIPTION", minWidth: 230, flex: 1 },
     { field: "material", headerName: "MATERIAL", minWidth: 165, valueFormatter: ({ value }) => value || "Unspecified" },
@@ -1578,24 +1359,20 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
     { field: "storageLocation", headerName: "LOCATION", minWidth: 150, valueFormatter: ({ value }) => value || "Not recorded" },
     { field: "status", headerName: "STATUS", minWidth: 145, cellRenderer: StatusCell },
     { field: "machinist", headerName: "MACHINIST", minWidth: 180, valueFormatter: ({ value }) => value || "—" },
-    { headerName: "", width: 102, pinned: "right", sortable: false, filter: false, resizable: false, cellRenderer: ActionCell, cellRendererParams: { onOpen: openOperation, user: query.data?.user ?? null } },
-  ], [query.data?.user]);
+    { headerName: "", width: 102, pinned: "right", sortable: false, filter: false, resizable: false, cellRenderer: ActionCell, cellRendererParams: { onOpen: openOperation, user } },
+  ], [user]);
 
   const rowSelection = useMemo(() => ({
-    mode: "multiRow" as const,
-    checkboxes: true,
-    headerCheckbox: true,
+    ...BASE_ROW_SELECTION,
     selectAll: "all" as const,
-    hideDisabledCheckboxes: false,
-    enableClickSelection: false,
     isRowSelectable: ({ data }: { data?: ManufacturingOperation }) => Boolean(
-      data && query.data?.user?.approved && (data.requirementId !== null || bulkActionPlan(data, query.data?.user ?? null, view)),
+      data && (data.requirementId !== null || bulkActionPlan(data, user, view)),
     ),
-  }), [query.data?.user, view]);
+  }), [user, view]);
 
   return (
     <main className="min-h-screen bg-background text-foreground">
-      <NotificationInbox userId={query.data?.user?.approved && query.data.user.id !== "demo-admin" ? query.data.user.id : null} />
+      <NotificationInbox userId={userId ?? null} />
       <header className="sticky top-0 z-40 border-b bg-card/95 backdrop-blur">
         <div className="mx-auto flex h-16 max-w-[1800px] items-center gap-5 px-4 md:px-7">
           <div className="flex items-center gap-3 md:min-w-56">
@@ -1603,56 +1380,20 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
             <div><p className="text-sm font-bold leading-none">FRC 190</p><p className="mt-1 text-[10px] font-semibold uppercase tracking-[.17em] text-muted-foreground">Manufacturing OS</p></div>
           </div>
           <nav className="hidden h-full items-center gap-1 md:flex">
-            <Button
-              variant="ghost"
-              className={cn("h-10", workspaceView === "operations" ? "bg-accent/70 text-primary" : "text-muted-foreground")}
-              aria-current={workspaceView === "operations" ? "page" : undefined}
-              nativeButton={false}
-              render={<Link href={WORKSPACE_ROUTES.operations} />}
-            >
-              <LayoutList /><span className="hidden lg:inline">Operations</span>
-            </Button>
-            <Button
-              variant="ghost"
-              className={cn("h-10", workspaceView === "fabrication" ? "bg-accent/70 text-primary" : "text-muted-foreground")}
-              aria-current={workspaceView === "fabrication" ? "page" : undefined}
-              aria-label="Finishing"
-              nativeButton={false}
-              render={<Link href={WORKSPACE_ROUTES.fabrication} />}
-            >
-              <Paintbrush /><span className="hidden lg:inline">Finishing</span>
-            </Button>
-            <Button
-              variant="ghost"
-              className={cn("h-10", workspaceView === "production" ? "bg-accent/70 text-primary" : "text-muted-foreground")}
-              aria-current={workspaceView === "production" ? "page" : undefined}
-              nativeButton={false}
-              render={<Link href={WORKSPACE_ROUTES.production} />}
-            >
-              <PackageCheck /><span className="hidden lg:inline">Production</span>
-            </Button>
-            {query.data?.user?.role === "admin" && (
-              <>
-                <Button
-                  variant="ghost"
-                  className={cn("h-10", workspaceView === "qc" ? "bg-accent/70 text-primary" : "text-muted-foreground")}
-                  aria-current={workspaceView === "qc" ? "page" : undefined}
-                  nativeButton={false}
-                  render={<Link href={WORKSPACE_ROUTES.qc} />}
-                >
-                  <ClipboardCheck /><span className="hidden lg:inline">QC</span>
-                </Button>
-                <Button
-                  variant="ghost"
-                  className={cn("h-10", workspaceView === "admin" ? "bg-accent/70 text-primary" : "text-muted-foreground")}
-                  aria-current={workspaceView === "admin" ? "page" : undefined}
-                  nativeButton={false}
-                  render={<Link href={WORKSPACE_ROUTES.admin} />}
-                >
-                  <ShieldCheck /><span className="hidden lg:inline">Admin</span>
-                </Button>
-              </>
-            )}
+            {navItems.map(({ id, label, icon: Icon }) => (
+              <Button
+                key={id}
+                variant="ghost"
+                className={cn("h-10", workspaceView === id ? "bg-accent/70 text-primary" : "text-muted-foreground")}
+                aria-current={workspaceView === id ? "page" : undefined}
+                // The label is hidden below lg, leaving an icon-only link.
+                aria-label={label}
+                nativeButton={false}
+                render={<Link href={WORKSPACE_ROUTES[id]} />}
+              >
+                <Icon /><span className="hidden lg:inline">{label}</span>
+              </Button>
+            ))}
           </nav>
           <div className="ml-auto flex items-center gap-2">
             <div
@@ -1686,7 +1427,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-56">
                 <DropdownMenuGroup>
-                  <DropdownMenuLabel>Signed in as<br /><span className="font-normal text-foreground">{query.data?.user?.email ?? userName}</span></DropdownMenuLabel>
+                  <DropdownMenuLabel>Signed in as<br /><span className="font-normal text-foreground">{user?.email ?? userName}</span></DropdownMenuLabel>
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem render={<Link href={WORKSPACE_ROUTES.preferences} />}>Preferences</DropdownMenuItem>
@@ -1697,16 +1438,8 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
             </DropdownMenu>
           </div>
         </div>
-        <nav className={cn("grid gap-1 border-t px-3 py-1.5 md:hidden", query.data?.user?.role === "admin" ? "grid-cols-5" : "grid-cols-3")}>
-          {[
-            { id: "operations" as const, label: "Operations", icon: LayoutList },
-            { id: "fabrication" as const, label: "Finishing", icon: Paintbrush },
-            { id: "production" as const, label: "Production", icon: PackageCheck },
-            ...(query.data?.user?.role === "admin" ? [
-              { id: "qc" as const, label: "QC", icon: ClipboardCheck },
-              { id: "admin" as const, label: "Admin", icon: ShieldCheck },
-            ] : []),
-          ].map(({ id, label, icon: Icon }) => (
+        <nav className={cn("grid gap-1 border-t px-3 py-1.5 md:hidden", isAdmin ? "grid-cols-5" : "grid-cols-3")}>
+          {navItems.map(({ id, label, icon: Icon }) => (
             <Button key={id} size="sm" variant="ghost" className={cn("min-w-0 gap-1 px-1 text-[11px]", workspaceView === id ? "bg-accent/70 text-primary" : "text-muted-foreground")} aria-current={workspaceView === id ? "page" : undefined} nativeButton={false} render={<Link href={WORKSPACE_ROUTES[id]} />}><Icon />{label}</Button>
           ))}
         </nav>
@@ -1719,20 +1452,13 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
             <h1 className="text-3xl font-bold tracking-[-.035em] md:text-[2.55rem]">Ready operations</h1>
             <p className="mt-1.5 max-w-2xl text-sm leading-6 text-muted-foreground">Filter to a machine, claim the next operation, and record who performed the work.</p>
           </div>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
-            {[
-              { label: "Ready", value: stats.ready, icon: CircleDot, tone: "text-emerald-700 bg-emerald-50 dark:text-emerald-300 dark:bg-emerald-400/15" },
-              { label: "Planned", value: stats.planned, icon: ListChecks, tone: "text-slate-700 bg-slate-100 dark:text-slate-200 dark:bg-slate-400/15" },
-              { label: "In progress", value: stats.active, icon: Clock3, tone: "text-blue-700 bg-blue-50 dark:text-blue-300 dark:bg-blue-400/15" },
-              { label: "Attention", value: stats.attention, icon: TriangleAlert, tone: "text-amber-800 bg-amber-50 dark:text-amber-300 dark:bg-amber-400/15" },
-              { label: "Complete", value: stats.complete, icon: Check, tone: "text-violet-700 bg-violet-50 dark:text-violet-300 dark:bg-violet-400/15" },
-            ].map(({ label, value, icon: Icon, tone }) => (
-              <div key={label} className="flex min-w-32 items-center gap-3 rounded-xl border bg-card px-3 py-2.5 shadow-sm">
-                <div className={cn("grid size-8 place-items-center rounded-lg", tone)}><Icon className="size-4" /></div>
-                <div><div className="text-lg font-bold leading-none">{value}</div><div className="mt-1 text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{label}</div></div>
-              </div>
-            ))}
-          </div>
+          <StatTiles className="grid grid-cols-2 gap-2 sm:grid-cols-5" items={[
+            { label: "Ready", value: stats.ready, icon: CircleDot, tone: "text-emerald-700 bg-emerald-50 dark:text-emerald-300 dark:bg-emerald-400/15" },
+            { label: "Planned", value: stats.planned, icon: ListChecks, tone: "text-slate-700 bg-slate-100 dark:text-slate-200 dark:bg-slate-400/15" },
+            { label: "In progress", value: stats.active, icon: Clock3, tone: "text-blue-700 bg-blue-50 dark:text-blue-300 dark:bg-blue-400/15" },
+            { label: "Attention", value: stats.attention, icon: TriangleAlert, tone: "text-amber-800 bg-amber-50 dark:text-amber-300 dark:bg-amber-400/15" },
+            { label: "Complete", value: stats.complete, icon: Check, tone: "text-violet-700 bg-violet-50 dark:text-violet-300 dark:bg-violet-400/15" },
+          ]} />
         </div>
 
         <div className="overflow-hidden rounded-2xl border bg-card shadow-[0_14px_42px_rgba(15,23,42,.055)]">
@@ -1740,7 +1466,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
             <div className="flex flex-wrap items-center gap-3">
               <div className="flex w-full overflow-x-auto rounded-lg bg-muted p-1 sm:w-auto">
                 {([{ id: "available", label: "Available" }, { id: "mine", label: "My work" }, { id: "all", label: "All operations" }] as const).map((item) => (
-                  <Button key={item.id} size="sm" variant="ghost" onClick={() => changeQueueView(item.id)} className={cn("min-w-fit", view === item.id && "bg-card text-foreground shadow-sm hover:bg-card")}>
+                  <Button key={item.id} size="sm" variant="ghost" onClick={() => setView(item.id)} className={cn("min-w-fit", view === item.id && "bg-card text-foreground shadow-sm hover:bg-card")}>
                     {item.label}{item.id === "available" && <span className="ml-1 rounded bg-emerald-100 px-1.5 text-[10px] font-bold text-emerald-800 dark:bg-emerald-400/20 dark:text-emerald-200">{stats.ready}</span>}
                   </Button>
                 ))}
@@ -1800,22 +1526,22 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                     <ChevronDown className="size-4" />
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end" className="w-52">
-                    <DropdownMenuItem disabled={selectedLocationRequirementCount === 0 || !query.data?.user?.approved} onClick={() => {
+                    <DropdownMenuItem disabled={selectedLocationRequirementCount === 0} onClick={() => {
                       setBulkMoveLocation(null);
                       setBulkLocationDialogOpen(true);
                     }}><MapPin /> Bulk set location{selectedLocationRequirementCount > 0 ? ` (${selectedLocationRequirementCount})` : ""}</DropdownMenuItem>
                     <DropdownMenuItem
-                      disabled={selectedReleaseItems.length === 0 || !query.data?.user?.approved}
+                      disabled={selectedReleaseItems.length === 0}
                       onClick={() => setBulkReleaseDialogOpen(true)}
                     ><RotateCcw /> Bulk release claim{selectedReleaseItems.length > 0 ? ` (${selectedReleaseItems.length})` : ""}</DropdownMenuItem>
                     <DropdownMenuItem
-                      disabled={selectedStepOperations.length === 0 || !query.data?.user?.approved || bulkFileDownloadMutation.isPending}
+                      disabled={selectedStepOperations.length === 0 || bulkFileDownloadMutation.isPending}
                       onClick={() => bulkFileDownloadMutation.mutate({ kind: "step", operations: selectedStepOperations })}
                     >
                       {bulkFileDownloadMutation.isPending && bulkFileDownloadMutation.variables?.kind === "step" ? <LoaderCircle className="animate-spin" /> : <Download />} Bulk download STEP{selectedStepOperations.length > 0 ? ` (${selectedStepOperations.length})` : ""}
                     </DropdownMenuItem>
                     <DropdownMenuItem
-                      disabled={selectedDrawingOperations.length === 0 || !query.data?.user?.approved || bulkFileDownloadMutation.isPending}
+                      disabled={selectedDrawingOperations.length === 0 || bulkFileDownloadMutation.isPending}
                       onClick={() => bulkFileDownloadMutation.mutate({ kind: "drawing-pdf", operations: selectedDrawingOperations })}
                     >
                       {bulkFileDownloadMutation.isPending && bulkFileDownloadMutation.variables?.kind === "drawing-pdf" ? <LoaderCircle className="animate-spin" /> : <FileText />} Bulk download drawing{selectedDrawingOperations.length > 0 ? ` (${selectedDrawingOperations.length})` : ""}
@@ -1830,9 +1556,9 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
           {query.isPending ? (
             <div className="space-y-3 p-5">{Array.from({ length: 7 }).map((_, index) => <Skeleton key={index} className="h-11 w-full" />)}</div>
           ) : query.isError && !query.data ? (
-            <div className="grid min-h-80 place-items-center p-6 text-center"><div><XCircle className="mx-auto mb-3 size-9 text-destructive" /><h2 className="font-semibold">Couldn’t load the queue</h2><p className="mt-1 max-w-md text-sm text-muted-foreground">{query.error.message}</p><Button className="mt-4" onClick={() => query.refetch()}>Try again</Button></div></div>
+            <EmptyState icon={XCircle} iconClassName="size-9 text-destructive" title="Couldn’t load the queue" message={query.error.message} messageClassName="max-w-md"><Button className="mt-4" onClick={() => query.refetch()}>Try again</Button></EmptyState>
           ) : filtered.length === 0 ? (
-            <div className="grid min-h-80 place-items-center p-6 text-center"><div><PackageCheck className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h2 className="font-semibold">No operations match</h2><p className="mt-1 text-sm text-muted-foreground">Try another work type, machine, location, or source document, or clear the search.</p><Button variant="outline" className="mt-4" onClick={() => { setWorkType("all"); setMachine("all"); setLocationFilter("all"); setSourceDocument("all"); setSearch(""); setView("all"); }}>Clear filters</Button></div></div>
+            <EmptyState icon={PackageCheck} iconClassName="size-10 text-muted-foreground/60" title="No operations match" message="Try another work type, machine, location, or source document, or clear the search."><Button variant="outline" className="mt-4" onClick={() => { setWorkType("all"); setMachine("all"); setLocationFilter("all"); setSourceDocument("all"); setSearch(""); setView("all"); }}>Clear filters</Button></EmptyState>
           ) : (
             <>
               <div className="hidden h-[min(59vh,680px)] min-h-[430px] md:block">
@@ -1842,9 +1568,11 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                   rowData={filtered}
                   columnDefs={columnDefs}
                   rowSelection={rowSelection}
-                  selectionColumnDef={{ width: 48, pinned: "left", resizable: false }}
+                  selectionColumnDef={SELECTION_COLUMN_DEF}
+                  onGridReady={syncOperationSelection}
+                  onRowDataUpdated={syncOperationSelection}
                   onSelectionChanged={({ api, source }) => {
-                    if (["api", "rowDataChanged", "gridInitializing", "selectableChanged"].includes(source)) return;
+                    if (!isUserSelectionSource(source)) return;
                     const selectedVisibleIds = api.getSelectedRows().map((operation) => operation.id);
                     setBulkSelectedIds((current) => mergeVisibleSelection(
                       current,
@@ -1852,26 +1580,25 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                       selectedVisibleIds,
                     ));
                   }}
-                  defaultColDef={{ sortable: true, filter: false, resizable: true }}
+                  defaultColDef={DEFAULT_COL_DEF}
                   getRowId={({ data }) => String(data.id)}
                   onRowDoubleClicked={({ data }) => data && openOperation(data)}
                   pagination
                   paginationPageSize={25}
                   paginationPageSizeSelector={[10, 25, 50]}
-                  stopEditingWhenCellsLoseFocus
                   animateRows
                 />
               </div>
               <div className="divide-y md:hidden">
                 {filtered.map((operation) => {
-                  const plan = bulkActionPlan(operation, query.data?.user ?? null, view);
+                  const plan = bulkActionPlan(operation, user, view);
                   const checked = bulkSelectedIds.includes(operation.id);
                   return (
                     <article key={operation.id} className="flex items-start gap-3 p-4 transition hover:bg-muted/40">
                       <Checkbox
                         className="mt-1"
                         checked={checked}
-                        disabled={!query.data?.user?.approved || operation.requirementId === null && !plan}
+                        disabled={operation.requirementId === null && !plan}
                         aria-label={`Select ${operation.partNumber} ${operationLabel(operation)}`}
                         onCheckedChange={(nextChecked) => setBulkSelectedIds((current) => nextChecked ? [...new Set([...current, operation.id])] : current.filter((id) => id !== operation.id))}
                       />
@@ -1899,14 +1626,14 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
         </div>
         <div className="mt-3 flex flex-col gap-1 text-[11px] text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
           <span>Open a manufacturing or CAM operation to claim, release, complete, or undo work.</span>
-          <span>Last refreshed {query.data ? formatDate(query.data.syncedAt) : "—"}</span>
+          <span>Last refreshed {query.data ? formatShortDateTime(query.data.syncedAt) : "—"}</span>
         </div>
       </section> : workspaceView === "fabrication" ? (
-        <FabricationDashboard user={query.data?.user ?? null} onProfileRequired={openProfile} />
+        <FabricationDashboard user={user} ensureShopName={ensureShopName} />
       ) : (
         <ProductionOverview
-          canForceQc={query.data?.user?.role === "admin" && query.data.user.approved}
-          operations={query.data?.operations ?? operations}
+          canForceQc={isAdmin}
+          operations={query.data?.operations ?? []}
           cotsRequirements={query.data?.cotsRequirements ?? []}
           isLoading={query.isPending}
           isError={query.isError && !query.data}
@@ -1949,7 +1676,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                       ["Source document", selected.documentName
                         ? `${selected.documentName}${selected.syncedFromDocument && selected.syncedFromDocument !== selected.documentName ? ` (synced from ${selected.syncedFromDocument})` : ""}`
                         : "Not synced"], ["Machinist", selected.machinist || "Unclaimed"],
-                      ["Started", formatDate(selected.startedAt)], ["Finished", formatDate(selected.completedAt)],
+                      ["Started", formatShortDateTime(selected.startedAt)], ["Finished", formatShortDateTime(selected.completedAt)],
                     ].map(([label, value], index, details) => <div key={label} className={cn("p-3", index % 2 === 0 && "border-r", index < details.length - 2 && "border-b")}><p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{label}</p><p className="mt-1 text-sm font-semibold">{value}</p></div>)}
                   </div>
                 </section>
@@ -1961,8 +1688,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                       value={selected.storageLocation}
                       updatedBy={selected.locationUpdatedBy}
                       updatedAt={selected.locationUpdatedAt}
-                      canEdit
-                      allowOnRobot={robotPlacementAllowed(selected) && canUseOnRobotLocation(selected.effectiveQcResult === "passed", selected.finishingComplete)}
+                      allowOnRobot={onRobotAllowed(selected, selected.effectiveQcResult === "passed", selected.finishingComplete)}
                     />
                   </section>
                 )}
@@ -1976,7 +1702,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                   />
                 )}
 
-                {query.data?.user?.role === "admin" && query.data.user.approved && selected.requirementId && (
+                {isAdmin && selected.requirementId && (
                   <EngineeringOverrides
                     key={`engineering:${selected.requirementId}`}
                     requirementId={selected.requirementId}
@@ -1993,7 +1719,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                   <section>
                     <div className="mb-3 flex items-center justify-between gap-3">
                       <h3 className="text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">CAM handoff</h3>
-                      {query.data?.user?.role === "admin" && selectedCamHandoff?.status === "Complete" && (
+                      {isAdmin && selectedCamHandoff?.status === "Complete" && (
                         <Button size="sm" variant="outline" disabled={!workAllowed(selected)} onClick={openCamHandoffEditor}><Pencil /> Edit handoff</Button>
                       )}
                     </div>
@@ -2004,16 +1730,16 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                       {selectedCamHandoff?.status === "Complete" && (
                         <div><p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Completed by</p><p className="mt-1 text-sm font-semibold">{selectedCamHandoff.completedBy || "Not recorded"}</p></div>
                       )}
-                      {(selected.workType === "CAM" ? selected.camProgramPath : selected.camDependency?.programPath) ? (
+                      {selectedCamHandoff?.programPath ? (
                         <div>
                           <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Shared-drive program path</p>
-                          <div className="mt-1.5 flex items-start gap-2"><code className="min-w-0 flex-1 break-all rounded-lg bg-background p-2.5 text-xs">{selected.workType === "CAM" ? selected.camProgramPath : selected.camDependency?.programPath}</code><Button size="icon" variant="outline" aria-label="Copy program path" onClick={() => copyProgramPath((selected.workType === "CAM" ? selected.camProgramPath : selected.camDependency?.programPath) ?? "")}><ClipboardCopy /></Button></div>
+                          <div className="mt-1.5 flex items-start gap-2"><code className="min-w-0 flex-1 break-all rounded-lg bg-background p-2.5 text-xs">{selectedCamHandoff.programPath}</code><Button size="icon" variant="outline" aria-label="Copy program path" onClick={() => copyProgramPath(selectedCamHandoff.programPath ?? "")}><ClipboardCopy /></Button></div>
                         </div>
                       ) : (
                         <p className="text-sm text-muted-foreground">No program path has been recorded yet.</p>
                       )}
-                      {(selected.workType === "CAM" ? selected.camNotes : selected.camDependency?.notes) && (
-                        <div><p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Setup notes</p><p className="mt-1 whitespace-pre-wrap text-sm">{selected.workType === "CAM" ? selected.camNotes : selected.camDependency?.notes}</p></div>
+                      {selectedCamHandoff?.notes && (
+                        <div><p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Setup notes</p><p className="mt-1 whitespace-pre-wrap text-sm">{selectedCamHandoff.notes}</p></div>
                       )}
                     </div>
                   </section>
@@ -2031,29 +1757,14 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
                   <div className="mt-2 flex justify-between text-[10px] font-semibold text-muted-foreground"><span>Planned</span><span>Ready</span><span>Working</span><span>Done</span></div>
                 </section>
 
-                <section>
-                  <h3 className="mb-3 text-xs font-bold uppercase tracking-[.14em] text-muted-foreground">Files & source</h3>
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    {[
-                      { label: "Drawing PDF", href: selected.hasDrawingPdf ? `/api/operations/${selected.id}/files/drawing-pdf` : null, fileName: selected.drawingPdfName, icon: FileText, preload: true },
-                      { label: "STEP file", href: selected.hasStepFile ? `/api/operations/${selected.id}/files/step` : null, fileName: selected.stepName, icon: Download, preload: true },
-                      { label: "Onshape drawing", href: selected.drawingUrl, fileName: null, icon: ArrowUpRight, preload: false },
-                      { label: "BOM source", href: selected.onshapeUrl, fileName: null, icon: Cloud, preload: false },
-                    ].map(({ label, href, fileName, icon: Icon, preload }) => href ? (
-                      preload ? <ManufacturingFileLink key={label} href={href} download={label === "STEP file" ? fileName ?? true : undefined} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-3 rounded-xl border p-3 text-sm font-semibold transition hover:border-primary/40 hover:bg-accent/40"><div className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary"><Icon className="size-4" /></div><span className="min-w-0"><span className="block">{label}</span>{fileName && <span className="block truncate text-[10px] font-normal text-muted-foreground">{fileName}</span>}</span><ChevronRight className="ml-auto size-4 shrink-0 text-muted-foreground" /></ManufacturingFileLink>
-                        : <a key={label} href={href} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-3 rounded-xl border p-3 text-sm font-semibold transition hover:border-primary/40 hover:bg-accent/40"><div className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary"><Icon className="size-4" /></div><span className="min-w-0"><span className="block">{label}</span>{fileName && <span className="block truncate text-[10px] font-normal text-muted-foreground">{fileName}</span>}</span><ChevronRight className="ml-auto size-4 shrink-0 text-muted-foreground" /></a>
-                    ) : (
-                      <div key={label} className="flex items-center gap-3 rounded-xl border border-dashed p-3 text-sm text-muted-foreground"><div className="grid size-8 place-items-center rounded-lg bg-muted"><Icon className="size-4" /></div>{label}<span className="ml-auto text-[10px] uppercase">Missing</span></div>
-                    ))}
-                  </div>
-                </section>
+                <FilesAndSource basePath="/api/operations" part={selected} onshapeUrl={selected.onshapeUrl} />
 
                 {selected.requirementId && <RequirementHistory key={`history:${selected.requirementId}`} requirementId={selected.requirementId} />}
               </div></div>
 
               <SheetFooter className="sticky bottom-0 border-t bg-card/95 p-4 backdrop-blur">
                 {["Ready", "In Progress"].includes(selected.status) && selected.availableQuantity > 0 && <Button size="lg" className="h-11" onClick={() => requestQuantityAction("claim", selected.availableQuantity)} disabled={mutation.isPending || !workAllowed(selected)}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <CircleDot />} {selected.workType === "CAM" ? "Claim CAM task" : `Claim ${selected.availableQuantity === 1 ? "part" : "parts"}`}</Button>}
-                {isOperationStealable(selected, query.data?.user ?? null) && <Button size="lg" variant="destructive" className="h-11" onClick={requestSteal} disabled={mutation.isPending || !workAllowed(selected)}><TriangleAlert /> Steal {selected.workType === "CAM" ? "CAM task" : "production requirement"}</Button>}
+                {isOperationStealable(selected, user) && <Button size="lg" variant="destructive" className="h-11" onClick={requestSteal} disabled={mutation.isPending || !workAllowed(selected)}><TriangleAlert /> Steal {selected.workType === "CAM" ? "CAM task" : "production requirement"}</Button>}
                 {selectedAllocation.claimed > 0 && <Button size="lg" className="h-11 bg-emerald-600 hover:bg-emerald-700" onClick={() => requestQuantityAction("complete", selectedAllocation.claimed)} disabled={mutation.isPending || !workAllowed(selected)}>{mutation.isPending ? <LoaderCircle className="animate-spin" /> : <Check />} Mark complete</Button>}
                 {isPrintingOperation(selected) && selectedOtherClaimants.length > 0 && <Button size="lg" className="h-11 bg-emerald-600 hover:bg-emerald-700" onClick={() => requestQuantityAction("complete", selected.claimedQuantity, true)} disabled={mutation.isPending || !workAllowed(selected)}><Check /> Complete all claimed prints</Button>}
                 {selectedAllocation.claimed > 0 && <Button variant="outline" onClick={() => requestQuantityAction("release", selectedAllocation.claimed)} disabled={mutation.isPending || !workAllowed(selected)}><RotateCcw /> Release claim</Button>}
@@ -2173,20 +1884,20 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
       <Dialog open={bulkReleaseDialogOpen} onOpenChange={(open) => { if (!bulkReleaseMutation.isPending) setBulkReleaseDialogOpen(open); }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Release {selectedReleaseQuantity} claimed {selectedReleaseQuantity === 1 ? "part" : "parts"}?</DialogTitle>
+            <DialogTitle>Release {releaseQuantity} claimed {releaseQuantity === 1 ? "part" : "parts"}?</DialogTitle>
             <DialogDescription>
-              This returns your claim on {selectedReleaseItems.length} selected {selectedReleaseItems.length === 1 ? "operation" : "operations"} to the available queue. Completed work is not affected, and you can claim the parts again.
+              This returns your claim on {releaseBatch.items.length} selected {releaseBatch.items.length === 1 ? "operation" : "operations"} to the available queue. Completed work is not affected, and you can claim the parts again.
             </DialogDescription>
           </DialogHeader>
           <div className="my-2 space-y-2">
             <p className="text-xs text-muted-foreground">Only work you have claimed is released; other machinists&rsquo; claims on the same operations stay untouched.</p>
-            {selectedReleaseItems.some(({ operation }) => !visibleOperationIds.has(operation.id)) && <p className="text-xs text-amber-700 dark:text-amber-300">Includes selected operations hidden by the current filters.</p>}
+            {releaseBatch.includesHidden && <p className="text-xs text-amber-700 dark:text-amber-300">Includes selected operations hidden by the current filters.</p>}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setBulkReleaseDialogOpen(false)} disabled={bulkReleaseMutation.isPending}>Cancel</Button>
             <Button
-              onClick={() => bulkReleaseMutation.mutate(selectedReleaseItems)}
-              disabled={selectedReleaseItems.length === 0 || bulkReleaseMutation.isPending}
+              onClick={() => bulkReleaseMutation.mutate(releaseBatch)}
+              disabled={releaseBatch.items.length === 0 || bulkReleaseMutation.isPending}
             >
               {bulkReleaseMutation.isPending ? <LoaderCircle className="animate-spin" /> : <RotateCcw />} Release claims
             </Button>
@@ -2206,7 +1917,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
               <DialogDescription>Set one location for {selectedLocationRequirementCount} part {selectedLocationRequirementCount === 1 ? "requirement" : "requirements"} across {selectedLocationOperations.length} selected operations. Claim and completion status will stay the same.</DialogDescription>
             </DialogHeader>
             <div className="my-5 space-y-3">
-              <StorageLocationSelect value={bulkMoveLocation} onChange={setBulkMoveLocation} emptyLabel="Choose a location" disabled={bulkLocationMutation.isPending} allowOnRobot={selectedLocationOperations.length > 0 && selectedLocationOperations.every((operation) => robotPlacementAllowed(operation) && canUseOnRobotLocation(operation.effectiveQcResult === "passed", operation.finishingComplete))} />
+              <StorageLocationSelect value={bulkMoveLocation} onChange={setBulkMoveLocation} emptyLabel="Choose a location" disabled={bulkLocationMutation.isPending} allowOnRobot={selectedLocationOperations.length > 0 && selectedLocationOperations.every((operation) => onRobotAllowed(operation, operation.effectiveQcResult === "passed", operation.finishingComplete))} />
               <p className="text-xs text-muted-foreground">Location applies to all quantities and operations of each selected part requirement.</p>
               {selectedLocationOperations.some((operation) => !visibleOperationIds.has(operation.id)) && <p className="text-xs text-amber-700 dark:text-amber-300">Includes selected operations hidden by the current filters.</p>}
             </div>
@@ -2225,13 +1936,8 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
             if (!bulkAction) return;
             bulkActionMutation.mutate({
               action: bulkAction,
-              items: bulkItems.map(({ operation, quantity }) => ({
-                id: operation.id,
-                quantity,
-                workType: operation.workType,
-                printing: isPrintingOperation(operation),
-                completeAllClaims: bulkAction === "complete" && view === "all" && isPrintingOperation(operation),
-              })),
+              items: bulkBatch.items,
+              hiddenCount: bulkBatch.hiddenCount,
               programPath: bulkCamProgramPath.trim(),
               notes: bulkCamNotes.trim(),
               location: bulkLocation,
@@ -2239,22 +1945,22 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
           }}>
             <DialogHeader>
               <div className="mb-1 grid size-10 place-items-center rounded-full bg-primary/10 text-primary"><ListChecks className="size-5" /></div>
-              <DialogTitle>{bulkAction === "claim" ? "Claim" : "Complete"} {bulkItems.length} operations?</DialogTitle>
-              <DialogDescription>{bulkAction === "claim"
+              <DialogTitle>{bulkBatch.action === "claim" ? "Claim" : "Complete"} {bulkBatch.items.length} operations?</DialogTitle>
+              <DialogDescription>{bulkBatch.action === "claim"
                 ? "This claims every currently available work unit on the selected operations."
                 : bulkSharedPrintCount > 0 ? "This completes the selected work, including all users’ claims on selected 3D printing operations. Original work credit is preserved." : "This marks all work you currently have claimed on the selected operations as complete."}</DialogDescription>
             </DialogHeader>
             <div className="my-5 space-y-4">
               <div className="rounded-xl border bg-muted/30 p-3 text-sm">
                 <p className="font-semibold">{bulkWorkUnits} {bulkWorkUnits === 1 ? "work unit" : "work units"} total</p>
-                <p className="mt-1 text-muted-foreground">Across {bulkItems.length} selected {bulkItems.length === 1 ? "operation" : "operations"}.</p>
-                {hiddenBulkCount > 0 && <p className="mt-1 text-amber-700 dark:text-amber-300">Includes {hiddenBulkCount} selected operations hidden by the current filters.</p>}
+                <p className="mt-1 text-muted-foreground">Across {bulkBatch.items.length} selected {bulkBatch.items.length === 1 ? "operation" : "operations"}.</p>
+                {bulkBatch.hiddenCount > 0 && <p className="mt-1 text-amber-700 dark:text-amber-300">Includes {bulkBatch.hiddenCount} selected operations hidden by the current filters.</p>}
               </div>
               {bulkLocationCount > 0 && (
                 <div className="space-y-2">
-                  <p className="text-xs font-semibold">{bulkAction === "claim" ? "Printer / part location" : "Move completed parts to"} <span className="font-normal text-muted-foreground">(optional)</span></p>
+                  <p className="text-xs font-semibold">{bulkBatch.action === "claim" ? "Printer / part location" : "Move completed parts to"} <span className="font-normal text-muted-foreground">(optional)</span></p>
                   <StorageLocationSelect value={bulkLocation} onChange={setBulkLocation} emptyLabel="Keep current locations" disabled={bulkActionMutation.isPending} />
-                  <p className="text-xs text-muted-foreground">Applies to {bulkLocationCount} selected {bulkAction === "claim" ? "3D printing" : "manufacturing"} operations. Location is shared by all quantities of each part requirement.</p>
+                  <p className="text-xs text-muted-foreground">Applies to {bulkLocationCount} selected {bulkBatch.action === "claim" ? "3D printing" : "manufacturing"} operations. Location is shared by all quantities of each part requirement.</p>
                 </div>
               )}
               {bulkCamCount > 0 && (
@@ -2274,7 +1980,7 @@ export function ManufacturingDashboard({ workspaceView }: { workspaceView: Works
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => setBulkActionDialogOpen(false)}>Cancel</Button>
               <Button type="submit" disabled={bulkItems.length === 0 || !bulkAction || bulkActionMutation.isPending}>
-                {bulkActionMutation.isPending && <LoaderCircle className="animate-spin" />} {bulkAction === "claim" ? "Claim selected" : "Mark selected complete"}
+                {bulkActionMutation.isPending && <LoaderCircle className="animate-spin" />} {bulkBatch.action === "claim" ? "Claim selected" : "Mark selected complete"}
               </Button>
             </DialogFooter>
           </form>

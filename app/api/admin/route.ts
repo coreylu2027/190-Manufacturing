@@ -1,25 +1,23 @@
 import { NextResponse } from "next/server";
 
-import { getAdminActor, isBootstrapAdminEmail } from "@/lib/auth";
+import { requireUser } from "@/lib/api-route";
+import { accountName, isBootstrapAdminEmail } from "@/lib/auth";
 import { getCurrentManufacturingSnapshot } from "@/lib/manufacturing/cache";
 import { projectQualityControl, type QualityReviewRow } from "@/lib/quality-control";
 import { createAdminClient } from "@/lib/supabase/admin";
-import type { AdminResponse, AdminUserSummary } from "@/lib/types";
-
-export const dynamic = "force-dynamic";
+import type { AdminResponse, AdminUserSummary, UserRole } from "@/lib/types";
 
 interface ProfileRow {
   id: string;
   display_name: string;
-  role: "machinist" | "admin";
+  role: UserRole;
   approved: boolean;
   last_seen_at: string | null;
 }
 
 export async function GET() {
-  const currentUser = await getAdminActor();
-  if (!currentUser) return NextResponse.json({ error: "Authentication required" }, { status: 401 });
-  if (!currentUser.approved) return NextResponse.json({ error: "Account approval required" }, { status: 403 });
+  const { user: currentUser, response } = await requireUser();
+  if (response) return response;
   if (currentUser.role !== "admin") return NextResponse.json({ error: "Administrator access required" }, { status: 403 });
 
   const admin = createAdminClient();
@@ -43,14 +41,11 @@ export async function GET() {
     const profiles = new Map((profileData as ProfileRow[]).map((profile) => [profile.id, profile]));
     const users: AdminUserSummary[] = authData.users.map((user) => {
       const profile = profiles.get(user.id);
-      const email = user.email ?? "No email";
       const bootstrapAdmin = isBootstrapAdminEmail(user.email);
-      // Match getAppUser: the server-written profile name, not user-editable metadata.
-      const profileName = profile ? String(profile.display_name ?? "").trim() : user.user_metadata.full_name ?? user.user_metadata.name ?? "";
       return {
         id: user.id,
-        email,
-        name: profileName || email.split("@")[0],
+        email: user.email ?? "No email",
+        name: accountName(user, profile, "No email"),
         role: bootstrapAdmin ? "admin" : profile?.role ?? "machinist",
         approved: bootstrapAdmin || Boolean(profile?.approved),
         createdAt: user.created_at,

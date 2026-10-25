@@ -16,13 +16,6 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function finishSignIn() {
-    const response = await fetch("/api/account", { cache: "no-store" });
-    const body = await response.json().catch(() => ({}));
-    router.replace(body.user?.approved ? "/" : "/pending");
-    router.refresh();
-  }
-
   async function signInWithPassword(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const supabase = createClient();
@@ -35,7 +28,9 @@ export default function LoginPage() {
       setLoading(false);
       return;
     }
-    await finishSignIn();
+    // The pending page sends approved accounts on to the shop.
+    router.replace("/pending");
+    router.refresh();
   }
 
   return (

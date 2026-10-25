@@ -5,18 +5,16 @@ import { useState } from "react";
 export function ExpandableText({
   text,
   maxLength = 120,
-  className,
 }: {
   text: string;
   maxLength?: number;
-  className?: string;
 }) {
   const [expanded, setExpanded] = useState(false);
 
-  if (text.length <= maxLength) return <span className={className}>{text}</span>;
+  if (text.length <= maxLength) return <span>{text}</span>;
 
   return (
-    <span className={className}>
+    <span>
       <span className="[overflow-wrap:anywhere]">{expanded ? text : text.slice(0, maxLength).trimEnd()}</span>
       {expanded ? (
         <button

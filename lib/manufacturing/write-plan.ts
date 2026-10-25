@@ -41,6 +41,14 @@ function machinistSummary(allocations: OperationAllocation[], requiredQuantity: 
       : allocation.name)
     .join(", ");
 }
+/** Renames one person's entries in a summary such as "Alex A. (2), Bea B. (1)", keeping each "(n)". */
+function renameInSummary(summary: string, names: Iterable<string>, newName: string) {
+  const keys = new Set([...names].map((name) => name.trim().toLocaleLowerCase()));
+  return summary.split(", ").map((entry) => {
+    const [, name, count = ""] = entry.match(/^(.*?)( \(\d+\))?$/) ?? [];
+    return name !== undefined && keys.has(name.trim().toLocaleLowerCase()) ? `${newName}${count}` : entry;
+  }).join(", ");
+}
 function operationIndex(value: unknown) {
   const match = selectValue(value, "OP1").match(/^OP(\d+)$/i);
   return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
@@ -513,8 +521,11 @@ export function createWritePlan(input: Record<string, NormalizedRow[]>) {
   function renameMachinistAllocations(userId: string, oldName: string, newName: string) {
     if (oldName === newName) return;
     const frozenRequirements = new Set(rows.requirements.filter(row => row.obsolete).map(row => row.id));
-    // Read before any write: each requirement is compared with its assignment from before the rename.
     const requirements = new Map(listAllRows("requirements").map((row) => [row.id, row]));
+    const isOldName = (name: string) => name.toLocaleLowerCase() === oldName.toLocaleLowerCase();
+    // Other names this account's credits still carried per requirement, e.g. from an earlier rename
+    // that skipped the requirement while it was obsolete.
+    const earlierNames = new Map<number, Set<string>>();
 
     const renamed = listAllRows("operations").flatMap((operation) => {
       const requirementId = linkedId(operation.requirement_id);
@@ -524,34 +535,38 @@ export function createWritePlan(input: Record<string, NormalizedRow[]>) {
       const taskQuantity = taskQuantityForRow(operation, requiredQuantity);
       const current = ledgerQuantities(operation, taskQuantity, operationStatus(operation.status));
       let changed = false;
+      // An admin's "Completed by" correction keeps the account's CAM credit under another name.
+      const cam = operationWorkType(operation) === "CAM";
       const allocations = current.allocations.map((allocation) => {
-        if (allocation.userId === userId || (
-          allocation.userId.startsWith("legacy:")
-          && allocation.name.toLocaleLowerCase() === oldName.toLocaleLowerCase()
-        )) {
+        if (allocation.userId === userId && (!cam || isOldName(allocation.name))
+          || allocation.userId.startsWith("legacy:") && isOldName(allocation.name)) {
           changed = true;
+          if (requirementId && !isOldName(allocation.name)) {
+            earlierNames.set(requirementId, (earlierNames.get(requirementId) ?? new Set()).add(allocation.name));
+          }
           return { ...allocation, userId, name: newName };
         }
         return allocation;
       });
       if (!changed) return [];
-      const previousSummaries = new Set([machinistSummary(current.allocations, taskQuantity), String(operation.machinist ?? "").trim()]);
-      return [{ operation, requirementId, allocations, summary: machinistSummary(allocations, taskQuantity), previousSummaries }];
+      return [{ operation, allocations, summary: machinistSummary(allocations, taskQuantity) }];
     });
 
-    for (const { operation, requirementId, allocations, summary, previousSummaries } of renamed) {
+    for (const { operation, allocations, summary } of renamed) {
       patchRow("operations", operation.id, {
         machinist: summary,
         quantity_ledger: JSON.stringify(allocations),
       });
-      if (!requirementId) continue;
-      const requirement = requirements.get(requirementId);
-      if (!requirement) throw new Error("Manufacturing row not found");
-      // The requirement shows the manufacturing operation that last assigned it, so only that
-      // operation's rename carries over; another operation or a CAM task must not replace it.
-      if (previousSummaries.has(String(requirement.machinist ?? "").trim())) {
-        patchRow("requirements", requirementId, { machinist: summary });
-      }
+    }
+
+    // A requirement's assignment names whoever last worked it, possibly from an operation that QC,
+    // Force QC or a correction has since rewritten. Rename this person's entries in place rather
+    // than copying any operation's summary over it.
+    for (const requirement of requirements.values()) {
+      if (frozenRequirements.has(requirement.id)) continue;
+      const assignment = String(requirement.machinist ?? "");
+      const renamedAssignment = renameInSummary(assignment, [oldName, ...(earlierNames.get(requirement.id) ?? [])], newName);
+      if (renamedAssignment !== assignment) patchRow("requirements", requirement.id, { machinist: renamedAssignment });
     }
 
     for (const job of listAllRows("finishing")) {

@@ -10,10 +10,20 @@ export const OPERATION_STATUSES = [
 
 export type OperationStatus = (typeof OPERATION_STATUSES)[number];
 
-export type UserRole = "machinist" | "admin";
+export const USER_ROLES = ["machinist", "admin"] as const;
+export type UserRole = (typeof USER_ROLES)[number];
+
+export interface AppUser {
+  id: string;
+  name: string;
+  email: string | null;
+  role: UserRole;
+  approved: boolean;
+}
+
 export type OperationWorkType = "Manufacturing" | "CAM";
 export type OperationQuantityAction = "claim" | "release" | "complete" | "undo_complete";
-export type FabricationAction = "claim" | "release" | "complete" | "undo_complete" | "steal";
+export type FabricationAction = OperationQuantityAction | "steal";
 
 export interface OperationAllocation {
   userId: string;
@@ -149,7 +159,7 @@ export interface OperationsResponse {
   cotsRequirements?: CotsRequirement[];
   dataVersion?: string;
   syncedAt: string;
-  user: { id: string; name: string; email: string | null; role: UserRole; approved: boolean } | null;
+  user: AppUser | null;
 }
 
 export interface FabricationJob extends QualityLocationFields, ObsoletionFields {
@@ -181,7 +191,7 @@ export interface FabricationResponse {
   jobs: FabricationJob[];
   dataVersion?: string;
   syncedAt: string;
-  user: OperationsResponse["user"];
+  user: AppUser | null;
 }
 
 export interface FabricationActionPatch {

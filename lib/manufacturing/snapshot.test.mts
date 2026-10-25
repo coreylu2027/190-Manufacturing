@@ -143,14 +143,10 @@ function loadSnapshotModule(qualityReviews = reviews) {
   const config = { manufacturingSupabaseConfig: () => ({ url: "https://example.test", serviceKey: "test", fetch: supabaseFetch(qualityReviews) }) };
   const manufacturing = loadModule(new URL("./index.ts", import.meta.url),
     { "server-only": {}, "./supabase-adapter": supabaseAdapter, "./config": config, "./write-adapter": writeAdapter });
-  const qualityServer = loadModule(new URL("../quality-control-server.ts", import.meta.url), {
-    "server-only": {}, "./manufacturing": manufacturing, "./quality-control": qualityControl,
-    "./supabase/admin": { createAdminClient: adminClient },
-  });
   return loadModule<{ getCurrentManufacturingSnapshot(): Promise<{ version: string; snapshot: Snapshot }> }>(
     new URL("./cache.ts", import.meta.url), {
       "server-only": {}, "next/cache": { unstable_cache: (load: unknown) => load },
-      "../quality-control": qualityControl, "../quality-control-server": qualityServer, "./index": manufacturing,
+      "../quality-control": qualityControl, "../supabase/admin": { createAdminClient: adminClient }, "./index": manufacturing,
     });
 }
 

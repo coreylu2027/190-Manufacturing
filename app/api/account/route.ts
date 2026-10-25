@@ -1,23 +1,18 @@
 import { NextResponse } from "next/server";
 
+import { errorResponse, readJson } from "@/lib/api-route";
 import { findShopNameOwner, getAppUser } from "@/lib/auth";
 import { renameMachinistAllocations } from "@/lib/manufacturing";
-import { ManufacturingWriteError } from "@/lib/manufacturing/write-adapter";
 import { formatShopName, shopNameSchema } from "@/lib/profile-name";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
-export async function GET() {
-  const user = await getAppUser();
-  if (!user) return NextResponse.json({ error: "Authentication required" }, { status: 401 });
-  return NextResponse.json({ user });
-}
-
 export async function PATCH(request: Request) {
+  // Any signed-in account may rename; approval is checked below.
   const user = await getAppUser();
   if (!user) return NextResponse.json({ error: "Authentication required" }, { status: 401 });
 
-  const parsed = shopNameSchema.safeParse(await request.json().catch(() => null));
+  const parsed = await readJson(request, shopNameSchema);
   if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message }, { status: 400 });
 
   const displayName = formatShopName(parsed.data.firstName, parsed.data.lastInitial);
@@ -54,10 +49,7 @@ export async function PATCH(request: Request) {
     const { error: authError } = await supabase.auth.updateUser({ data: { full_name: displayName } });
     if (authError) console.error("Unable to mirror the shop name into Auth metadata", authError.message);
   } catch (error) {
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Unable to update profile" },
-      { status: error instanceof ManufacturingWriteError ? error.status : 502 },
-    );
+    return errorResponse(error, "Unable to update profile");
   }
 
   return NextResponse.json({ user: { ...user, name: displayName } });

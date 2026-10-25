@@ -8,12 +8,12 @@ import {
   MAX_DESCRIPTION_LENGTH, MAX_MATERIAL_LENGTH, MAX_NAME_LENGTH, MAX_OVERRIDE_QUANTITY, ROUTING_FIELDS, normalizeFinishColor, routingError,
   type EngineeringOverrideFields, type EngineeringOverrideState, type FinishColor, type OverrideField, type Routing,
 } from "../engineering-overrides.ts";
+import { HttpError } from "../http-error.ts";
 import type { OperationAllocation, OperationStatus } from "../types.ts";
 import type { NormalizedRow } from "./model.ts";
 
-export class EngineeringOverrideError extends Error {
-  status: number;
-  constructor(message: string, status = 409) { super(message); this.status = status; }
+export class EngineeringOverrideError extends HttpError {
+  constructor(message: string, status = 409) { super(message, status); }
 }
 
 export interface OverrideInstruction {

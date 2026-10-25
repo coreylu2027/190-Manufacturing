@@ -1,5 +1,6 @@
 import { queryOptions } from "@tanstack/react-query";
 
+import { errorStatus, requestJson } from "@/lib/request-json";
 import type { OperationsResponse } from "@/lib/types";
 
 /**
@@ -8,18 +9,13 @@ import type { OperationsResponse } from "@/lib/types";
  * redirects only on these AUTH_REQUIRED / APPROVAL_REQUIRED errors.
  */
 async function fetchOperations(): Promise<OperationsResponse> {
-  const response = await fetch("/api/operations", { cache: "no-store" });
-  if (response.status === 401) {
-    throw new Error("AUTH_REQUIRED");
+  try {
+    return await requestJson<OperationsResponse>("/api/operations", { cache: "no-store" }, "Unable to load manufacturing operations");
+  } catch (error) {
+    if (errorStatus(error) === 401) throw new Error("AUTH_REQUIRED");
+    if (errorStatus(error) === 403) throw new Error("APPROVAL_REQUIRED");
+    throw error;
   }
-  if (response.status === 403) {
-    throw new Error("APPROVAL_REQUIRED");
-  }
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    throw new Error(body.error ?? "Unable to load manufacturing operations");
-  }
-  return response.json();
 }
 
 export const operationsQuery = queryOptions({ queryKey: ["operations"], queryFn: fetchOperations });

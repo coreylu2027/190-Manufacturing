@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { getAppUser } from "@/lib/auth";
+import { errorResponse, parseId, readJson, requireUser } from "@/lib/api-route";
 import { applyQuantityAction, patchOperation, stealOperationClaim, updateCamHandoff } from "@/lib/manufacturing";
 import { createNotification } from "@/lib/notifications";
 import { isShopName } from "@/lib/profile-name";
 import { scheduleSlackManufacturingEvent } from "@/lib/slack-notifications";
 import { OPERATION_STATUSES } from "@/lib/types";
-import { ManufacturingWriteError } from "@/lib/manufacturing/write-adapter";
+import { isUserId } from "@/lib/manufacturing/write-adapter";
 import { storageLocationSchema } from "@/lib/storage-locations";
 
 const patchSchema = z.object({
@@ -49,19 +49,13 @@ const camHandoffSchema = z.object({
 const requestSchema = z.union([patchSchema, quantityActionSchema, stealActionSchema, camHandoffSchema]);
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const user = await getAppUser();
-  if (!user) {
-    return NextResponse.json({ error: "Authentication required" }, { status: 401 });
-  }
-  if (!user.approved) {
-    return NextResponse.json({ error: "Account approval required", code: "APPROVAL_REQUIRED" }, { status: 403 });
-  }
+  const { user, response } = await requireUser();
+  if (response) return response;
 
-  const { id } = await params;
-  const operationId = Number(id);
-  if (!Number.isInteger(operationId)) return NextResponse.json({ error: "Invalid operation ID" }, { status: 400 });
+  const operationId = parseId((await params).id);
+  if (operationId === null) return NextResponse.json({ error: "Invalid operation ID" }, { status: 400 });
 
-  const parsed = requestSchema.safeParse(await request.json());
+  const parsed = await readJson(request, requestSchema);
   if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message }, { status: 400 });
 
   const machinist = user.name;
@@ -74,7 +68,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       const operationLabel = stolen.context.workType === "CAM"
         ? `CAM for ${stolen.context.operationNumber}`
         : stolen.context.operationNumber;
-      const recipients = stolen.displaced.filter((claimant) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(claimant.userId));
+      const recipients = stolen.displaced.filter((claimant) => isUserId(claimant.userId));
       // The steal is committed; notification problems are reported in the response, never as a failure.
       const settled = await Promise.allSettled(recipients.map((claimant) => createNotification({
         recipientId: claimant.userId,
@@ -123,7 +117,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       });
     }
     if ("action" in parsed.data && parsed.data.action === "edit_cam_handoff") {
-      if (user?.role !== "admin") {
+      if (user.role !== "admin") {
         return NextResponse.json({ error: "Administrator access required" }, { status: 403 });
       }
       const result = await updateCamHandoff(operationId, parsed.data, user);
@@ -217,9 +211,6 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     }
     return NextResponse.json({ updated });
   } catch (error) {
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Unable to update operation" },
-      { status: error instanceof ManufacturingWriteError ? error.status : 502 },
-    );
+    return errorResponse(error, "Unable to update operation");
   }
 }

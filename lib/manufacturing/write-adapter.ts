@@ -1,6 +1,6 @@
 import { createWritePlan } from "./write-plan.ts";
 import { deduplicateOperations, isFinishingComplete, isPostQcOperation, normalizeOperationStatus } from "../manufacturing-workflow.ts";
-import { createSupabaseManufacturingAdapter, supabaseApiHeaders, type AdapterConfig } from "./supabase-adapter.ts";
+import { createSupabaseManufacturingAdapter, postgrestRpc, type AdapterConfig } from "./supabase-adapter.ts";
 import type { NormalizedRow } from "./model.ts";
 import type { FabricationAction, OperationPatch, OperationQuantityAction, OperationStatus, QualityResult } from "../types.ts";
 import { ROBOT_LOCATION, isStorageLocation, isPrintingOperation, type StorageLocation } from "../storage-locations.ts";
@@ -26,19 +26,20 @@ export interface WriteState {
 type Actor = { id: string; name: string };
 type Plan = ReturnType<typeof createWritePlan>;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+/** Whether an ID is an account's UUID. */
+export function isUserId(id: string) {
+  return UUID_PATTERN.test(id);
+}
+function assertActor(actor: Actor) {
+  if (!isUserId(actor.id) || !actor.name.trim()) throw new ManufacturingWriteError("An authenticated manufacturing actor is required", 401);
+}
 /** The planner rejects workflow-rule violations with plain Errors; they conflict with the current state rather than being upstream failures. */
 function asConflict(error: unknown) {
   return error instanceof Error && error.constructor === Error ? new ManufacturingWriteError(error.message, 409) : error;
 }
 export function createSupabaseWriteAdapter(config: AdapterConfig) {
-  const request = config.fetch ?? fetch;
   async function rpc<T>(name: string, body?: unknown): Promise<T> {
-    const response = await request(`${config.url.replace(/\/$/, "")}/rest/v1/rpc/${name}`, {
-      method: body === undefined ? "GET" : "POST",
-      headers: { ...supabaseApiHeaders(config.serviceKey), "Content-Type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
-      cache: "no-store", redirect: "error", signal: AbortSignal.timeout(30_000),
-    });
+    const response = await postgrestRpc(config, name, { body });
     if (!response.ok) {
       const error = await response.json().catch(() => ({})) as { code?: string; message?: string };
       if (error.code === "40001" || error.code === "PT409" || response.status === 409) {
@@ -57,32 +58,29 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
     }
     return response.json();
   }
+  // A transport failure can occur after commit. Repeat the identical request ID;
+  // the database returns the recorded result instead of applying it twice.
+  async function idempotentRpc<T>(name: string, body: { p_request_id: string; [key: string]: unknown }) {
+    try { return await rpc<T>(name, body); }
+    catch (error) { if (error instanceof ManufacturingWriteError) throw error; return rpc<T>(name, body); }
+  }
   async function transact<T>(
     actor: Actor,
     action: string,
     build: (plan: Plan, state: WriteState) => T,
-    qc: object | ((state: WriteState, result: T) => object | null) | null = null,
+    qc: object | ((result: T) => object) | null = null,
     commitRpc = "manufacturing_commit_with_qc_quantities",
   ) {
-    if (!UUID_PATTERN.test(actor.id) || !actor.name.trim()) throw new ManufacturingWriteError("An authenticated manufacturing actor is required", 401);
+    assertActor(actor);
     const state = await rpc<WriteState>("manufacturing_write_state");
-    const reader = createSupabaseManufacturingAdapter(config);
-    const [parts, assemblies] = await Promise.all([
-      state.rows.parts ?? reader.readEntity("parts"),
-      state.rows.assemblies ?? reader.readEntity("assemblies"),
-    ]);
-    state.rows = { ...state.rows, parts, assemblies };
+    state.rows = await withIdentityRows(state);
     const plan = createWritePlan(state.rows);
     let result: T;
     try { result = build(plan, state); }
     catch (error) { throw asConflict(error); }
-    const qualityPayload = typeof qc === "function" ? qc(state, result) : qc;
-    const body = { p_request_id: crypto.randomUUID(), p_actor: actor.id, p_action: action,
-      p_expected: state.token, p_changes: plan.changes(), p_qc: qualityPayload, p_result: result ?? null };
-    // A transport failure can occur after commit. Repeat the identical request ID;
-    // the database returns the recorded result instead of applying it twice.
-    try { return await rpc<T>(commitRpc, body); }
-    catch (error) { if (error instanceof ManufacturingWriteError) throw error; return rpc<T>(commitRpc, body); }
+    const qualityPayload = typeof qc === "function" ? qc(result) : qc;
+    return idempotentRpc<T>(commitRpc, { p_request_id: crypto.randomUUID(), p_actor: actor.id, p_action: action,
+      p_expected: state.token, p_changes: plan.changes(), p_qc: qualityPayload, p_result: result ?? null });
   }
   function operation(state: WriteState, id: number) {
     const row = state.rows.operations.find(row => row.id === id);
@@ -227,7 +225,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
             postQcWorkReady: releasesPostQcWork(state, plan),
           },
         };
-      }, (_state, review) => ({
+      }, (review) => ({
         requirement_id: requirementId,
         result,
         notes,
@@ -361,7 +359,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
             postQcWorkReady: releasesPostQcWork(state, plan),
           },
         };
-      }, (_state, review) => ({
+      }, (review) => ({
         requirement_id: requirementId,
         result,
         notes,
@@ -371,22 +369,20 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       }));
     },
     async updateRequirementNotes(requirementId: number, notes: string, actor: Actor) {
-      if (!UUID_PATTERN.test(actor.id) || !actor.name.trim()) throw new ManufacturingWriteError("An authenticated manufacturing actor is required", 401);
+      assertActor(actor);
       const state = await rpc<WriteState>("manufacturing_write_state");
       requirement(state, requirementId);
-      const body = {
+      return idempotentRpc<{ requirementId: number; productionNotes: string }>("manufacturing_update_requirement_notes", {
         p_request_id: crypto.randomUUID(),
         p_actor: actor.id,
         p_expected: state.token,
         p_requirement_id: requirementId,
         p_notes: notes,
         p_result: { requirementId, productionNotes: notes },
-      };
-      try { return await rpc<{ requirementId: number; productionNotes: string }>("manufacturing_update_requirement_notes", body); }
-      catch (error) { if (error instanceof ManufacturingWriteError) throw error; return rpc<{ requirementId: number; productionNotes: string }>("manufacturing_update_requirement_notes", body); }
+      });
     },
     async setRequirementObsolete(requirementId: number, obsolete: boolean, expectedVersion: number, actor: Actor) {
-      if (!UUID_PATTERN.test(actor.id) || !actor.name.trim()) throw new ManufacturingWriteError("An authenticated manufacturing actor is required", 401);
+      assertActor(actor);
       const state = await rpc<WriteState>("manufacturing_write_state");
       const row = requirement(state, requirementId);
       if (Number(row.obsoletion_version ?? 0) !== expectedVersion) {
@@ -394,34 +390,25 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       }
       const body = { p_request_id: crypto.randomUUID(), p_actor: actor.id, p_expected: state.token,
         p_requirement_id: requirementId, p_obsolete: obsolete, p_version: expectedVersion };
-      type Result = { requirementId: number; obsolete: boolean; obsoletionVersion: number };
-      const reader = createSupabaseManufacturingAdapter(config);
-      const [parts, assemblies] = await Promise.all([
-        state.rows.parts ?? reader.readEntity("parts"),
-        state.rows.assemblies ?? reader.readEntity("assemblies"),
-      ]);
+      const rows = await withIdentityRows(state);
       const notificationContext = {
-        ...notificationPartContext({ ...state, rows: { ...state.rows, parts, assemblies } }, requirementId),
+        ...notificationPartContext({ ...state, rows }, requirementId),
         previousObsolete: Boolean(row.obsolete),
         revision: String(row.required_part_revision ?? ""),
         location: row.part_location == null ? null : String(row.part_location),
       };
-      let result: Result;
-      try { result = await rpc<Result>("manufacturing_set_requirement_obsolete", body); }
-      catch (error) { if (error instanceof ManufacturingWriteError) throw error; result = await rpc<Result>("manufacturing_set_requirement_obsolete", body); }
+      const result = await idempotentRpc<{ requirementId: number; obsolete: boolean; obsoletionVersion: number }>("manufacturing_set_requirement_obsolete", body);
       return { ...result, notificationContext };
     },
     async setRequirementHidden(requirementId: number, hidden: boolean, expectedVersion: number, actor: Actor) {
-      if (!UUID_PATTERN.test(actor.id) || !actor.name.trim()) throw new ManufacturingWriteError("An authenticated manufacturing actor is required", 401);
+      assertActor(actor);
       const state = await rpc<WriteState>("manufacturing_write_state");
       const row = requirement(state, requirementId);
       if (Number(row.visibility_version ?? 0) !== expectedVersion) throw new ManufacturingWriteError("Visibility changed. Refresh before trying again.", 409);
       if (hidden && !row.obsolete) throw new ManufacturingWriteError("Only obsolete requirements can be hidden", 409);
       const body = { p_request_id: crypto.randomUUID(), p_actor: actor.id, p_expected: state.token,
         p_requirement_id: requirementId, p_hidden: hidden, p_version: expectedVersion };
-      type Result = { requirementId: number; hidden: boolean; visibilityVersion: number };
-      try { return await rpc<Result>("manufacturing_set_requirement_hidden", body); }
-      catch (error) { if (error instanceof ManufacturingWriteError) throw error; return rpc<Result>("manufacturing_set_requirement_hidden", body); }
+      return idempotentRpc<{ requirementId: number; hidden: boolean; visibilityVersion: number }>("manufacturing_set_requirement_hidden", body);
     },
     readEngineeringOverrideState(requirementId: number) {
       return rpc<EngineeringOverrideState>("manufacturing_engineering_override_state", { p_requirement_id: requirementId });
@@ -433,7 +420,7 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       return rpc<EngineeringCorrection[]>("manufacturing_engineering_correction_list", {});
     },
     async applyEngineeringOverrides(requirementId: number, fields: EngineeringOverrideFields, expectedToken: string, reason: string, actor: Actor) {
-      if (!UUID_PATTERN.test(actor.id) || !actor.name.trim()) throw new ManufacturingWriteError("An authenticated manufacturing actor is required", 401);
+      assertActor(actor);
       const [state, overrideState] = await Promise.all([
         rpc<WriteState>("manufacturing_write_state"),
         rpc<EngineeringOverrideState>("manufacturing_engineering_override_state", { p_requirement_id: requirementId }),
@@ -460,21 +447,18 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
       const body = { p_request_id: crypto.randomUUID(), p_actor: actor.id, p_expected: state.token, p_override_token: overrideState.token,
         p_requirement_id: requirementId, p_overrides: plan.overrides, p_changes: plan.changes, p_inserts: plan.inserts,
         p_reason: reason.trim(), p_result: result };
-      try { return await rpc<typeof result>("manufacturing_apply_engineering_overrides", body); }
-      catch (error) { if (error instanceof ManufacturingWriteError) throw error; return rpc<typeof result>("manufacturing_apply_engineering_overrides", body); }
+      return idempotentRpc<typeof result>("manufacturing_apply_engineering_overrides", body);
     },
     async setAttachmentOverride(requirementId: number, kind: OverrideFileKind, file: { name: string; sha256: string; byteSize: number } | null,
       expectedToken: string, reason: string, actor: Actor) {
-      if (!UUID_PATTERN.test(actor.id) || !actor.name.trim()) throw new ManufacturingWriteError("An authenticated manufacturing actor is required", 401);
+      assertActor(actor);
       const state = await rpc<WriteState>("manufacturing_write_state");
       const rows = await withIdentityRows(state);
       requirement(state, requirementId);
       const body = { p_request_id: crypto.randomUUID(), p_actor: actor.id, p_override_token: expectedToken, p_requirement_id: requirementId,
         p_kind: kind, p_file: file && { original_name: file.name, sha256: file.sha256, byte_size: file.byteSize }, p_reason: reason.trim() };
-      type Result = { requirementId: number; kind: OverrideFileKind; file: { name: string; sha256: string; byte_size: number } | null };
-      let result: Result;
-      try { result = await rpc<Result>("manufacturing_set_attachment_override", body); }
-      catch (error) { if (error instanceof ManufacturingWriteError) throw error; result = await rpc<Result>("manufacturing_set_attachment_override", body); }
+      const result = await idempotentRpc<{ requirementId: number; kind: OverrideFileKind; file: { name: string; sha256: string; byte_size: number } | null }>(
+        "manufacturing_set_attachment_override", body);
       return { ...result, notificationContext: notificationPartContext({ ...state, rows }, requirementId) };
     },
     updatePassedQualityNotes(requirementId: number, notes: string, actor: Actor) {

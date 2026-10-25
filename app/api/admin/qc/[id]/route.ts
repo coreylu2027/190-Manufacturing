@@ -1,9 +1,8 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { getAdminActor } from "@/lib/auth";
+import { errorResponse, parseId, readJson, requireUser } from "@/lib/api-route";
 import { recordQualityReview, undoQualityReview, updatePassedQualityNotes } from "@/lib/manufacturing";
-import { ManufacturingWriteError } from "@/lib/manufacturing/write-adapter";
 import { scheduleSlackManufacturingEvent } from "@/lib/slack-notifications";
 import { storageLocationSchema } from "@/lib/storage-locations";
 
@@ -25,16 +24,14 @@ const noteSchema = z.object({
 }).strict();
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const currentUser = await getAdminActor();
-  if (!currentUser) return NextResponse.json({ error: "Authentication required" }, { status: 401 });
-  if (!currentUser.approved || currentUser.role !== "admin") return NextResponse.json({ error: "Administrator access required" }, { status: 403 });
+  const { user, response } = await requireUser({ admin: true });
+  if (response) return response;
 
-  const parsed = reviewSchema.safeParse(await request.json());
+  const parsed = await readJson(request, reviewSchema);
   if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message }, { status: 400 });
 
-  const { id } = await params;
-  const requirementId = Number(id);
-  if (!Number.isInteger(requirementId)) return NextResponse.json({ error: "Invalid production requirement ID" }, { status: 400 });
+  const requirementId = parseId((await params).id);
+  if (requirementId === null) return NextResponse.json({ error: "Invalid production requirement ID" }, { status: 400 });
 
   try {
     const location = parsed.data.result === "passed" ? parsed.data.location ?? null : null;
@@ -42,14 +39,14 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       requirementId,
       parsed.data.result,
       parsed.data.notes,
-      currentUser,
+      user,
       location,
       parsed.data.result === "failed" ? parsed.data.rejectedQuantity : undefined,
     );
     const { notificationContext, ...review } = result;
     scheduleSlackManufacturingEvent({
       type: "qc_reviewed",
-      actorName: currentUser.name,
+      actorName: user.name,
       result: parsed.data.result,
       notes: parsed.data.notes,
       storageLocation: location,
@@ -62,49 +59,45 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     });
     return NextResponse.json({ review });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to record quality review" }, { status: error instanceof ManufacturingWriteError ? error.status : 502 });
+    return errorResponse(error, "Unable to record quality review");
   }
 }
 
 export async function PUT(request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const currentUser = await getAdminActor();
-  if (!currentUser) return NextResponse.json({ error: "Authentication required" }, { status: 401 });
-  if (!currentUser.approved || currentUser.role !== "admin") return NextResponse.json({ error: "Administrator access required" }, { status: 403 });
+  const { user, response } = await requireUser({ admin: true });
+  if (response) return response;
 
-  const parsed = noteSchema.safeParse(await request.json());
+  const parsed = await readJson(request, noteSchema);
   if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message }, { status: 400 });
 
-  const { id } = await params;
-  const requirementId = Number(id);
-  if (!Number.isInteger(requirementId)) return NextResponse.json({ error: "Invalid production requirement ID" }, { status: 400 });
+  const requirementId = parseId((await params).id);
+  if (requirementId === null) return NextResponse.json({ error: "Invalid production requirement ID" }, { status: 400 });
 
   try {
-    const review = await updatePassedQualityNotes(requirementId, parsed.data.notes, currentUser);
+    const review = await updatePassedQualityNotes(requirementId, parsed.data.notes, user);
     return NextResponse.json({ review });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to update inspection notes" }, { status: error instanceof ManufacturingWriteError ? error.status : 502 });
+    return errorResponse(error, "Unable to update inspection notes");
   }
 }
 
 export async function DELETE(_request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const currentUser = await getAdminActor();
-  if (!currentUser) return NextResponse.json({ error: "Authentication required" }, { status: 401 });
-  if (!currentUser.approved || currentUser.role !== "admin") return NextResponse.json({ error: "Administrator access required" }, { status: 403 });
+  const { user, response } = await requireUser({ admin: true });
+  if (response) return response;
 
-  const { id } = await params;
-  const requirementId = Number(id);
-  if (!Number.isInteger(requirementId)) return NextResponse.json({ error: "Invalid production requirement ID" }, { status: 400 });
+  const requirementId = parseId((await params).id);
+  if (requirementId === null) return NextResponse.json({ error: "Invalid production requirement ID" }, { status: 400 });
 
   try {
-    const result = await undoQualityReview(requirementId, currentUser);
+    const result = await undoQualityReview(requirementId, user);
     const { notificationContext, ...review } = result;
     scheduleSlackManufacturingEvent({
       type: "qc_reopened",
-      actorName: currentUser.name,
+      actorName: user.name,
       ...notificationContext,
     });
     return NextResponse.json(review);
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to undo quality review" }, { status: error instanceof ManufacturingWriteError ? error.status : 502 });
+    return errorResponse(error, "Unable to undo quality review");
   }
 }

@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { z } from "zod";
 
+import { HttpError } from "./http-error.ts";
+import { isUserId } from "./manufacturing/write-adapter.ts";
 import * as profileName from "./profile-name.ts";
 import { loadModule } from "./test-module-loader.mts";
 
@@ -12,31 +14,57 @@ function route(path: string, dependencies: Record<string, unknown>, globals: Rec
     new URL(path, import.meta.url), { "next/server": nextServer, ...dependencies }, { process, ...globals });
 }
 
+/** The real route helpers, signed in as whoever `getAppUser` returns. They share this realm's Error so stub errors keep their messages. */
+function apiRoute(getAppUser: () => Promise<unknown>) {
+  return route("./api-route.ts", { "@/lib/auth": { getAppUser }, "@/lib/http-error": { HttpError } }, { Error });
+}
+
+/** Responses built inside a sandbox, as plain JSON for deep comparison. */
+const plain = (value: unknown) => JSON.parse(JSON.stringify(value));
+
+const admin = { id: "admin", name: "Alex A.", approved: true, role: "admin" };
+
 test("only approved admins can hide requirements through the API", async () => {
   let user: { id: string; name: string; approved: boolean; role: string } | null = null;
   let writes = 0;
-  class WriteError extends Error { status = 409; }
   const api = route("../app/api/requirements/[id]/visibility/route.ts", {
     zod: { z },
-    "@/lib/auth": { getAppUser: async () => user },
+    "@/lib/api-route": apiRoute(async () => user),
     "@/lib/manufacturing": { setRequirementHidden: async () => { writes++; return { hidden: true, visibilityVersion: 1 }; } },
-    "@/lib/manufacturing/write-adapter": { ManufacturingWriteError: WriteError },
   });
   const send = (body: unknown = { hidden: true, expectedVersion: 0 }, id = "20") => api.PUT(
-    new Request("https://example.com/api/requirements/20/visibility", { method: "PUT", body: JSON.stringify(body) }),
+    new Request("https://example.com/api/requirements/20/visibility", { method: "PUT", body: typeof body === "string" ? body : JSON.stringify(body) }),
     { params: Promise.resolve({ id }) },
   );
-  assert.equal((await send()).status, 401);
+  assert.deepEqual(plain(await send()), { status: 401, body: { error: "Authentication required" } });
   user = { id: "admin", name: "Alex A.", approved: true, role: "machinist" };
-  assert.equal((await send()).status, 403);
+  assert.deepEqual(plain(await send()), { status: 403, body: { error: "Administrator access required" } });
   user = { ...user, role: "admin", approved: false };
-  assert.equal((await send()).status, 403);
+  assert.deepEqual(plain(await send()), { status: 403, body: { error: "Administrator access required" } });
   user = { ...user, approved: true };
   assert.equal((await send({ hidden: true })).status, 400);
+  assert.equal((await send("{not json")).status, 400);
   assert.equal((await send(undefined, "NaN")).status, 400);
+  assert.equal((await send(undefined, "0")).status, 400);
   assert.equal(writes, 0);
   assert.equal((await send()).status, 200);
   assert.equal(writes, 1);
+});
+
+test("route helpers keep the approval code and map only HTTP errors to their status", async () => {
+  let user: unknown = { id: "pat", name: "Pat P.", approved: false, role: "machinist" };
+  const helpers = apiRoute(async () => user) as unknown as {
+    requireUser(options?: { admin?: boolean }): Promise<{ response?: { status: number; body: unknown } }>;
+    parseId(raw: string): number | null;
+    errorResponse(error: unknown, fallback: string): { status: number; body: unknown };
+  };
+  assert.deepEqual(plain((await helpers.requireUser()).response), { status: 403, body: { error: "Account approval required", code: "APPROVAL_REQUIRED" } });
+  user = null;
+  assert.deepEqual(plain((await helpers.requireUser({ admin: true })).response), { status: 401, body: { error: "Authentication required" } });
+  assert.deepEqual(plain(["7", "0", "-3", "1.5", "", "9007199254740993"].map(helpers.parseId)), [7, null, null, null, null, null]);
+  assert.deepEqual(plain(helpers.errorResponse(new HttpError("Gone", 410), "x")), { status: 410, body: { error: "Gone" } });
+  assert.deepEqual(plain(helpers.errorResponse(new Error("Upstream"), "x")), { status: 502, body: { error: "Upstream" } });
+  assert.deepEqual(plain(helpers.errorResponse("odd", "Fallback")), { status: 502, body: { error: "Fallback" } });
 });
 
 test("normal lists omit hidden work while admins can retrieve the production archive", async () => {
@@ -44,7 +72,7 @@ test("normal lists omit hidden work while admins can retrieve the production arc
   const visible = { id: 1, hidden: false };
   const hidden = { id: 2, hidden: true };
   const dependencies = {
-    "@/lib/auth": { getAppUser: async () => ({ approved: true, role }) },
+    "@/lib/api-route": apiRoute(async () => ({ approved: true, role })),
     "@/lib/manufacturing/cache": { getCurrentManufacturingSnapshot: async () => ({ version: "1", snapshot: { operations: [visible, hidden], jobs: [visible, hidden], cotsRequirements: [visible, hidden] } }) },
   };
   const operations = route("../app/api/operations/route.ts", dependencies);
@@ -86,14 +114,16 @@ function profileClient(profiles: Profile[], options: { failUpdates?: boolean } =
 type AuthModule = {
   getAppUser: () => Promise<{ name: string; approved: boolean }>;
   findShopNameOwner: (admin: unknown, name: string, exceptUserId: string) => Promise<string | null>;
+  accountName: (user: unknown, profile: unknown, lastResort?: string) => string;
 };
 
 function loadAuth(currentUser: { id: string; email: string; user_metadata: Record<string, string> }, profiles: Profile[]) {
   const { client } = profileClient(profiles);
+  const session = { ...client, auth: { getUser: async () => ({ data: { user: currentUser } }) } };
   return route("./auth.ts", {
     "server-only": {},
     "@/lib/supabase/admin": { createAdminClient: () => null },
-    "@/lib/supabase/server": { createClient: async () => client, getCurrentUser: async () => currentUser },
+    "@/lib/supabase/server": { createClient: async () => session },
   }) as unknown as AuthModule;
 }
 
@@ -129,9 +159,9 @@ test("renaming refuses taken names, moves work for approved accounts, and lets a
   const ok = profileClient(profiles);
   const failing = profileClient(profiles, { failUpdates: true });
   const api = route("../app/api/account/route.ts", {
+    "@/lib/api-route": apiRoute(async () => user),
     "@/lib/auth": { getAppUser: async () => user, findShopNameOwner: auth.findShopNameOwner },
     "@/lib/manufacturing": { renameMachinistAllocations: async (...args: unknown[]) => { renames.push(args); } },
-    "@/lib/manufacturing/write-adapter": { ManufacturingWriteError: class extends Error {} },
     "@/lib/profile-name": profileName,
     "@/lib/supabase/admin": { createAdminClient: () => (failUpdates ? failing : ok).client },
     "@/lib/supabase/server": { createClient: async () => ({ auth: { updateUser: async () => ({ error: null }) } }) },
@@ -180,11 +210,9 @@ test("approval keeps the profile shop name and refuses a duplicate of any accoun
   const auth = loadAuth({ id: "x", email: "x@example.com", user_metadata: {} }, []);
   const api = route("../app/api/admin/users/[id]/route.ts", {
     zod: { z },
-    "@/lib/auth": {
-      APP_ROLES: ["machinist", "admin"],
-      findShopNameOwner: auth.findShopNameOwner,
-      getAdminActor: async () => ({ id: "admin", name: "Alex A.", approved: true, role: "admin" }),
-    },
+    "@/lib/api-route": apiRoute(async () => admin),
+    "@/lib/auth": { accountName: auth.accountName, findShopNameOwner: auth.findShopNameOwner },
+    "@/lib/types": { USER_ROLES: ["machinist", "admin"] },
     "@/lib/supabase/admin": {
       createAdminClient: () => ({
         ...client,
@@ -210,21 +238,22 @@ test("QC routes forward the adapter's post-QC readiness instead of guessing from
   const events: Array<Record<string, unknown>> = [];
   const api = route("../app/api/admin/qc/[id]/route.ts", {
     zod: { z },
-    "@/lib/auth": { getAdminActor: async () => ({ id: "admin", name: "Alex A.", approved: true, role: "admin" }) },
+    "@/lib/api-route": apiRoute(async () => admin),
     "@/lib/manufacturing": {
       recordQualityReview: async (_id: number, result: string) => ({
         requirementId: 20, result, rejectedQuantity: result === "failed" ? 2 : null,
         notificationContext: { requirementId: 20, previousRequirementStatus: "Ready for QC", requirementStatus: "Ready for Manufacturing", postQcWorkReady: result === "passed" },
       }),
     },
-    "@/lib/manufacturing/write-adapter": { ManufacturingWriteError: class extends Error {} },
     "@/lib/slack-notifications": { scheduleSlackManufacturingEvent: (event: Record<string, unknown>) => events.push(event) },
     "@/lib/storage-locations": { storageLocationSchema: z.string() },
   });
   const review = (body: unknown) => api.PATCH(
-    new Request("https://example.com/api/admin/qc/20", { method: "PATCH", body: JSON.stringify(body) }),
+    new Request("https://example.com/api/admin/qc/20", { method: "PATCH", body: typeof body === "string" ? body : JSON.stringify(body) }),
     { params: Promise.resolve({ id: "20" }) },
   );
+  // A malformed body is a bad request, not an unhandled server error.
+  assert.equal((await review("{")).status, 400);
   assert.equal((await review({ result: "failed", notes: "Bad bore" })).status, 200);
   assert.equal(events[0].postQcWorkReady, false);
   assert.equal((await review({ result: "passed" })).status, 200);
@@ -235,7 +264,7 @@ test("Force QC forwards post-QC readiness and the rejected quantity to Slack", a
   const events: Array<Record<string, unknown>> = [];
   const api = route("../app/api/admin/qc/[id]/force/route.ts", {
     zod: { z },
-    "@/lib/auth": { getAdminActor: async () => ({ id: "admin", name: "Alex A.", approved: true, role: "admin" }) },
+    "@/lib/api-route": apiRoute(async () => admin),
     "@/lib/manufacturing": {
       previewForceQuality: async () => ({}),
       forceQualityReview: async (_id: number, _notes: string, _token: string, _actor: unknown, result: string) => ({
@@ -243,7 +272,6 @@ test("Force QC forwards post-QC readiness and the rejected quantity to Slack", a
         notificationContext: { requirementId: 20, previousRequirementStatus: "Ready for Manufacturing", requirementStatus: "Ready for Manufacturing", postQcWorkReady: result === "passed" },
       }),
     },
-    "@/lib/manufacturing/write-adapter": { ManufacturingWriteError: class extends Error {} },
     "@/lib/slack-notifications": { scheduleSlackManufacturingEvent: (event: Record<string, unknown>) => events.push(event) },
   });
   const force = (body: unknown) => api.POST(
@@ -267,7 +295,7 @@ test("a committed steal still succeeds when notifying a displaced claimant fails
   ];
   const api = route("../app/api/operations/[id]/route.ts", {
     zod: { z },
-    "@/lib/auth": { getAppUser: async () => ({ id: "alex", name: "Alex A.", approved: true, role: "machinist" }) },
+    "@/lib/api-route": apiRoute(async () => ({ id: "alex", name: "Alex A.", approved: true, role: "machinist" })),
     "@/lib/manufacturing": {
       stealOperationClaim: async () => ({
         updated: { id: 10, status: "In Progress" },
@@ -284,7 +312,7 @@ test("a committed steal still succeeds when notifying a displaced claimant fails
     "@/lib/profile-name": profileName,
     "@/lib/slack-notifications": { scheduleSlackManufacturingEvent: (event: Record<string, unknown>) => events.push(event) },
     "@/lib/types": { OPERATION_STATUSES: ["Planned", "Ready", "In Progress", "Blocked", "Complete"] },
-    "@/lib/manufacturing/write-adapter": { ManufacturingWriteError: class extends Error {} },
+    "@/lib/manufacturing/write-adapter": { isUserId },
     "@/lib/storage-locations": { storageLocationSchema: z.string() },
   }, { console: { error: (...args: unknown[]) => errors.push(args) } });
   const response = await api.PATCH(
@@ -292,9 +320,51 @@ test("a committed steal still succeeds when notifying a displaced claimant fails
     { params: Promise.resolve({ id: "10" }) },
   );
   assert.equal(response.status, 200);
-  // The body was built inside the sandbox, so compare its plain JSON shape.
-  assert.deepEqual(JSON.parse(JSON.stringify(response.body.notificationDelivery)),
+  assert.deepEqual(plain(response.body.notificationDelivery),
     { alertsStored: 1, emailsSent: 1, emailsFailed: 1, emailsSkipped: 0, unmappedRecipients: 0 });
   assert.equal(events.length, 1);
   assert.equal(errors.length, 1);
+});
+
+test("operation and finishing file routes keep their messages and pass stored-file errors through", async () => {
+  class FileError extends HttpError {}
+  type Handler = (request: Request, context: { params: Promise<Record<string, string>> }) => Promise<unknown>;
+  const stored: unknown[][] = [];
+  let failure: Error | null = null;
+  const routes = route("./manufacturing/file-routes.ts", {
+    "server-only": {},
+    "@/lib/api-route": apiRoute(async () => ({ id: "alex", name: "Alex A.", approved: true, role: "machinist" })),
+    "./cache": {
+      getCurrentManufacturingSnapshot: async () => ({ snapshot: {
+        operations: [{ id: 1, requirementId: 20, partNumber: "P-1" }, { id: 2, requirementId: null, partNumber: "P-2" }],
+        jobs: [{ id: 3, requirementId: 30, partNumber: "P-3" }],
+      } }),
+    },
+    "./files": {
+      ManufacturingFileError: FileError,
+      storedManufacturingFileResponse: async (...args: unknown[]) => { if (failure) throw failure; stored.push(args); return { status: 200 }; },
+      storedManufacturingPreviewResponse: async (requirementId: number) => { if (failure) throw failure; stored.push([requirementId]); return { status: 200 }; },
+    },
+  }, { Error }) as unknown as { workItemFileRoute(source: string): Handler; workItemPreviewRoute(source: string): Handler };
+  const request = new Request("https://example.com/");
+  const file = async (source: string, id: string, kind = "drawing-pdf") =>
+    plain(await routes.workItemFileRoute(source)(request, { params: Promise.resolve({ id, kind }) }));
+  const preview = async (source: string, id: string) =>
+    plain(await routes.workItemPreviewRoute(source)(request, { params: Promise.resolve({ id }) }));
+
+  assert.deepEqual(await file("operations", "x"), { status: 400, body: { error: "Invalid operation ID" } });
+  assert.deepEqual(await preview("jobs", "0"), { status: 400, body: { error: "Invalid finishing job ID" } });
+  assert.deepEqual(await file("jobs", "3", "zip"), { status: 400, body: { error: "Invalid file type" } });
+  assert.deepEqual(await file("operations", "9"), { status: 404, body: { error: "Operation not found" } });
+  assert.deepEqual(await preview("jobs", "9"), { status: 404, body: { error: "Finishing job not found" } });
+  assert.deepEqual(await file("operations", "2"), { status: 404, body: { error: "File not found" } });
+  assert.deepEqual(await preview("operations", "2"), { status: 404, body: { error: "Preview not found" } });
+  assert.deepEqual(await file("jobs", "3", "step"), { status: 200 });
+  assert.deepEqual(await preview("operations", "1"), { status: 200 });
+  assert.deepEqual(stored, [[30, "step", "P-3.step"], [20]]);
+  // The preview pane shows a 404 as "not available yet", so a stored-file error must keep its status.
+  failure = new FileError("A 3D preview has not been generated for this part", 404);
+  assert.deepEqual(await preview("jobs", "3"), { status: 404, body: { error: "A 3D preview has not been generated for this part" } });
+  failure = new Error("Storage offline");
+  assert.deepEqual(await file("operations", "1"), { status: 502, body: { error: "Storage offline" } });
 });

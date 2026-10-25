@@ -1,5 +1,6 @@
 import "server-only";
 
+import { HttpError } from "@/lib/http-error";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { manufacturingContentDisposition, safeManufacturingFileName } from "./file-names";
 
@@ -23,11 +24,7 @@ interface StoredPreview {
   source_sha256: string;
 }
 
-export class ManufacturingFileError extends Error {
-  constructor(message: string, readonly status: number) {
-    super(message);
-  }
-}
+export class ManufacturingFileError extends HttpError {}
 
 function validStoredFile(value: unknown): value is StoredFile {
   if (!value || typeof value !== "object") return false;
