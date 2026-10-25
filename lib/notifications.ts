@@ -36,7 +36,9 @@ async function updateEmailDelivery(
   // A simultaneous webhook attempt may fail after another delivery succeeded.
   if (values.email_status !== "sent") update = update.neq("email_status", "sent");
   const { error } = await update;
-  if (error) throw new Error(error.message);
+  // Bookkeeping only: the alert is stored and the email outcome is already known, so a failed
+  // status write must not turn the caller's committed work into an error.
+  if (error) console.error("Unable to record notification email delivery", notificationId, error.message);
 }
 
 export async function createNotification(input: CreateNotificationInput): Promise<NotificationDeliveryResult> {

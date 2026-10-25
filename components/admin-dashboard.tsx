@@ -1,10 +1,10 @@
 "use client";
 
-import { themeQuartz, type ColDef } from "ag-grid-community";
+import type { ColDef } from "ag-grid-community";
 import { AgGridReact } from "ag-grid-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Clock3, Search, ShieldCheck, SlidersHorizontal, UserCheck, Users } from "lucide-react";
-import { useCallback, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { EngineeringCorrectionsReport } from "@/components/engineering-corrections-report";
@@ -13,6 +13,10 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { FILTERABLE_COL_DEF, workspaceGridTheme } from "@/components/workspace-grid";
+import { EmptyState, StatTiles } from "@/components/workspace-ui";
+import { formatShortDateTime } from "@/lib/date-format";
+import { requestJson } from "@/lib/request-json";
 import type { AdminResponse, AdminUserSummary, UserRole } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -22,46 +26,19 @@ interface AdminUserGridRow extends AdminUserSummary {
   draftRole: UserRole;
 }
 
-const gridTheme = themeQuartz.withParams({
-  accentColor: "var(--primary)",
-  backgroundColor: "var(--card)",
-  borderColor: "var(--border)",
-  foregroundColor: "var(--foreground)",
-  headerBackgroundColor: "var(--muted)",
-  headerTextColor: "var(--muted-foreground)",
-  rowHoverColor: "var(--muted)",
-  selectedRowBackgroundColor: "var(--accent)",
-  fontFamily: "var(--font-geist-sans), ui-sans-serif",
-  fontSize: 13,
-  headerFontSize: 11,
-  headerFontWeight: 650,
-  rowHeight: 72,
-  headerHeight: 42,
-  wrapperBorderRadius: 0,
-  spacing: 6,
-});
+const gridTheme = workspaceGridTheme(72);
+// Action cells read the pending state from context: putting it in cellRendererParams would rebuild
+// columnDefs on every access change, and new columnDefs reset the user's column widths.
+const UserUpdatePending = createContext(false);
 
-async function fetchAdmin(): Promise<AdminResponse> {
-  const response = await fetch("/api/admin", { cache: "no-store" });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error ?? "Unable to load the admin workspace");
-  return body;
+function fetchAdmin() {
+  return requestJson<AdminResponse>("/api/admin", { cache: "no-store" }, "Unable to load the admin workspace");
 }
 
-async function updateUser(user: AdminUserSummary, role: UserRole, approved: boolean) {
-  const response = await fetch(`/api/admin/users/${user.id}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ role, approved }),
-  });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error ?? "Unable to update the account");
-  return body;
-}
-
-function formatDate(value: string | null) {
-  if (!value) return "Never";
-  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(value));
+function updateUser(user: AdminUserSummary, role: UserRole, approved: boolean) {
+  return requestJson(`/api/admin/users/${user.id}`, {
+    method: "PATCH", body: JSON.stringify({ role, approved }),
+  }, "Unable to update the account");
 }
 
 function AccountCell({ data }: { data?: AdminUserGridRow }) {
@@ -88,7 +65,7 @@ function ApprovalCell({ value }: { value: boolean }) {
 }
 
 function DateCell({ value }: { value: string | null }) {
-  return <div className="flex h-full items-center text-xs text-muted-foreground">{formatDate(value)}</div>;
+  return <div className="flex h-full items-center text-xs text-muted-foreground">{formatShortDateTime(value, "Never")}</div>;
 }
 
 function RoleCell({ data, onChange }: { data?: AdminUserGridRow; onChange: (id: string, role: UserRole) => void }) {
@@ -105,13 +82,12 @@ function RoleCell({ data, onChange }: { data?: AdminUserGridRow; onChange: (id: 
 
 function ActionCell({
   data,
-  pending,
   onUpdate,
 }: {
   data?: AdminUserGridRow;
-  pending: boolean;
   onUpdate: (user: AdminUserSummary, role: UserRole, approved: boolean) => void;
 }) {
+  const pending = useContext(UserUpdatePending);
   if (!data) return null;
   return (
     <div className="flex h-full items-center justify-end gap-2">
@@ -187,11 +163,10 @@ export function AdminDashboard() {
       resizable: false,
       cellRenderer: ActionCell,
       cellRendererParams: {
-        pending: mutationIsPending,
         onUpdate: (user: AdminUserSummary, role: UserRole, approved: boolean) => mutateUser({ user, role, approved }),
       },
     },
-  ], [mutateUser, mutationIsPending, updateRoleDraft]);
+  ], [mutateUser, updateRoleDraft]);
 
   const clearFilters = () => {
     setSearch("");
@@ -207,17 +182,10 @@ export function AdminDashboard() {
           <h1 className="text-3xl font-bold tracking-[-.035em] md:text-[2.55rem]">Access control</h1>
           <p className="mt-1.5 max-w-2xl text-sm leading-6 text-muted-foreground">Approve new team members and assign their shop role.</p>
         </div>
-        <div className="grid grid-cols-2 gap-2">
-          {[
-            { label: "Pending users", value: stats.pendingUsers, icon: Clock3, tone: "bg-amber-50 text-amber-800 dark:bg-amber-400/15 dark:text-amber-300" },
-            { label: "Approved", value: stats.approvedUsers, icon: Users, tone: "bg-blue-50 text-blue-700 dark:bg-blue-400/15 dark:text-blue-300" },
-          ].map(({ label, value, icon: Icon, tone }) => (
-            <div key={label} className="flex min-w-32 items-center gap-3 rounded-xl border bg-card px-3 py-2.5 shadow-sm">
-              <div className={cn("grid size-8 place-items-center rounded-lg", tone)}><Icon className="size-4" /></div>
-              <div><div className="text-lg font-bold leading-none">{value}</div><div className="mt-1 text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{label}</div></div>
-            </div>
-          ))}
-        </div>
+        <StatTiles className="grid grid-cols-2 gap-2" items={[
+          { label: "Pending users", value: stats.pendingUsers, icon: Clock3, tone: "bg-amber-50 text-amber-800 dark:bg-amber-400/15 dark:text-amber-300" },
+          { label: "Approved", value: stats.approvedUsers, icon: Users, tone: "bg-blue-50 text-blue-700 dark:bg-blue-400/15 dark:text-blue-300" },
+        ]} />
       </div>
 
       <div className="overflow-hidden rounded-2xl border bg-card shadow-[0_14px_42px_rgba(15,23,42,.055)]">
@@ -246,31 +214,33 @@ export function AdminDashboard() {
         {query.isPending ? (
           <div className="space-y-3 p-5">{Array.from({ length: 7 }).map((_, index) => <Skeleton key={index} className="h-14 w-full" />)}</div>
         ) : query.isError && !query.data ? (
-          <div className="grid min-h-80 place-items-center p-6 text-center"><div><ShieldCheck className="mx-auto mb-3 size-10 text-destructive" /><h2 className="font-semibold">Couldn’t load the admin workspace</h2><p className="mt-1 text-sm text-muted-foreground">{query.error.message}</p><Button className="mt-4" onClick={() => query.refetch()}>Try again</Button></div></div>
+          <EmptyState icon={ShieldCheck} iconClassName="size-10 text-destructive" title="Couldn’t load the admin workspace" message={query.error.message}><Button className="mt-4" onClick={() => query.refetch()}>Try again</Button></EmptyState>
         ) : users.length === 0 ? (
-          <div className="grid min-h-60 place-items-center p-6 text-center"><div><Users className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h3 className="font-semibold">No users to manage</h3><p className="mt-1 text-sm text-muted-foreground">Registered accounts will appear here.</p></div></div>
+          <EmptyState className="min-h-60" icon={Users} iconClassName="size-10 text-muted-foreground/60" titleAs="h3" title="No users to manage" message="Registered accounts will appear here." />
         ) : filteredUsers.length === 0 ? (
-          <div className="grid min-h-80 place-items-center p-6 text-center"><div><Search className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h2 className="font-semibold">No users match</h2><p className="mt-1 text-sm text-muted-foreground">Try another access status or role, or clear the search.</p><Button variant="outline" className="mt-4" onClick={clearFilters}>Clear filters</Button></div></div>
+          <EmptyState icon={Search} iconClassName="size-10 text-muted-foreground/60" title="No users match" message="Try another access status or role, or clear the search."><Button variant="outline" className="mt-4" onClick={clearFilters}>Clear filters</Button></EmptyState>
         ) : (
           <>
             <div className="hidden h-[min(59vh,680px)] min-h-[430px] md:block">
-              <AgGridReact<AdminUserGridRow>
-                theme={gridTheme}
-                rowData={filteredUsers}
-                columnDefs={columnDefs}
-                defaultColDef={{ sortable: true, filter: true, resizable: true }}
-                getRowId={({ data }) => data.id}
-                pagination
-                paginationPageSize={25}
-                paginationPageSizeSelector={[10, 25, 50]}
-                animateRows
-              />
+              <UserUpdatePending value={mutationIsPending}>
+                <AgGridReact<AdminUserGridRow>
+                  theme={gridTheme}
+                  rowData={filteredUsers}
+                  columnDefs={columnDefs}
+                  defaultColDef={FILTERABLE_COL_DEF}
+                  getRowId={({ data }) => data.id}
+                  pagination
+                  paginationPageSize={25}
+                  paginationPageSizeSelector={[10, 25, 50]}
+                  animateRows
+                />
+              </UserUpdatePending>
             </div>
             <div className="divide-y md:hidden">
               {filteredUsers.map((user) => (
                 <article key={user.id} className="p-4">
                   <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0"><div className="flex items-center gap-2"><h3 className="truncate font-semibold">{user.name}</h3><Badge variant="outline" className={user.approved ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-400/30 dark:bg-emerald-400/15 dark:text-emerald-200" : "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-400/30 dark:bg-amber-400/15 dark:text-amber-200"}>{user.approved ? "Approved" : "Pending"}</Badge></div><p className="mt-1 truncate text-xs text-muted-foreground">{user.email}</p><p className="mt-1 text-[11px] text-muted-foreground">Joined {formatDate(user.createdAt)} · Last opened {formatDate(user.lastSeenAt)}</p></div>
+                    <div className="min-w-0"><div className="flex items-center gap-2"><h3 className="truncate font-semibold">{user.name}</h3><Badge variant="outline" className={user.approved ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-400/30 dark:bg-emerald-400/15 dark:text-emerald-200" : "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-400/30 dark:bg-amber-400/15 dark:text-amber-200"}>{user.approved ? "Approved" : "Pending"}</Badge></div><p className="mt-1 truncate text-xs text-muted-foreground">{user.email}</p><p className="mt-1 text-[11px] text-muted-foreground">Joined {formatShortDateTime(user.createdAt, "Never")} · Last opened {formatShortDateTime(user.lastSeenAt, "Never")}</p></div>
                     <UserCheck className={cn("mt-1 size-5 shrink-0", user.approved ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground")} />
                   </div>
                   <div className="mt-3 flex items-center gap-2">

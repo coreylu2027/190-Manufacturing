@@ -1,22 +1,10 @@
 // Manufacturing workflow planning is pure; all I/O is committed by the Supabase transaction adapter.
-import { deduplicateOperations, isPostQcOperation, planRequirementWorkflow, targetMachineHasStarted, validateCamAction } from '../manufacturing-workflow.ts';
-import type { FabricationAction, ManufacturingOperation, OperationAllocation, OperationPatch, OperationQuantityAction, OperationStatus, OperationWorkType, QualityResult } from '../types.ts';
-import { ENTITIES, runtimeRow, normalizeRow, type NormalizedRow, type RawRow } from './model.ts';
+import { deduplicateOperations, isFinishingComplete, isPostQcOperation, normalizeOperationStatus, planRequirementWorkflow, targetMachineHasStarted, validateCamAction } from "../manufacturing-workflow.ts";
+import type { FabricationAction, ManufacturingOperation, OperationAllocation, OperationPatch, OperationQuantityAction, OperationStatus, OperationWorkType, QualityResult } from "../types.ts";
+import { SHOP_COLUMNS, shopColumnValue, type NormalizedRow, type ShopEntity } from "./model.ts";
 import { notificationPartContext } from "./identity.ts";
-type SourceRow = RawRow;
-function canonicalRows(rows: RawRow[]) {
-  return deduplicateOperations(rows.filter(row => row["Active in Routing"]).map(row => ({
-    id: row.id, operationKey: String(row.Operation ?? ""), workType: operationWorkType(row),
-    status: operationStatus(row.Status),
-    claimedQuantity: Number(row["Claimed Quantity"] ?? 0), completedQuantity: Number(row["Completed Quantity"] ?? 0),
-    startedAt: row["Started At"] as string | null, completedAt: row["Completed At"] as string | null, row,
-  }))).map(item => item.row);
-}
-export interface DisplacedClaimant {
-  userId: string;
-  name: string;
-  quantity: number;
-}
+import { assertValidLedger, fabricationStatus, linkedId, operationWorkType, quantitiesForRow, selectValue, taskQuantityForRow, textValue } from "./rows.ts";
+
 export interface StolenOperationContext {
   operationId: number;
   requirementId: number;
@@ -28,91 +16,22 @@ export interface StolenOperationContext {
   machine: string;
   quantity: number;
 }
-function selectValue(value: unknown, fallback = ""): string {
-  return typeof value === "object" && value !== null && "value" in value
-    ? String((value as { value: unknown }).value ?? fallback)
-    : fallback;
-}
-function operationWorkType(row: SourceRow): OperationWorkType {
-  return selectValue(row["Work Type"], "Manufacturing") === "CAM" ? "CAM" : "Manufacturing";
-}
-function taskQuantityForRow(row: SourceRow, requiredQuantity: number) {
-  return operationWorkType(row) === "CAM" ? 1 : requiredQuantity;
-}
-function linkedId(value: unknown): number | null {
-  return Array.isArray(value) && value[0] && typeof value[0] === "object" && "id" in value[0]
-    ? Number((value[0] as { id: unknown }).id)
-    : null;
-}
-function textValue(value: unknown): string {
-  if (typeof value === "string") return value.trim();
-  if (Array.isArray(value) && value[0] && typeof value[0] === "object" && "value" in value[0]) {
-    return String((value[0] as { value: unknown }).value ?? "").trim();
-  }
-  return "";
-}
+
 function operationStatus(value: unknown): OperationStatus {
-  const status = selectValue(value, "Planned");
-  return (status === "Needs Rework" ? "Ready" : status) as OperationStatus;
+  return normalizeOperationStatus(selectValue(value, "Planned"));
 }
-function parseQuantityLedger(value: unknown): OperationAllocation[] {
-  if (typeof value !== "string" || !value.trim()) return [];
-  try {
-    const parsed: unknown = JSON.parse(value);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.flatMap((item): OperationAllocation[] => {
-      if (!item || typeof item !== "object") return [];
-      const allocation = item as Record<string, unknown>;
-      const userId = String(allocation.userId ?? "");
-      const name = String(allocation.name ?? "");
-      const claimed = Math.max(0, Math.floor(Number(allocation.claimed ?? 0)));
-      const completed = Math.max(0, Math.floor(Number(allocation.completed ?? 0)));
-      return userId && name && (claimed > 0 || completed > 0) ? [{ userId, name, claimed, completed }] : [];
-    });
-  } catch {
-    return [];
-  }
+function canonicalRows(rows: NormalizedRow[]) {
+  return deduplicateOperations(rows.filter(row => row.active_in_routing).map(row => ({
+    id: row.id, operationKey: String(row.operation_key ?? ""), workType: operationWorkType(row),
+    status: operationStatus(row.status),
+    claimedQuantity: Number(row.claimed_quantity ?? 0), completedQuantity: Number(row.completed_quantity ?? 0),
+    startedAt: row.started_at as string | null, completedAt: row.completed_at as string | null, row,
+  }))).map(item => item.row);
 }
-function quantitiesForRow(row: SourceRow, requiredQuantity: number, status: OperationStatus) {
-  const rawLedger = row["Quantity Ledger"];
-  if (typeof rawLedger === "string" && rawLedger.trim()) {
-    const ledger: unknown = JSON.parse(rawLedger);
-    if (!Array.isArray(ledger) || ledger.some(a => !a || !a.userId || !a.name ||
-      !Number.isSafeInteger(a.claimed) || a.claimed < 0 || !Number.isSafeInteger(a.completed) || a.completed < 0)) {
-      throw new Error("Invalid existing quantity ledger; reconciliation is required before editing");
-    }
-  }
-  let allocations = parseQuantityLedger(row["Quantity Ledger"]);
-  const hasStoredClaimed = row["Claimed Quantity"] !== null && row["Claimed Quantity"] !== undefined && row["Claimed Quantity"] !== "";
-  const hasStoredCompleted = row["Completed Quantity"] !== null && row["Completed Quantity"] !== undefined && row["Completed Quantity"] !== "";
-  const storedClaimed = Number(row["Claimed Quantity"]);
-  const storedCompleted = Number(row["Completed Quantity"]);
-  const claimedFallback = hasStoredClaimed && Number.isFinite(storedClaimed)
-    ? Math.max(0, Math.floor(storedClaimed))
-    : status === "In Progress" ? requiredQuantity : 0;
-  const completedFallback = hasStoredCompleted && Number.isFinite(storedCompleted)
-    ? Math.max(0, Math.floor(storedCompleted))
-    : status === "Complete" ? requiredQuantity : 0;
-
-  if (allocations.length === 0 && (claimedFallback > 0 || completedFallback > 0)) {
-    const legacyName = String(row.Machinist ?? "").trim() || "Legacy assignment";
-    allocations = [{
-      userId: `legacy:${legacyName.toLocaleLowerCase()}`,
-      name: legacyName,
-      claimed: claimedFallback,
-      completed: completedFallback,
-    }];
-  }
-
-  const claimedQuantity = allocations.reduce((sum, allocation) => sum + allocation.claimed, 0);
-  const completedQuantity = allocations.reduce((sum, allocation) => sum + allocation.completed, 0);
-  const canClaim = ["Ready", "In Progress"].includes(status);
-  return {
-    allocations,
-    claimedQuantity,
-    completedQuantity,
-    availableQuantity: canClaim ? Math.max(0, requiredQuantity - claimedQuantity - completedQuantity) : 0,
-  };
+/** Like quantitiesForRow, but refuses to edit a ledger that is not valid. */
+function ledgerQuantities(row: NormalizedRow, requiredQuantity: number, status: OperationStatus) {
+  assertValidLedger(row);
+  return quantitiesForRow(row, requiredQuantity, status);
 }
 function machinistSummary(allocations: OperationAllocation[], requiredQuantity: number) {
   return allocations
@@ -121,6 +40,14 @@ function machinistSummary(allocations: OperationAllocation[], requiredQuantity: 
       ? `${allocation.name} (${allocation.claimed + allocation.completed})`
       : allocation.name)
     .join(", ");
+}
+/** Renames one person's entries in a summary such as "Alex A. (2), Bea B. (1)", keeping each "(n)". */
+function renameInSummary(summary: string, names: Iterable<string>, newName: string) {
+  const keys = new Set([...names].map((name) => name.trim().toLocaleLowerCase()));
+  return summary.split(", ").map((entry) => {
+    const [, name, count = ""] = entry.match(/^(.*?)( \(\d+\))?$/) ?? [];
+    return name !== undefined && keys.has(name.trim().toLocaleLowerCase()) ? `${newName}${count}` : entry;
+  }).join(", ");
 }
 function operationIndex(value: unknown) {
   const match = selectValue(value, "OP1").match(/^OP(\d+)$/i);
@@ -137,715 +64,690 @@ function subtractCompletedQuantity(allocations: OperationAllocation[], quantity:
   if (remaining > 0) throw new Error("Rejected quantity exceeds completed work");
   return next.filter((allocation) => allocation.claimed > 0 || allocation.completed > 0);
 }
-function fabricationStatus(requirementStatus: string, machinist: string): ManufacturingOperation["status"] {
-  if (requirementStatus === "Complete") return "Complete";
-  if (requirementStatus === "Ready for Finishing") return machinist ? "In Progress" : "Ready";
-  return "Planned";
-}
 
+/**
+ * Plans shop writes against copies of the write-state rows. The adapter checks that the
+ * operation, job, or requirement is active and allowed before calling a method.
+ */
 export function createWritePlan(input: Record<string, NormalizedRow[]>) {
- const rows = Object.fromEntries(ENTITIES.map(entity=>[entity.name,(input[entity.name]??[]).map(row=>runtimeRow(entity,structuredClone(row)))]));
- const OPERATIONS='operations', REQUIREMENTS='requirements', FINISHING='finishing';
- // Not a model column (the sync never writes it), so read it from the normalized rows.
- const qcPoints = new Map((input.requirements ?? []).map(row => [row.id, row.qc_after_operation == null ? null : Number(row.qc_after_operation)]));
- function isPostQcOperationRow(row: SourceRow) {
-   return operationWorkType(row) === "Manufacturing" && isPostQcOperation(
-     { machine: selectValue(row.Machine), operationNumber: selectValue(row["Operation Number"], "OP1") },
-     qcPoints.get(linkedId(row["Production Requirement"]) ?? -1));
- }
- async function getRow(entityName:string,id:number):Promise<RawRow> { const row=rows[entityName]?.find(r=>r.id===id); if(!row) throw new Error('Manufacturing row not found'); return structuredClone(row); }
- async function listAllRows(entityName:string):Promise<RawRow[]> { return structuredClone(rows[entityName]??[]); }
- async function patchRow(entityName:string,id:number,patch:Record<string,unknown>) {
- const row=rows[entityName]?.find(r=>r.id===id); if(!row) throw new Error('Manufacturing row not found');
- const entity=ENTITIES.find(e=>e.name===entityName)!;
- for(const [key,value] of Object.entries(patch)) { const column=entity.columns.find(c=>c[1]===key&&c[3]==='shop'); if(!column)throw new Error('Engineering field is not writable'); row[key]=column[2]==='select' && value!==null ? {value}:value; }
- return structuredClone(row);
- }
-async function applyFabricationAction(id: number, action: FabricationAction, actor: { name: string }) {
-  
-
-  const finishing = await getRow(FINISHING, id);
-  if (!Boolean(finishing.Active)) throw new Error("This finishing job is no longer active");
-  const requirementId = linkedId(finishing["Production Requirement"]);
-  if (!requirementId) throw new Error("Finishing job is not linked to a production requirement");
-  const requirement = await getRow(REQUIREMENTS, requirementId);
-  const operationRows = await listAllRows(OPERATIONS);
-  const postQcRows = canonicalRows(operationRows).filter((row) =>
-    linkedId(row["Production Requirement"]) === requirementId
-    && Boolean(row["Active in Routing"])
-    && isPostQcOperationRow(row),
-  );
-  const requirementStatus = selectValue(requirement.Status, "Needs Triage");
-  const assignedMachinist = String(finishing.Machinist ?? "").trim();
-  const isAssignedActor = assignedMachinist.toLocaleLowerCase() === actor.name.toLocaleLowerCase();
-
-  let nextMachinist = assignedMachinist;
-  let nextRequirementStatus = requirementStatus;
-  if (action === "claim") {
-    if (requirementStatus !== "Ready for Finishing" || assignedMachinist) throw new Error("This finishing job is not available to claim");
-    nextMachinist = actor.name;
-    await patchRow(FINISHING, id, { Machinist: nextMachinist });
-  } else if (action === "steal") {
-    if (requirementStatus !== "Ready for Finishing" || !assignedMachinist || isAssignedActor) {
-      throw new Error("Only unfinished finishing jobs claimed by someone else can be stolen");
-    }
-    nextMachinist = actor.name;
-    await patchRow(FINISHING, id, { Machinist: nextMachinist });
-  } else if (action === "release") {
-    if (requirementStatus !== "Ready for Finishing" || !isAssignedActor) throw new Error("Only the assigned machinist can release this job");
-    nextMachinist = "";
-    await patchRow(FINISHING, id, { Machinist: "" });
-  } else if (action === "complete") {
-    if (requirementStatus !== "Ready for Finishing" || !isAssignedActor) throw new Error("Claim this finishing job before completing it");
-    nextRequirementStatus = postQcRows.length > 0 ? "Ready for Manufacturing" : "Complete";
-    await patchRow(REQUIREMENTS, requirementId, { Status: nextRequirementStatus });
-    if (postQcRows.length > 0) {
-      nextRequirementStatus = (await reconcileRequirementWorkflow(requirementId, { finishingComplete: true })).requirementStatus;
-    }
-  } else {
-    const postQcWorkStarted = postQcRows.some((row) =>
-      !["Planned", "Ready"].includes(selectValue(row.Status, "Planned"))
-      || Number(row["Claimed Quantity"] ?? 0) > 0
-      || Number(row["Completed Quantity"] ?? 0) > 0,
-    );
-    const canUndoCompletedFinishing = postQcRows.length > 0
-      ? requirementStatus === "Ready for Manufacturing" && !postQcWorkStarted
-      : requirementStatus === "Complete";
-    if (!canUndoCompletedFinishing || !isAssignedActor) {
-      throw new Error(postQcWorkStarted
-        ? "Undo the work after QC before reopening finishing"
-        : "Only the assigned machinist can undo this completion");
-    }
-    nextRequirementStatus = "Ready for Finishing";
-    await patchRow(REQUIREMENTS, requirementId, { Status: nextRequirementStatus });
-    if (postQcRows.length > 0) {
-      await reconcileRequirementWorkflow(requirementId, { finishingComplete: false });
-    }
-  }
-
-  return {
-    id,
-    status: action === "complete" ? "Complete" : fabricationStatus(nextRequirementStatus, nextMachinist),
-    requirementStatus: nextRequirementStatus,
-    machinist: nextMachinist,
-    displacedMachinist: action === "steal" ? assignedMachinist : null,
-    notificationContext: {
-      requirementId,
-      ...notificationPartContext(input, requirementId),
-      color: selectValue(finishing["Powder Coat Color"], "Unspecified"),
-      quantity: Math.max(1, Math.floor(Number(finishing["Required Quantity"] ?? requirement["Required Quantity"] ?? 1))),
-      previousRequirementStatus: requirementStatus,
-      requirementStatus: nextRequirementStatus,
-    },
+  const rows: Record<ShopEntity, NormalizedRow[]> = {
+    requirements: (input.requirements ?? []).map(row => ({ ...row })),
+    operations: (input.operations ?? []).map(row => ({ ...row })),
+    finishing: (input.finishing ?? []).map(row => ({ ...row })),
   };
-}
-async function reconcileRequirementWorkflow(requirementId: number, options: { finishingComplete?: boolean } = {}) {
-  const [requirement, operationRows] = await Promise.all([
-    getRow(REQUIREMENTS, requirementId),
-    listAllRows(OPERATIONS),
-  ]);
-  const relatedRows = operationRows.filter((row) => linkedId(row["Production Requirement"]) === requirementId);
-  const finishing = selectValue(requirement.Finishing);
-  const finishingRequired = Boolean(finishing && finishing !== "None");
-  const requirementStatus = selectValue(requirement.Status, "Needs Triage");
-  const qcPassed = selectValue(requirement["QC Outcome"]) === "Passed";
-  const finishingComplete = options.finishingComplete ?? (!finishingRequired || (
-    qcPassed && !["Ready for QC", "Ready for Finishing"].includes(requirementStatus)
-  ));
-  const plan = planRequirementWorkflow(relatedRows.map((row) => ({
-    id: row.id,
-    operationKey: String(row.Operation ?? row.id),
-    operationNumber: selectValue(row["Operation Number"], "OP1"),
-    machine: selectValue(row.Machine, "Unassigned"),
-    workType: operationWorkType(row),
-    status: operationStatus(row.Status),
-    active: Boolean(row["Active in Routing"]),
-    claimedQuantity: Number(row["Claimed Quantity"] ?? 0),
-    completedQuantity: Number(row["Completed Quantity"] ?? 0),
-    startedAt: row["Started At"] ? String(row["Started At"]) : null,
-    completedAt: row["Completed At"] ? String(row["Completed At"]) : null,
-  })), requirementStatus, { qcPassed, finishingRequired, finishingComplete, qcAfterOperation: qcPoints.get(requirementId) });
-
-  await Promise.all(plan.operationPatches.map((patch) => patchRow(OPERATIONS, patch.id, { Status: patch.status })));
-  if (requirementStatus !== plan.requirementStatus) {
-    await patchRow(REQUIREMENTS, requirementId, { Status: plan.requirementStatus });
+  const qcPoints = new Map(rows.requirements.map(row => [row.id, row.qc_after_operation == null ? null : Number(row.qc_after_operation)]));
+  function isPostQcOperationRow(row: NormalizedRow) {
+    return operationWorkType(row) === "Manufacturing" && isPostQcOperation(
+      { machine: selectValue(row.machine), operationNumber: selectValue(row.operation_number, "OP1") },
+      qcPoints.get(linkedId(row.requirement_id) ?? -1));
   }
-  return plan;
-}
-async function patchOperation(id: number, patch: OperationPatch, machinist: string) {
-  
-
-  const operation = await getRow(OPERATIONS, id);
-  const workType = operationWorkType(operation);
-  const body: Record<string, unknown> = {};
-  if (patch.status) body.Status = patch.status;
-  if (patch.machinist !== undefined) body.Machinist = patch.machinist;
-  if ((patch.status === "In Progress" || patch.status === "Complete") && patch.machinist === undefined) body.Machinist = machinist;
-  if (patch.status === "In Progress") body["Started At"] = new Date().toISOString();
-  if (patch.status === "Complete") body["Completed At"] = new Date().toISOString();
-  await patchRow(OPERATIONS, id, body);
-
-  const requirementId = linkedId(operation["Production Requirement"]);
-  let previousRequirementStatus = "Needs Triage";
-  let requirementStatus = "Needs Triage";
-  if (requirementId) {
-    const requirement = await getRow(REQUIREMENTS, requirementId);
-    previousRequirementStatus = selectValue(requirement.Status, "Needs Triage");
-    const requirementPatch: Record<string, unknown> = {};
-    if (workType === "Manufacturing" && patch.machinist !== undefined) requirementPatch.Machinist = patch.machinist;
-    if (workType === "Manufacturing" && (patch.status === "In Progress" || patch.status === "Complete") && patch.machinist === undefined) {
-      requirementPatch.Machinist = machinist;
-    }
-    if (Object.keys(requirementPatch).length > 0) {
-      await patchRow(REQUIREMENTS, requirementId, requirementPatch);
-    }
-    const plan = await reconcileRequirementWorkflow(requirementId);
-    requirementStatus = plan.requirementStatus;
-    if (plan.requirementStatus === "Ready for QC") {
-      await patchRow(REQUIREMENTS, requirementId, { "QC Outcome": "Not Inspected" });
-    }
+  /** A copy, so callers can still read the values from before their own patches. */
+  function getRow(entity: ShopEntity, id: number) {
+    const row = rows[entity].find(candidate => candidate.id === id);
+    if (!row) throw new Error("Manufacturing row not found");
+    return { ...row };
   }
-  return {
-    ...body,
-    notificationContext: {
-      requirementId: requirementId ?? 0,
-      ...notificationPartContext(input, requirementId),
-      operationNumber: selectValue(operation["Operation Number"], "OP1"),
-      workType,
-      machine: selectValue(operation.Machine, "Unassigned"),
-      previousOperationStatus: selectValue(operation.Status, "Planned"),
-      operationStatus: patch.status ?? selectValue(operation.Status, "Planned"),
-      previousMachinist: String(operation.Machinist ?? "").trim(),
-      machinist: patch.machinist ?? String(body.Machinist ?? operation.Machinist ?? "").trim(),
-      previousRequirementStatus,
-      requirementStatus,
-    },
-  };
-}
-async function updateCamHandoff(
-  id: number,
-  patch: { completedBy: string; programPath: string; notes: string },
-) {
-  const completedBy = patch.completedBy.trim();
-  const programPath = patch.programPath.trim();
-  const notes = patch.notes.trim();
-
-  if (!completedBy) throw new Error("Enter who completed the CAM");
-
-  
-
-  const operation = await getRow(OPERATIONS, id);
-  if (operationWorkType(operation) !== "CAM") throw new Error("Only CAM handoffs can be edited");
-  const status = operationStatus(operation.Status);
-  if (status !== "Complete") throw new Error("Only completed CAM handoffs can be edited");
-  const requirementId = linkedId(operation["Production Requirement"]);
-  if (!requirementId) throw new Error("Operation is not linked to a production requirement");
-
-  const allocations = quantitiesForRow(operation, 1, status).allocations.map((allocation) => allocation.completed > 0
-    ? { ...allocation, name: completedBy }
-    : allocation);
-  await patchRow(OPERATIONS, id, {
-    Machinist: completedBy,
-    "Quantity Ledger": JSON.stringify(allocations),
-    "CAM Program Path": programPath,
-    "CAM Notes": notes,
-  });
-
-  return {
-    id,
-    machinist: completedBy,
-    allocations,
-    camProgramPath: programPath || null,
-    camNotes: notes,
-    notificationContext: {
-      requirementId,
-      ...notificationPartContext(input, requirementId),
-      operationNumber: selectValue(operation["Operation Number"], "OP1"),
-      machine: selectValue(operation.Machine, "Unassigned"),
-      previousCompletedBy: String(operation.Machinist ?? "").trim(),
-      previousProgramPath: textValue(operation["CAM Program Path"]),
-      previousNotes: textValue(operation["CAM Notes"]),
-    },
-  };
-}
-async function applyQuantityAction(
-  id: number,
-  action: OperationQuantityAction,
-  quantity: number,
-  actor: { id: string; name: string },
-  camHandoff?: { programPath?: string; notes?: string; completeAllClaims?: boolean },
-) {
-  if (!Number.isInteger(quantity) || quantity < 1) throw new Error("Quantity must be a positive whole number");
-  
-
-  const operation = await getRow(OPERATIONS, id);
-  const requirementId = linkedId(operation["Production Requirement"]);
-  if (!requirementId) throw new Error("Operation is not linked to a production requirement");
-  const requirement = await getRow(REQUIREMENTS, requirementId);
-  const requiredQuantity = Math.max(1, Math.floor(Number(requirement["Required Quantity"] ?? 1)));
-  const workType = operationWorkType(operation);
-  const postQcOperation = isPostQcOperationRow(operation);
-  const qcOutcome = selectValue(requirement["QC Outcome"]);
-  const finishing = selectValue(requirement.Finishing);
-  const waitingForFinishing = Boolean(finishing && finishing !== "None" && selectValue(requirement.Status) === "Ready for Finishing");
-  if (postQcOperation && ["claim", "complete"].includes(action) && (qcOutcome !== "Passed" || waitingForFinishing)) {
-    throw new Error(waitingForFinishing
-      ? "Complete finishing before starting work after QC"
-      : "Work after QC requires a passed QC review");
+  function listAllRows(entity: ShopEntity) {
+    return rows[entity].map(row => ({ ...row }));
   }
-  const taskQuantity = taskQuantityForRow(operation, requiredQuantity);
-  if (workType === "CAM") validateCamAction({ action, quantity });
-  const currentStatus = operationStatus(operation.Status);
-  const current = quantitiesForRow(operation, taskQuantity, currentStatus);
-  const allocations = current.allocations.map((allocation) => ({ ...allocation }));
-
-  if (workType === "CAM" && action === "undo_complete") {
-    const operationRows = await listAllRows(OPERATIONS);
-    const target = operationRows.find((candidate) =>
-      linkedId(candidate["Production Requirement"]) === requirementId
-      && operationWorkType(candidate) === "Manufacturing"
-      && Boolean(candidate["Active in Routing"])
-      && selectValue(candidate["Operation Number"], "OP1") === selectValue(operation["Operation Number"], "OP1"),
-    );
-    if (target && targetMachineHasStarted({
-      status: operationStatus(target.Status),
-      claimedQuantity: Number(target["Claimed Quantity"] ?? 0),
-      completedQuantity: Number(target["Completed Quantity"] ?? 0),
-    })) {
-      validateCamAction({ action, quantity, targetStarted: true });
+  function patchRow(entity: ShopEntity, id: number, patch: Record<string, unknown>) {
+    const row = rows[entity].find(candidate => candidate.id === id);
+    if (!row) throw new Error("Manufacturing row not found");
+    for (const [column, value] of Object.entries(patch)) {
+      if (!Object.hasOwn(SHOP_COLUMNS[entity], column)) throw new Error("Engineering field is not writable");
+      row[column] = value;
     }
   }
 
-  let actorAllocation = allocations.find((allocation) => allocation.userId === actor.id);
-  if (!actorAllocation) {
-    actorAllocation = allocations.find((allocation) =>
-      allocation.userId.startsWith("legacy:") && allocation.name.toLocaleLowerCase() === actor.name.toLocaleLowerCase(),
-    );
-    if (actorAllocation) actorAllocation.userId = actor.id;
-  }
-  if (!actorAllocation) {
-    actorAllocation = { userId: actor.id, name: actor.name, claimed: 0, completed: 0 };
-    allocations.push(actorAllocation);
-  }
-  actorAllocation.name = actor.name;
+  function applyFabricationAction(id: number, action: FabricationAction, actor: { name: string }) {
+    const finishing = getRow("finishing", id);
+    const requirementId = linkedId(finishing.requirement_id)!;
+    const requirement = getRow("requirements", requirementId);
+    const postQcRows = canonicalRows(listAllRows("operations")).filter((row) =>
+      linkedId(row.requirement_id) === requirementId && isPostQcOperationRow(row));
+    const requirementStatus = selectValue(requirement.status, "Needs Triage");
+    const assignedMachinist = String(finishing.machinist ?? "").trim();
+    const isAssignedActor = assignedMachinist.toLocaleLowerCase() === actor.name.toLocaleLowerCase();
 
-  if (action === "claim") {
-    if (!["Ready", "In Progress"].includes(currentStatus)) {
-      throw new Error("This operation is not available to claim");
-    }
-    if (quantity > current.availableQuantity) throw new Error(`Only ${current.availableQuantity} part(s) remain available`);
-    actorAllocation.claimed += quantity;
-  } else if (action === "release") {
-    if (quantity > actorAllocation.claimed) throw new Error(`You only have ${actorAllocation.claimed} part(s) claimed`);
-    actorAllocation.claimed -= quantity;
-  } else if (action === "complete") {
-    if (camHandoff?.completeAllClaims) {
-      if (quantity !== current.claimedQuantity) throw new Error("The print claims changed. Refresh before completing them.");
-      for (const allocation of allocations) {
-        allocation.completed += allocation.claimed;
-        allocation.claimed = 0;
+    let nextMachinist = assignedMachinist;
+    let nextRequirementStatus = requirementStatus;
+    if (action === "claim") {
+      if (requirementStatus !== "Ready for Finishing" || assignedMachinist) throw new Error("This finishing job is not available to claim");
+      nextMachinist = actor.name;
+      patchRow("finishing", id, { machinist: nextMachinist });
+    } else if (action === "steal") {
+      if (requirementStatus !== "Ready for Finishing" || !assignedMachinist || isAssignedActor) {
+        throw new Error("Only unfinished finishing jobs claimed by someone else can be stolen");
+      }
+      nextMachinist = actor.name;
+      patchRow("finishing", id, { machinist: nextMachinist });
+    } else if (action === "release") {
+      if (requirementStatus !== "Ready for Finishing" || !isAssignedActor) throw new Error("Only the assigned machinist can release this job");
+      nextMachinist = "";
+      patchRow("finishing", id, { machinist: "" });
+    } else if (action === "complete") {
+      if (requirementStatus !== "Ready for Finishing" || !isAssignedActor) throw new Error("Claim this finishing job before completing it");
+      nextRequirementStatus = postQcRows.length > 0 ? "Ready for Manufacturing" : "Complete";
+      patchRow("requirements", requirementId, { status: nextRequirementStatus });
+      if (postQcRows.length > 0) {
+        nextRequirementStatus = reconcileRequirementWorkflow(requirementId, { finishingComplete: true }).requirementStatus;
       }
     } else {
-      if (quantity > actorAllocation.claimed) throw new Error(`You only have ${actorAllocation.claimed} claimed part(s) to complete`);
-      actorAllocation.claimed -= quantity;
-      actorAllocation.completed += quantity;
+      const postQcWorkStarted = postQcRows.some((row) =>
+        !["Planned", "Ready"].includes(selectValue(row.status, "Planned"))
+        || Number(row.claimed_quantity ?? 0) > 0
+        || Number(row.completed_quantity ?? 0) > 0,
+      );
+      const canUndoCompletedFinishing = postQcRows.length > 0
+        ? requirementStatus === "Ready for Manufacturing" && !postQcWorkStarted
+        : requirementStatus === "Complete";
+      if (!canUndoCompletedFinishing || !isAssignedActor) {
+        throw new Error(postQcWorkStarted
+          ? "Undo the work after QC before reopening finishing"
+          : "Only the assigned machinist can undo this completion");
+      }
+      nextRequirementStatus = "Ready for Finishing";
+      patchRow("requirements", requirementId, { status: nextRequirementStatus });
+      if (postQcRows.length > 0) {
+        reconcileRequirementWorkflow(requirementId, { finishingComplete: false });
+      }
     }
-  } else {
-    if (qcOutcome === "Passed" && !postQcOperation) throw new Error("Undo the passed QC review before reopening completed work");
-    if (quantity > actorAllocation.completed) throw new Error(`You only completed ${actorAllocation.completed} part(s)`);
-    actorAllocation.completed -= quantity;
-    actorAllocation.claimed += quantity;
-  }
 
-  const activeAllocations = allocations.filter((allocation) => allocation.claimed > 0 || allocation.completed > 0);
-  const claimedQuantity = activeAllocations.reduce((sum, allocation) => sum + allocation.claimed, 0);
-  const completedQuantity = activeAllocations.reduce((sum, allocation) => sum + allocation.completed, 0);
-  const nextStatus: OperationStatus = completedQuantity >= taskQuantity
-    ? "Complete"
-    : claimedQuantity > 0
-      ? "In Progress"
-      : "Ready";
-  const timestamp = new Date().toISOString();
-  const summary = machinistSummary(activeAllocations, taskQuantity);
-  const operationPatch: Record<string, unknown> = {
-    Status: nextStatus,
-    Machinist: summary,
-    "Claimed Quantity": claimedQuantity,
-    "Completed Quantity": completedQuantity,
-    "Quantity Ledger": JSON.stringify(activeAllocations),
-    "Completed At": nextStatus === "Complete" ? timestamp : null,
-  };
-  if (action === "claim" && !operation["Started At"]) operationPatch["Started At"] = timestamp;
-  if (action === "release" && claimedQuantity === 0 && completedQuantity === 0) operationPatch["Started At"] = null;
-  if (workType === "CAM" && action === "complete") {
-    if (camHandoff?.programPath !== undefined) {
-      operationPatch["CAM Program Path"] = camHandoff.programPath.trim();
-    }
-    operationPatch["CAM Notes"] = camHandoff?.notes?.trim() ?? "";
-  }
-  await patchRow(OPERATIONS, id, operationPatch);
-  if (workType === "Manufacturing") {
-    const requirementPatch: Record<string, unknown> = { Machinist: summary };
-    if (action === "undo_complete" && !postQcOperation) requirementPatch["QC Outcome"] = "Not Inspected";
-    await patchRow(REQUIREMENTS, requirementId, requirementPatch);
-  }
-  const workflow = await reconcileRequirementWorkflow(requirementId);
-
-  return {
-    id,
-    status: nextStatus,
-    machinist: summary,
-    claimedQuantity,
-    completedQuantity,
-    availableQuantity: Math.max(0, taskQuantity - claimedQuantity - completedQuantity),
-    allocations: activeAllocations,
-    startedAt: Object.hasOwn(operationPatch, "Started At")
-      ? operationPatch["Started At"] as string | null
-      : operation["Started At"] ? String(operation["Started At"]) : null,
-    completedAt: operationPatch["Completed At"],
-    camProgramPath: workType === "CAM" && action === "complete"
-      ? camHandoff?.programPath === undefined
-        ? textValue(operation["CAM Program Path"]) || null
-        : camHandoff.programPath.trim() || null
-      : textValue(operation["CAM Program Path"]) || null,
-    camNotes: workType === "CAM" && action === "complete"
-      ? camHandoff?.notes?.trim() ?? ""
-      : textValue(operation["CAM Notes"]),
-    notificationContext: {
-      requirementId,
-      ...notificationPartContext(input, requirementId),
-      operationNumber: selectValue(operation["Operation Number"], "OP1"),
-      workType,
-      machine: selectValue(operation.Machine, "Unassigned"),
-      previousRequirementStatus: selectValue(requirement.Status, "Needs Triage"),
-      requirementStatus: workflow.requirementStatus,
-    },
-  };
-}
-async function stealOperationClaim(
-  id: number,
-  actor: { id: string; name: string },
-) {
-  
-
-  const operation = await getRow(OPERATIONS, id);
-  const requirementId = linkedId(operation["Production Requirement"]);
-  if (!requirementId) throw new Error("Operation is not linked to a production requirement");
-  const requirement = await getRow(REQUIREMENTS, requirementId);
-  if (isPostQcOperationRow(operation)) {
-    const finishing = selectValue(requirement.Finishing);
-    if (selectValue(requirement["QC Outcome"]) !== "Passed") {
-      throw new Error("Work after QC requires a passed QC review");
-    }
-    if (finishing && finishing !== "None" && selectValue(requirement.Status) === "Ready for Finishing") {
-      throw new Error("Complete finishing before starting work after QC");
-    }
-  }
-  const requiredQuantity = Math.max(1, Math.floor(Number(requirement["Required Quantity"] ?? 1)));
-  const workType = operationWorkType(operation);
-  const taskQuantity = taskQuantityForRow(operation, requiredQuantity);
-  const currentStatus = operationStatus(operation.Status);
-  if (!["Ready", "In Progress"].includes(currentStatus)) {
-    throw new Error("This production requirement cannot be stolen right now");
-  }
-
-  const current = quantitiesForRow(operation, taskQuantity, currentStatus);
-  if (current.availableQuantity > 0) throw new Error("Claim the remaining available parts instead");
-  const allocations = current.allocations.map((allocation) => ({ ...allocation }));
-  const legacyActorAllocation = allocations.find((allocation) =>
-    allocation.userId.startsWith("legacy:") && allocation.name.toLocaleLowerCase() === actor.name.toLocaleLowerCase(),
-  );
-  if (legacyActorAllocation) legacyActorAllocation.userId = actor.id;
-  const displaced = allocations
-    .filter((allocation) => allocation.userId !== actor.id && allocation.claimed > 0)
-    .map((allocation) => ({ userId: allocation.userId, name: allocation.name, quantity: allocation.claimed }));
-  const stolenQuantity = displaced.reduce((sum, allocation) => sum + allocation.quantity, 0);
-  if (stolenQuantity === 0) throw new Error("No one else currently has this production requirement claimed");
-
-  for (const allocation of allocations) {
-    if (allocation.userId !== actor.id) allocation.claimed = 0;
-  }
-  let actorAllocation = allocations.find((allocation) => allocation.userId === actor.id);
-  if (!actorAllocation) {
-    actorAllocation = { userId: actor.id, name: actor.name, claimed: 0, completed: 0 };
-    allocations.push(actorAllocation);
-  }
-  actorAllocation.name = actor.name;
-  actorAllocation.claimed += stolenQuantity;
-
-  const activeAllocations = allocations.filter((allocation) => allocation.claimed > 0 || allocation.completed > 0);
-  const claimedQuantity = activeAllocations.reduce((sum, allocation) => sum + allocation.claimed, 0);
-  const completedQuantity = activeAllocations.reduce((sum, allocation) => sum + allocation.completed, 0);
-  const summary = machinistSummary(activeAllocations, taskQuantity);
-  const timestamp = new Date().toISOString();
-  const operationPatch = {
-    Status: "In Progress",
-    Machinist: summary,
-    "Claimed Quantity": claimedQuantity,
-    "Completed Quantity": completedQuantity,
-    "Quantity Ledger": JSON.stringify(activeAllocations),
-    "Started At": operation["Started At"] ?? timestamp,
-    "Completed At": null,
-  };
-  await patchRow(OPERATIONS, id, operationPatch);
-  if (workType === "Manufacturing") {
-    await patchRow(REQUIREMENTS, requirementId, { Machinist: summary });
-  }
-  await reconcileRequirementWorkflow(requirementId);
-
-  const parsed = notificationPartContext(input, requirementId);
-  const operationNumber = selectValue(operation["Operation Number"], "OP1") as ManufacturingOperation["operationNumber"];
-  return {
-    updated: {
+    return {
       id,
-      status: "In Progress" as OperationStatus,
+      status: action === "complete" ? "Complete" : fabricationStatus(nextRequirementStatus, nextMachinist),
+      requirementStatus: nextRequirementStatus,
+      machinist: nextMachinist,
+      displacedMachinist: action === "steal" ? assignedMachinist : null,
+      notificationContext: {
+        requirementId,
+        ...notificationPartContext(input, requirementId),
+        color: selectValue(finishing.color, "Unspecified"),
+        quantity: Math.max(1, Math.floor(Number(finishing.required_quantity ?? requirement.required_quantity ?? 1))),
+        previousRequirementStatus: requirementStatus,
+        requirementStatus: nextRequirementStatus,
+      },
+    };
+  }
+  function reconcileRequirementWorkflow(requirementId: number, options: { finishingComplete?: boolean } = {}) {
+    const requirement = getRow("requirements", requirementId);
+    const relatedRows = listAllRows("operations").filter((row) => linkedId(row.requirement_id) === requirementId);
+    const finishing = selectValue(requirement.finishing);
+    const finishingRequired = Boolean(finishing && finishing !== "None");
+    const requirementStatus = selectValue(requirement.status, "Needs Triage");
+    const qcPassed = selectValue(requirement.qc_outcome) === "Passed";
+    const finishingComplete = options.finishingComplete ?? isFinishingComplete({ finishingRequired, qcPassed, status: requirementStatus });
+    const plan = planRequirementWorkflow(relatedRows.map((row) => ({
+      id: row.id,
+      operationKey: String(row.operation_key ?? row.id),
+      operationNumber: selectValue(row.operation_number, "OP1"),
+      machine: selectValue(row.machine, "Unassigned"),
+      workType: operationWorkType(row),
+      status: operationStatus(row.status),
+      active: Boolean(row.active_in_routing),
+      claimedQuantity: Number(row.claimed_quantity ?? 0),
+      completedQuantity: Number(row.completed_quantity ?? 0),
+      startedAt: row.started_at ? String(row.started_at) : null,
+      completedAt: row.completed_at ? String(row.completed_at) : null,
+    })), { qcPassed, finishingRequired, finishingComplete, qcAfterOperation: qcPoints.get(requirementId) });
+
+    for (const patch of plan.operationPatches) patchRow("operations", patch.id, { status: patch.status });
+    if (requirementStatus !== plan.requirementStatus) {
+      patchRow("requirements", requirementId, { status: plan.requirementStatus });
+    }
+    return plan;
+  }
+  /** An administrator status override; the adapter refuses In Progress and Complete, which need quantity actions. */
+  function patchOperation(id: number, patch: OperationPatch) {
+    const operation = getRow("operations", id);
+    const workType = operationWorkType(operation);
+    const updated: Partial<OperationPatch> = {};
+    if (patch.status) updated.status = patch.status;
+    if (patch.machinist !== undefined) updated.machinist = patch.machinist;
+    patchRow("operations", id, updated);
+
+    const requirementId = linkedId(operation.requirement_id)!;
+    const previousRequirementStatus = selectValue(getRow("requirements", requirementId).status, "Needs Triage");
+    if (workType === "Manufacturing" && patch.machinist !== undefined) {
+      patchRow("requirements", requirementId, { machinist: patch.machinist });
+    }
+    const { requirementStatus } = reconcileRequirementWorkflow(requirementId);
+    if (requirementStatus === "Ready for QC") {
+      patchRow("requirements", requirementId, { qc_outcome: "Not Inspected" });
+    }
+    return {
+      ...updated,
+      notificationContext: {
+        requirementId,
+        ...notificationPartContext(input, requirementId),
+        operationNumber: selectValue(operation.operation_number, "OP1"),
+        workType,
+        machine: selectValue(operation.machine, "Unassigned"),
+        previousOperationStatus: selectValue(operation.status, "Planned"),
+        previousMachinist: String(operation.machinist ?? "").trim(),
+        previousRequirementStatus,
+        requirementStatus,
+      },
+    };
+  }
+  function updateCamHandoff(
+    id: number,
+    patch: { completedBy: string; programPath: string; notes: string },
+  ) {
+    const completedBy = patch.completedBy.trim();
+    const programPath = patch.programPath.trim();
+    const notes = patch.notes.trim();
+
+    if (!completedBy) throw new Error("Enter who completed the CAM");
+
+    const operation = getRow("operations", id);
+    if (operationWorkType(operation) !== "CAM") throw new Error("Only CAM handoffs can be edited");
+    const status = operationStatus(operation.status);
+    if (status !== "Complete") throw new Error("Only completed CAM handoffs can be edited");
+    const requirementId = linkedId(operation.requirement_id)!;
+
+    const allocations = ledgerQuantities(operation, 1, status).allocations.map((allocation) => allocation.completed > 0
+      ? { ...allocation, name: completedBy }
+      : allocation);
+    patchRow("operations", id, {
+      machinist: completedBy,
+      quantity_ledger: JSON.stringify(allocations),
+      cam_program_path: programPath,
+      cam_notes: notes,
+    });
+
+    return {
+      id,
+      machinist: completedBy,
+      allocations,
+      camProgramPath: programPath || null,
+      camNotes: notes,
+      notificationContext: {
+        requirementId,
+        ...notificationPartContext(input, requirementId),
+        operationNumber: selectValue(operation.operation_number, "OP1"),
+        machine: selectValue(operation.machine, "Unassigned"),
+        previousCompletedBy: String(operation.machinist ?? "").trim(),
+        previousProgramPath: textValue(operation.cam_program_path),
+        previousNotes: textValue(operation.cam_notes),
+      },
+    };
+  }
+  function applyQuantityAction(
+    id: number,
+    action: OperationQuantityAction,
+    quantity: number,
+    actor: { id: string; name: string },
+    camHandoff?: { programPath?: string; notes?: string; completeAllClaims?: boolean },
+  ) {
+    if (!Number.isInteger(quantity) || quantity < 1) throw new Error("Quantity must be a positive whole number");
+
+    const operation = getRow("operations", id);
+    const requirementId = linkedId(operation.requirement_id)!;
+    const requirement = getRow("requirements", requirementId);
+    const requiredQuantity = Math.max(1, Math.floor(Number(requirement.required_quantity ?? 1)));
+    const workType = operationWorkType(operation);
+    const postQcOperation = isPostQcOperationRow(operation);
+    const qcOutcome = selectValue(requirement.qc_outcome);
+    const finishing = selectValue(requirement.finishing);
+    const waitingForFinishing = Boolean(finishing && finishing !== "None" && selectValue(requirement.status) === "Ready for Finishing");
+    if (postQcOperation && ["claim", "complete"].includes(action) && (qcOutcome !== "Passed" || waitingForFinishing)) {
+      throw new Error(waitingForFinishing
+        ? "Complete finishing before starting work after QC"
+        : "Work after QC requires a passed QC review");
+    }
+    const taskQuantity = taskQuantityForRow(operation, requiredQuantity);
+    if (workType === "CAM") validateCamAction({ action, quantity });
+    const currentStatus = operationStatus(operation.status);
+    const current = ledgerQuantities(operation, taskQuantity, currentStatus);
+    const allocations = current.allocations.map((allocation) => ({ ...allocation }));
+
+    if (workType === "CAM" && action === "undo_complete") {
+      const target = listAllRows("operations").find((candidate) =>
+        linkedId(candidate.requirement_id) === requirementId
+        && operationWorkType(candidate) === "Manufacturing"
+        && Boolean(candidate.active_in_routing)
+        && selectValue(candidate.operation_number, "OP1") === selectValue(operation.operation_number, "OP1"),
+      );
+      if (target && targetMachineHasStarted({
+        status: operationStatus(target.status),
+        claimedQuantity: Number(target.claimed_quantity ?? 0),
+        completedQuantity: Number(target.completed_quantity ?? 0),
+      })) {
+        validateCamAction({ action, quantity, targetStarted: true });
+      }
+    }
+
+    let actorAllocation = allocations.find((allocation) => allocation.userId === actor.id);
+    if (!actorAllocation) {
+      actorAllocation = allocations.find((allocation) =>
+        allocation.userId.startsWith("legacy:") && allocation.name.toLocaleLowerCase() === actor.name.toLocaleLowerCase(),
+      );
+      if (actorAllocation) actorAllocation.userId = actor.id;
+    }
+    if (!actorAllocation) {
+      actorAllocation = { userId: actor.id, name: actor.name, claimed: 0, completed: 0 };
+      allocations.push(actorAllocation);
+    }
+    actorAllocation.name = actor.name;
+
+    if (action === "claim") {
+      if (!["Ready", "In Progress"].includes(currentStatus)) {
+        throw new Error("This operation is not available to claim");
+      }
+      if (quantity > current.availableQuantity) throw new Error(`Only ${current.availableQuantity} part(s) remain available`);
+      actorAllocation.claimed += quantity;
+    } else if (action === "release") {
+      if (quantity > actorAllocation.claimed) throw new Error(`You only have ${actorAllocation.claimed} part(s) claimed`);
+      actorAllocation.claimed -= quantity;
+    } else if (action === "complete") {
+      if (camHandoff?.completeAllClaims) {
+        if (quantity !== current.claimedQuantity) throw new Error("The print claims changed. Refresh before completing them.");
+        for (const allocation of allocations) {
+          allocation.completed += allocation.claimed;
+          allocation.claimed = 0;
+        }
+      } else {
+        if (quantity > actorAllocation.claimed) throw new Error(`You only have ${actorAllocation.claimed} claimed part(s) to complete`);
+        actorAllocation.claimed -= quantity;
+        actorAllocation.completed += quantity;
+      }
+    } else {
+      if (qcOutcome === "Passed" && !postQcOperation) throw new Error("Undo the passed QC review before reopening completed work");
+      if (quantity > actorAllocation.completed) throw new Error(`You only completed ${actorAllocation.completed} part(s)`);
+      actorAllocation.completed -= quantity;
+      actorAllocation.claimed += quantity;
+    }
+
+    const activeAllocations = allocations.filter((allocation) => allocation.claimed > 0 || allocation.completed > 0);
+    const claimedQuantity = activeAllocations.reduce((sum, allocation) => sum + allocation.claimed, 0);
+    const completedQuantity = activeAllocations.reduce((sum, allocation) => sum + allocation.completed, 0);
+    const nextStatus: OperationStatus = completedQuantity >= taskQuantity
+      ? "Complete"
+      : claimedQuantity > 0
+        ? "In Progress"
+        : "Ready";
+    const timestamp = new Date().toISOString();
+    const summary = machinistSummary(activeAllocations, taskQuantity);
+    const operationPatch: Record<string, unknown> = {
+      status: nextStatus,
+      machinist: summary,
+      claimed_quantity: claimedQuantity,
+      completed_quantity: completedQuantity,
+      quantity_ledger: JSON.stringify(activeAllocations),
+      completed_at: nextStatus === "Complete" ? timestamp : null,
+    };
+    if (action === "claim" && !operation.started_at) operationPatch.started_at = timestamp;
+    if (action === "release" && claimedQuantity === 0 && completedQuantity === 0) operationPatch.started_at = null;
+    if (workType === "CAM" && action === "complete") {
+      if (camHandoff?.programPath !== undefined) {
+        operationPatch.cam_program_path = camHandoff.programPath.trim();
+      }
+      operationPatch.cam_notes = camHandoff?.notes?.trim() ?? "";
+    }
+    patchRow("operations", id, operationPatch);
+    if (workType === "Manufacturing") {
+      const requirementPatch: Record<string, unknown> = { machinist: summary };
+      if (action === "undo_complete" && !postQcOperation) requirementPatch.qc_outcome = "Not Inspected";
+      patchRow("requirements", requirementId, requirementPatch);
+    }
+    const workflow = reconcileRequirementWorkflow(requirementId);
+
+    return {
+      id,
+      status: nextStatus,
       machinist: summary,
       claimedQuantity,
       completedQuantity,
       availableQuantity: Math.max(0, taskQuantity - claimedQuantity - completedQuantity),
       allocations: activeAllocations,
-      startedAt: operationPatch["Started At"],
-      completedAt: null,
-    },
-    displaced,
-    context: {
-      operationId: id,
-      requirementId,
-      ...parsed,
-      operationNumber,
-      workType,
-      machine: selectValue(operation.Machine, "Unassigned"),
-      quantity: stolenQuantity,
-    } satisfies StolenOperationContext,
-  };
-}
-async function renameMachinistAllocations(userId: string, oldName: string, newName: string) {
-  if (oldName === newName) return;
-  const frozenRequirements = new Set((input.requirements ?? []).filter(row => row.obsolete).map(row => row.id));
-
-  const [operationRows, requirementRows] = await Promise.all([
-    listAllRows(OPERATIONS),
-    listAllRows(REQUIREMENTS),
-  ]);
-  const requirements = new Map(requirementRows.map((row) => [row.id, row]));
-
-  await Promise.all(operationRows.map(async (operation) => {
-    const requirementId = linkedId(operation["Production Requirement"]);
-    if (requirementId && frozenRequirements.has(requirementId)) return;
-    const requirement = requirementId ? requirements.get(requirementId) : undefined;
-    const requiredQuantity = Math.max(1, Math.floor(Number(requirement?.["Required Quantity"] ?? 1)));
-    const taskQuantity = taskQuantityForRow(operation, requiredQuantity);
-    const status = operationStatus(operation.Status);
-    const current = quantitiesForRow(operation, taskQuantity, status);
-    let changed = false;
-    const allocations = current.allocations.map((allocation) => {
-      if (allocation.userId === userId || (
-        allocation.userId.startsWith("legacy:")
-        && allocation.name.toLocaleLowerCase() === oldName.toLocaleLowerCase()
-      )) {
-        changed = true;
-        return { ...allocation, userId, name: newName };
-      }
-      return allocation;
-    });
-    if (!changed) return;
-
-    const summary = machinistSummary(allocations, taskQuantity);
-    await patchRow(OPERATIONS, operation.id, {
-      Machinist: summary,
-      "Quantity Ledger": JSON.stringify(allocations),
-    });
-    if (requirementId) await patchRow(REQUIREMENTS, requirementId, { Machinist: summary });
-  }));
-
-  const finishingRows = await listAllRows(FINISHING);
-  await Promise.all(finishingRows.map(async (job) => {
-    if (frozenRequirements.has(linkedId(job["Production Requirement"]) ?? -1)) return;
-    if (String(job.Machinist ?? "").trim().toLocaleLowerCase() !== oldName.toLocaleLowerCase()) return;
-    await patchRow(FINISHING, job.id, { Machinist: newName });
-  }));
-}
-async function patchRequirementQualityOutcome(
-  requirementId: number,
-  result: Exclude<QualityResult, "pending">,
-  actorName: string,
-  notes: string,
-  reviewedAt: string,
-  rejectedQuantity?: number,
-) {
-  
-
-  const [requirement, operationRows] = await Promise.all([
-    getRow(REQUIREMENTS, requirementId),
-    listAllRows(OPERATIONS),
-  ]);
-  const manufacturingRows = canonicalRows(operationRows).filter((row) =>
-    linkedId(row["Production Requirement"]) === requirementId
-    && operationWorkType(row) === "Manufacturing"
-    && Boolean(row["Active in Routing"]),
-  );
-  const inspectedRows = manufacturingRows.filter((row) => !isPostQcOperationRow(row));
-  if (inspectedRows.length === 0) throw new Error("Production requirement has no pre-QC manufacturing operations");
-  if (!inspectedRows.every((row) => selectValue(row.Status, "Planned") === "Complete")) {
-    throw new Error("All pre-QC manufacturing operations must be complete before QC");
+      startedAt: Object.hasOwn(operationPatch, "started_at")
+        ? operationPatch.started_at as string | null
+        : operation.started_at ? String(operation.started_at) : null,
+      completedAt: operationPatch.completed_at,
+      camProgramPath: workType === "CAM" && action === "complete"
+        ? camHandoff?.programPath === undefined
+          ? textValue(operation.cam_program_path) || null
+          : camHandoff.programPath.trim() || null
+        : textValue(operation.cam_program_path) || null,
+      camNotes: workType === "CAM" && action === "complete"
+        ? camHandoff?.notes?.trim() ?? ""
+        : textValue(operation.cam_notes),
+      notificationContext: {
+        requirementId,
+        ...notificationPartContext(input, requirementId),
+        operationNumber: selectValue(operation.operation_number, "OP1"),
+        workType,
+        machine: selectValue(operation.machine, "Unassigned"),
+        previousRequirementStatus: selectValue(requirement.status, "Needs Triage"),
+        requirementStatus: workflow.requirementStatus,
+      },
+    };
   }
-
-  if (result === "failed") {
-    const requiredQuantity = Math.max(1, Math.floor(Number(requirement["Required Quantity"] ?? 1)));
-    const quantity = rejectedQuantity ?? requiredQuantity;
-    if (!Number.isInteger(quantity) || quantity < 1 || quantity > requiredQuantity) {
-      throw new Error(`Rejected quantity must be a whole number from 1 to ${requiredQuantity}`);
-    }
-    const firstStage = Math.min(...inspectedRows.map((row) => operationIndex(row["Operation Number"])));
-    for (const row of inspectedRows) {
-      const current = quantitiesForRow(row, requiredQuantity, operationStatus(row.Status));
-      if (current.claimedQuantity !== 0 || current.completedQuantity !== requiredQuantity) {
-        throw new Error("The full batch must have completed every pre-QC operation before QC can fail");
+  function stealOperationClaim(
+    id: number,
+    actor: { id: string; name: string },
+  ) {
+    const operation = getRow("operations", id);
+    const requirementId = linkedId(operation.requirement_id)!;
+    const requirement = getRow("requirements", requirementId);
+    if (isPostQcOperationRow(operation)) {
+      const finishing = selectValue(requirement.finishing);
+      if (selectValue(requirement.qc_outcome) !== "Passed") {
+        throw new Error("Work after QC requires a passed QC review");
       }
-      const allocations = subtractCompletedQuantity(current.allocations, quantity);
-      const completedQuantity = allocations.reduce((sum, allocation) => sum + allocation.completed, 0);
-      await patchRow(OPERATIONS, row.id, {
-        Status: operationIndex(row["Operation Number"]) === firstStage ? "Ready" : "Planned",
-        Machinist: machinistSummary(allocations, requiredQuantity),
-        "Claimed Quantity": 0,
-        "Completed Quantity": completedQuantity,
-        "Quantity Ledger": JSON.stringify(allocations),
-        "Completed At": null,
+      if (finishing && finishing !== "None" && selectValue(requirement.status) === "Ready for Finishing") {
+        throw new Error("Complete finishing before starting work after QC");
+      }
+    }
+    const requiredQuantity = Math.max(1, Math.floor(Number(requirement.required_quantity ?? 1)));
+    const workType = operationWorkType(operation);
+    const taskQuantity = taskQuantityForRow(operation, requiredQuantity);
+    const currentStatus = operationStatus(operation.status);
+    if (!["Ready", "In Progress"].includes(currentStatus)) {
+      throw new Error("This production requirement cannot be stolen right now");
+    }
+
+    const current = ledgerQuantities(operation, taskQuantity, currentStatus);
+    if (current.availableQuantity > 0) throw new Error("Claim the remaining available parts instead");
+    const allocations = current.allocations.map((allocation) => ({ ...allocation }));
+    const legacyActorAllocation = allocations.find((allocation) =>
+      allocation.userId.startsWith("legacy:") && allocation.name.toLocaleLowerCase() === actor.name.toLocaleLowerCase(),
+    );
+    if (legacyActorAllocation) legacyActorAllocation.userId = actor.id;
+    const displaced = allocations
+      .filter((allocation) => allocation.userId !== actor.id && allocation.claimed > 0)
+      .map((allocation) => ({ userId: allocation.userId, name: allocation.name, quantity: allocation.claimed }));
+    const stolenQuantity = displaced.reduce((sum, allocation) => sum + allocation.quantity, 0);
+    if (stolenQuantity === 0) throw new Error("No one else currently has this production requirement claimed");
+
+    for (const allocation of allocations) {
+      if (allocation.userId !== actor.id) allocation.claimed = 0;
+    }
+    let actorAllocation = allocations.find((allocation) => allocation.userId === actor.id);
+    if (!actorAllocation) {
+      actorAllocation = { userId: actor.id, name: actor.name, claimed: 0, completed: 0 };
+      allocations.push(actorAllocation);
+    }
+    actorAllocation.name = actor.name;
+    actorAllocation.claimed += stolenQuantity;
+
+    const activeAllocations = allocations.filter((allocation) => allocation.claimed > 0 || allocation.completed > 0);
+    const claimedQuantity = activeAllocations.reduce((sum, allocation) => sum + allocation.claimed, 0);
+    const completedQuantity = activeAllocations.reduce((sum, allocation) => sum + allocation.completed, 0);
+    const summary = machinistSummary(activeAllocations, taskQuantity);
+    const timestamp = new Date().toISOString();
+    const operationPatch = {
+      status: "In Progress",
+      machinist: summary,
+      claimed_quantity: claimedQuantity,
+      completed_quantity: completedQuantity,
+      quantity_ledger: JSON.stringify(activeAllocations),
+      started_at: operation.started_at ?? timestamp,
+      completed_at: null,
+    };
+    patchRow("operations", id, operationPatch);
+    if (workType === "Manufacturing") {
+      patchRow("requirements", requirementId, { machinist: summary });
+    }
+    reconcileRequirementWorkflow(requirementId);
+
+    const parsed = notificationPartContext(input, requirementId);
+    const operationNumber = selectValue(operation.operation_number, "OP1") as ManufacturingOperation["operationNumber"];
+    return {
+      updated: {
+        id,
+        status: "In Progress" as OperationStatus,
+        machinist: summary,
+        claimedQuantity,
+        completedQuantity,
+        availableQuantity: Math.max(0, taskQuantity - claimedQuantity - completedQuantity),
+        allocations: activeAllocations,
+        startedAt: operationPatch.started_at,
+        completedAt: null,
+      },
+      displaced,
+      context: {
+        operationId: id,
+        requirementId,
+        ...parsed,
+        operationNumber,
+        workType,
+        machine: selectValue(operation.machine, "Unassigned"),
+        quantity: stolenQuantity,
+      } satisfies StolenOperationContext,
+    };
+  }
+  function renameMachinistAllocations(userId: string, oldName: string, newName: string) {
+    if (oldName === newName) return;
+    const frozenRequirements = new Set(rows.requirements.filter(row => row.obsolete).map(row => row.id));
+    const requirements = new Map(listAllRows("requirements").map((row) => [row.id, row]));
+    const isOldName = (name: string) => name.toLocaleLowerCase() === oldName.toLocaleLowerCase();
+    // Other names this account's credits still carried per requirement, e.g. from an earlier rename
+    // that skipped the requirement while it was obsolete.
+    const earlierNames = new Map<number, Set<string>>();
+
+    const renamed = listAllRows("operations").flatMap((operation) => {
+      const requirementId = linkedId(operation.requirement_id);
+      if (requirementId && frozenRequirements.has(requirementId)) return [];
+      const requirement = requirementId ? requirements.get(requirementId) : undefined;
+      const requiredQuantity = Math.max(1, Math.floor(Number(requirement?.required_quantity ?? 1)));
+      const taskQuantity = taskQuantityForRow(operation, requiredQuantity);
+      const current = ledgerQuantities(operation, taskQuantity, operationStatus(operation.status));
+      let changed = false;
+      // An admin's "Completed by" correction keeps the account's CAM credit under another name.
+      const cam = operationWorkType(operation) === "CAM";
+      const allocations = current.allocations.map((allocation) => {
+        if (allocation.userId === userId && (!cam || isOldName(allocation.name))
+          || allocation.userId.startsWith("legacy:") && isOldName(allocation.name)) {
+          changed = true;
+          if (requirementId && !isOldName(allocation.name)) {
+            earlierNames.set(requirementId, (earlierNames.get(requirementId) ?? new Set()).add(allocation.name));
+          }
+          return { ...allocation, userId, name: newName };
+        }
+        return allocation;
+      });
+      if (!changed) return [];
+      return [{ operation, allocations, summary: machinistSummary(allocations, taskQuantity) }];
+    });
+
+    for (const { operation, allocations, summary } of renamed) {
+      patchRow("operations", operation.id, {
+        machinist: summary,
+        quantity_ledger: JSON.stringify(allocations),
       });
     }
-  }
 
-  const finishing = selectValue(requirement.Finishing);
-  const hasPostQcWork = manufacturingRows.some(isPostQcOperationRow);
-  const status = result === "failed"
-    ? "Ready for Manufacturing"
-    : finishing && finishing !== "None"
-      ? "Ready for Finishing"
-      : hasPostQcWork
-        ? "Ready for Manufacturing"
-        : "Complete";
+    // A requirement's assignment names whoever last worked it, possibly from an operation that QC,
+    // Force QC or a correction has since rewritten. Rename this person's entries in place rather
+    // than copying any operation's summary over it.
+    for (const requirement of requirements.values()) {
+      if (frozenRequirements.has(requirement.id)) continue;
+      const assignment = String(requirement.machinist ?? "");
+      const renamedAssignment = renameInSummary(assignment, [oldName, ...(earlierNames.get(requirement.id) ?? [])], newName);
+      if (renamedAssignment !== assignment) patchRow("requirements", requirement.id, { machinist: renamedAssignment });
+    }
 
-  await patchRow(REQUIREMENTS, requirementId, {
-    "QC Outcome": result === "passed" ? "Passed" : "Failed",
-    "QC Notes": notes,
-    "QC Reviewed By": actorName,
-    "QC Reviewed At": reviewedAt,
-    Status: status,
-  });
-  if (result === "passed" && hasPostQcWork) {
-    await reconcileRequirementWorkflow(requirementId, { finishingComplete: !finishing || finishing === "None" });
+    for (const job of listAllRows("finishing")) {
+      if (frozenRequirements.has(linkedId(job.requirement_id) ?? -1)) continue;
+      if (String(job.machinist ?? "").trim().toLocaleLowerCase() !== oldName.toLocaleLowerCase()) continue;
+      patchRow("finishing", job.id, { machinist: newName });
+    }
   }
-  return getRow(REQUIREMENTS, requirementId);
-}
-async function patchRequirementQualityNote(
-  requirementId: number,
-  actorName: string,
-  notes: string,
-  reviewedAt: string,
-) {
-  await getRow(REQUIREMENTS, requirementId);
-  await patchRow(REQUIREMENTS, requirementId, {
-    "QC Notes": notes,
-    "QC Reviewed By": actorName,
-    "QC Reviewed At": reviewedAt,
-  });
-  return getRow(REQUIREMENTS, requirementId);
-}
-async function clearPassedRequirementQualityOutcome(requirementId: number) {
-  
+  /** Records a QC result on the requirement and returns its resulting status. */
+  function patchRequirementQualityOutcome(
+    requirementId: number,
+    result: Exclude<QualityResult, "pending">,
+    actorName: string,
+    notes: string,
+    reviewedAt: string,
+    rejectedQuantity?: number,
+  ) {
+    const requirement = getRow("requirements", requirementId);
+    const manufacturingRows = canonicalRows(listAllRows("operations")).filter((row) =>
+      linkedId(row.requirement_id) === requirementId && operationWorkType(row) === "Manufacturing");
+    const inspectedRows = manufacturingRows.filter((row) => !isPostQcOperationRow(row));
+    if (inspectedRows.length === 0) throw new Error("Production requirement has no pre-QC manufacturing operations");
+    if (!inspectedRows.every((row) => selectValue(row.status, "Planned") === "Complete")) {
+      throw new Error("All pre-QC manufacturing operations must be complete before QC");
+    }
 
-  const operationRows = await listAllRows(OPERATIONS);
-  const manufacturingRows = canonicalRows(operationRows).filter((row) =>
-    linkedId(row["Production Requirement"]) === requirementId
-    && operationWorkType(row) === "Manufacturing"
-    && Boolean(row["Active in Routing"]),
-  );
-  const inspectedRows = manufacturingRows.filter((row) => !isPostQcOperationRow(row));
-  const postQcRows = manufacturingRows.filter(isPostQcOperationRow);
-  if (inspectedRows.length === 0 || !inspectedRows.every((row) => selectValue(row.Status, "Planned") === "Complete")) {
-    throw new Error("Only a passed QC review with all pre-QC operations complete can be undone");
+    if (result === "failed") {
+      const requiredQuantity = Math.max(1, Math.floor(Number(requirement.required_quantity ?? 1)));
+      const quantity = rejectedQuantity ?? requiredQuantity;
+      // Force QC passes the full required quantity unvalidated, which is non-finite on corrupt rows.
+      if (!Number.isInteger(quantity) || quantity < 1 || quantity > requiredQuantity) {
+        throw new Error(`Rejected quantity must be a whole number from 1 to ${requiredQuantity}`);
+      }
+      const firstStage = Math.min(...inspectedRows.map((row) => operationIndex(row.operation_number)));
+      for (const row of inspectedRows) {
+        const current = ledgerQuantities(row, requiredQuantity, operationStatus(row.status));
+        if (current.claimedQuantity !== 0 || current.completedQuantity !== requiredQuantity) {
+          throw new Error("The full batch must have completed every pre-QC operation before QC can fail");
+        }
+        const allocations = subtractCompletedQuantity(current.allocations, quantity);
+        const completedQuantity = allocations.reduce((sum, allocation) => sum + allocation.completed, 0);
+        patchRow("operations", row.id, {
+          status: operationIndex(row.operation_number) === firstStage ? "Ready" : "Planned",
+          machinist: machinistSummary(allocations, requiredQuantity),
+          claimed_quantity: 0,
+          completed_quantity: completedQuantity,
+          quantity_ledger: JSON.stringify(allocations),
+          completed_at: null,
+        });
+      }
+    }
+
+    const finishing = selectValue(requirement.finishing);
+    const hasPostQcWork = manufacturingRows.some(isPostQcOperationRow);
+    const status = result === "failed"
+      ? "Ready for Manufacturing"
+      : finishing && finishing !== "None"
+        ? "Ready for Finishing"
+        : hasPostQcWork
+          ? "Ready for Manufacturing"
+          : "Complete";
+
+    patchRow("requirements", requirementId, {
+      qc_outcome: result === "passed" ? "Passed" : "Failed",
+      qc_notes: notes,
+      qc_reviewed_by: actorName,
+      qc_reviewed_at: reviewedAt,
+      status,
+    });
+    if (result === "passed" && hasPostQcWork) {
+      reconcileRequirementWorkflow(requirementId, { finishingComplete: !finishing || finishing === "None" });
+    }
+    return selectValue(getRow("requirements", requirementId).status, "Needs Triage");
   }
-  if (postQcRows.some((row) => !["Planned", "Ready"].includes(selectValue(row.Status, "Planned"))
-    || Number(row["Claimed Quantity"] ?? 0) > 0 || Number(row["Completed Quantity"] ?? 0) > 0)) {
-    throw new Error("Undo the work after QC before undoing the QC pass");
-  }
-  const finishing = selectValue((await getRow(REQUIREMENTS, requirementId)).Finishing);
-  const currentStatus = selectValue((await getRow(REQUIREMENTS, requirementId)).Status);
-  if (finishing && finishing !== "None" && currentStatus !== "Ready for Finishing") {
-    throw new Error("QC cannot be undone after finishing is complete");
-  }
-  await patchRow(REQUIREMENTS, requirementId, {
-    "QC Outcome": "Not Inspected",
-    "QC Notes": "",
-    "QC Reviewed By": "",
-    "QC Reviewed At": null,
-    Status: "Ready for QC",
-  });
-  await reconcileRequirementWorkflow(requirementId, { finishingComplete: false });
-}
-async function previewForceQuality(requirementId: number) {
-  const requirement = await getRow(REQUIREMENTS, requirementId);
-  if (!requirement["Active in BOM"]) throw new Error("This production requirement is inactive");
-  const active = canonicalRows(await listAllRows(OPERATIONS)).filter(row => linkedId(row["Production Requirement"]) === requirementId);
-  const manufacturing = active.filter(row => operationWorkType(row) === "Manufacturing" && !isPostQcOperationRow(row));
-  if (!manufacturing.length) throw new Error("Production requirement has no pre-QC manufacturing operations");
-  const quantity = Math.max(1, Math.floor(Number(requirement["Required Quantity"] ?? 1)));
-  const numbers = new Set(manufacturing.map(row => selectValue(row["Operation Number"])));
-  const affected = active.filter(row => manufacturing.includes(row) || operationWorkType(row) === "CAM" && numbers.has(selectValue(row["Operation Number"])))
-    .filter(row => selectValue(row.Status) !== "Complete");
-  if (!affected.length) throw new Error("All prerequisite work is already complete; use normal QC");
-  const operations = affected.map(row => {
-    const status = operationStatus(row.Status);
-    const total = taskQuantityForRow(row, quantity);
-    const current = quantitiesForRow(row, total, status);
-    if (current.completedQuantity > total) throw new Error("Completed quantity exceeds the requirement quantity");
-    return { id: row.id, operationNumber: selectValue(row["Operation Number"]), workType: operationWorkType(row), machine: selectValue(row.Machine), previousStatus: status, quantity: total - current.completedQuantity };
-  }).sort((a, b) => a.operationNumber.localeCompare(b.operationNumber) || a.workType.localeCompare(b.workType) || a.id - b.id);
-  const finishing = selectValue(requirement.Finishing);
-  const nextDestination = finishing && finishing !== "None" ? "Finishing" : active.some(isPostQcOperationRow) ? "Post-QC manufacturing" : "Complete";
-  const generatedNotes = "Admin Force QC — force-completed prerequisite work:\n" + operations.map(op => `${op.operationNumber} ${op.workType} (${op.machine || "CAM"}): ${op.previousStatus} → Complete; ${op.quantity} ${op.workType === "CAM" ? "task(s)" : "part(s)"} force-completed.`).join("\n");
-  return { requirementId, productionKey: String(requirement["Production Key"] ?? ""), quantity, operations, generatedNotes, nextDestination };
-}
-/** Admin Force QC can also finish powder coating, crediting the admin. Null when no finishing is pending. */
-async function forceCompleteFinishing(requirementId: number, actor: { name: string }) {
-  const requirement = await getRow(REQUIREMENTS, requirementId);
-  if (selectValue(requirement.Status) !== "Ready for Finishing") return null;
-  const job = (await listAllRows(FINISHING)).find(row => Boolean(row.Active) && linkedId(row["Production Requirement"]) === requirementId);
-  if (!job) throw new Error("This production requirement has no active finishing job");
-  await patchRow(FINISHING, job.id, { Machinist: actor.name });
-  return applyFabricationAction(job.id, "complete", actor);
-}
-async function forceCompletePrerequisites(requirementId: number, actor: { id: string; name: string }, timestamp: string) {
-  const preview = await previewForceQuality(requirementId);
-  for (const item of preview.operations) {
-    const row = await getRow(OPERATIONS, item.id);
-    const total = taskQuantityForRow(row, preview.quantity);
-    const allocations = quantitiesForRow(row, total, item.previousStatus).allocations.map(allocation => ({ ...allocation, claimed: 0 }));
-    let credit = allocations.find(allocation => allocation.userId === actor.id);
-    if (!credit) { credit = { userId: actor.id, name: actor.name, claimed: 0, completed: 0 }; allocations.push(credit); }
-    credit.name = actor.name;
-    credit.completed += item.quantity;
-    const ledger = allocations.filter(allocation => allocation.completed > 0);
-    await patchRow(OPERATIONS, item.id, {
-      Status: "Complete", "Completed At": timestamp, "Claimed Quantity": 0, "Completed Quantity": total,
-      "Quantity Ledger": JSON.stringify(ledger), Machinist: machinistSummary(ledger, total),
+  function patchRequirementQualityNote(
+    requirementId: number,
+    actorName: string,
+    notes: string,
+    reviewedAt: string,
+  ) {
+    patchRow("requirements", requirementId, {
+      qc_notes: notes,
+      qc_reviewed_by: actorName,
+      qc_reviewed_at: reviewedAt,
     });
   }
-  return preview;
-}
-return { previewForceQuality, forceCompletePrerequisites, forceCompleteFinishing, applyFabricationAction,patchOperation,updateCamHandoff,applyQuantityAction,stealOperationClaim,renameMachinistAllocations,patchRequirementQualityOutcome,patchRequirementQualityNote,clearPassedRequirementQualityOutcome,
- changes() {
- return ENTITIES.flatMap(entity=>(input[entity.name]??[]).flatMap(before=>{
- const after=normalizeRow(entity,rows[entity.name].find(r=>r.id===before.id)!);
- const baseline=normalizeRow(entity,runtimeRow(entity,before)) as Record<string,unknown>;
- const patch=Object.fromEntries(entity.columns.filter(([column,,,owner])=>owner==='shop'&&JSON.stringify(baseline[column]??null)!==JSON.stringify((after as Record<string,unknown>)[column]??null)).map(([column])=>[column,(after as Record<string,unknown>)[column]??null]));
- if(entity.name==='operations' && 'quantity_ledger' in patch) {
-   const ledger=JSON.parse(String(patch.quantity_ledger)) as OperationAllocation[];
-   patch.claimed_quantity=ledger.reduce((n,a)=>n+a.claimed,0);
-   patch.completed_quantity=ledger.reduce((n,a)=>n+a.completed,0);
- }
- return Object.keys(patch).length?[{entity:entity.name,id:before.id,patch}]:[];
- }));
- }
- };
+  function clearPassedRequirementQualityOutcome(requirementId: number) {
+    const manufacturingRows = canonicalRows(listAllRows("operations")).filter((row) =>
+      linkedId(row.requirement_id) === requirementId && operationWorkType(row) === "Manufacturing");
+    const inspectedRows = manufacturingRows.filter((row) => !isPostQcOperationRow(row));
+    const postQcRows = manufacturingRows.filter(isPostQcOperationRow);
+    if (inspectedRows.length === 0 || !inspectedRows.every((row) => selectValue(row.status, "Planned") === "Complete")) {
+      throw new Error("Only a passed QC review with all pre-QC operations complete can be undone");
+    }
+    if (postQcRows.some((row) => !["Planned", "Ready"].includes(selectValue(row.status, "Planned"))
+      || Number(row.claimed_quantity ?? 0) > 0 || Number(row.completed_quantity ?? 0) > 0)) {
+      throw new Error("Undo the work after QC before undoing the QC pass");
+    }
+    const requirement = getRow("requirements", requirementId);
+    const finishing = selectValue(requirement.finishing);
+    if (finishing && finishing !== "None" && selectValue(requirement.status) !== "Ready for Finishing") {
+      throw new Error("QC cannot be undone after finishing is complete");
+    }
+    patchRow("requirements", requirementId, {
+      qc_outcome: "Not Inspected",
+      qc_notes: "",
+      qc_reviewed_by: "",
+      qc_reviewed_at: null,
+      status: "Ready for QC",
+    });
+    reconcileRequirementWorkflow(requirementId, { finishingComplete: false });
+  }
+  function previewForceQuality(requirementId: number) {
+    const requirement = getRow("requirements", requirementId);
+    const active = canonicalRows(listAllRows("operations")).filter(row => linkedId(row.requirement_id) === requirementId);
+    const manufacturing = active.filter(row => operationWorkType(row) === "Manufacturing" && !isPostQcOperationRow(row));
+    if (!manufacturing.length) throw new Error("Production requirement has no pre-QC manufacturing operations");
+    const quantity = Math.max(1, Math.floor(Number(requirement.required_quantity ?? 1)));
+    const numbers = new Set(manufacturing.map(row => selectValue(row.operation_number)));
+    const affected = active.filter(row => manufacturing.includes(row) || operationWorkType(row) === "CAM" && numbers.has(selectValue(row.operation_number)))
+      .filter(row => selectValue(row.status) !== "Complete");
+    if (!affected.length) throw new Error("All prerequisite work is already complete; use normal QC");
+    const operations = affected.map(row => {
+      const status = operationStatus(row.status);
+      const total = taskQuantityForRow(row, quantity);
+      const current = ledgerQuantities(row, total, status);
+      if (current.completedQuantity > total) throw new Error("Completed quantity exceeds the requirement quantity");
+      return { id: row.id, operationNumber: selectValue(row.operation_number), workType: operationWorkType(row), machine: selectValue(row.machine), previousStatus: status, quantity: total - current.completedQuantity };
+    }).sort((a, b) => a.operationNumber.localeCompare(b.operationNumber) || a.workType.localeCompare(b.workType) || a.id - b.id);
+    const finishing = selectValue(requirement.finishing);
+    const nextDestination = finishing && finishing !== "None" ? "Finishing" : active.some(isPostQcOperationRow) ? "Post-QC manufacturing" : "Complete";
+    const generatedNotes = "Admin Force QC — force-completed prerequisite work:\n" + operations.map(op => `${op.operationNumber} ${op.workType} (${op.machine || "CAM"}): ${op.previousStatus} → Complete; ${op.quantity} ${op.workType === "CAM" ? "task(s)" : "part(s)"} force-completed.`).join("\n");
+    return { requirementId, productionKey: String(requirement.production_key ?? ""), quantity, operations, generatedNotes, nextDestination };
+  }
+  /** Admin Force QC can also finish powder coating, crediting the admin. Null when no finishing is pending. */
+  function forceCompleteFinishing(requirementId: number, actor: { name: string }) {
+    const requirement = getRow("requirements", requirementId);
+    if (selectValue(requirement.status) !== "Ready for Finishing") return null;
+    const job = listAllRows("finishing").find(row => Boolean(row.active) && linkedId(row.requirement_id) === requirementId);
+    if (!job) throw new Error("This production requirement has no active finishing job");
+    patchRow("finishing", job.id, { machinist: actor.name });
+    return applyFabricationAction(job.id, "complete", actor);
+  }
+  function forceCompletePrerequisites(requirementId: number, actor: { id: string; name: string }, timestamp: string) {
+    const preview = previewForceQuality(requirementId);
+    for (const item of preview.operations) {
+      const row = getRow("operations", item.id);
+      const total = taskQuantityForRow(row, preview.quantity);
+      const allocations = ledgerQuantities(row, total, item.previousStatus).allocations.map(allocation => ({ ...allocation, claimed: 0 }));
+      let credit = allocations.find(allocation => allocation.userId === actor.id);
+      if (!credit) { credit = { userId: actor.id, name: actor.name, claimed: 0, completed: 0 }; allocations.push(credit); }
+      credit.name = actor.name;
+      credit.completed += item.quantity;
+      const ledger = allocations.filter(allocation => allocation.completed > 0);
+      patchRow("operations", item.id, {
+        status: "Complete", completed_at: timestamp, claimed_quantity: 0, completed_quantity: total,
+        quantity_ledger: JSON.stringify(ledger), machinist: machinistSummary(ledger, total),
+      });
+    }
+    return preview;
+  }
+  return {
+    previewForceQuality, forceCompletePrerequisites, forceCompleteFinishing, applyFabricationAction, patchOperation, updateCamHandoff,
+    applyQuantityAction, stealOperationClaim, renameMachinistAllocations, patchRequirementQualityOutcome, patchRequirementQualityNote,
+    clearPassedRequirementQualityOutcome,
+    /** Per-row patches of the shop columns that differ from the write state. */
+    changes() {
+      return (Object.keys(SHOP_COLUMNS) as ShopEntity[]).flatMap(entity => (input[entity] ?? []).flatMap(before => {
+        const after = rows[entity].find(row => row.id === before.id)!;
+        const patch: Record<string, unknown> = {};
+        for (const [column, kind] of Object.entries(SHOP_COLUMNS[entity])) {
+          const value = shopColumnValue(after[column], kind);
+          if (JSON.stringify(shopColumnValue(before[column], kind)) !== JSON.stringify(value)) patch[column] = value;
+        }
+        if (entity === "operations" && "quantity_ledger" in patch) {
+          const ledger = JSON.parse(String(patch.quantity_ledger)) as OperationAllocation[];
+          patch.claimed_quantity = ledger.reduce((n, a) => n + a.claimed, 0);
+          patch.completed_quantity = ledger.reduce((n, a) => n + a.completed, 0);
+        }
+        return Object.keys(patch).length ? [{ entity, id: before.id, patch }] : [];
+      }));
+    },
+  };
 }

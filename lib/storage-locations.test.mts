@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { SHOP_STORAGE_LOCATIONS, PRINTER_LOCATIONS, STORAGE_LOCATIONS, canUseOnRobotLocation, storageLocationSchema, isPrintingOperation } from "./storage-locations.ts";
+import { onRobotAllowed } from "./obsoletion.ts";
+import { SHOP_STORAGE_LOCATIONS, PRINTER_LOCATIONS, STORAGE_LOCATIONS, storageLocationSchema, isPrintingOperation } from "./storage-locations.ts";
 
 test("storage locations contain the 51 shop locations, five printers, and guarded robot location", () => {
   const expected = [
@@ -37,8 +38,12 @@ test("storage location validation accepts canonical choices and null but rejects
   assert.equal(nullableLocation.safeParse("Tool crib").success, false);
 });
 
-test("On Robot requires both passed QC and completed finishing", () => {
-  assert.equal(canUseOnRobotLocation(true, true), true);
-  assert.equal(canUseOnRobotLocation(true, false), false);
-  assert.equal(canUseOnRobotLocation(false, true), false);
+test("On Robot requires an allowed requirement, passed QC and completed finishing", () => {
+  const active = { activeInBom: true };
+  assert.equal(onRobotAllowed(active, true, true), true);
+  assert.equal(onRobotAllowed(active, true, false), false);
+  assert.equal(onRobotAllowed(active, false, true), false);
+  assert.equal(onRobotAllowed({ ...active, obsolete: true }, true, true), false);
+  assert.equal(onRobotAllowed({ activeInBom: false }, true, true), false);
+  assert.equal(onRobotAllowed({ activeInBom: false, obsoletionVersion: 1 }, true, true), true);
 });

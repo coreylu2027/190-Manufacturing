@@ -19,9 +19,11 @@ task to `Ready`; do not disrupt a target that has already started.
 
 After route reconciliation, apply `planRequirementWorkflow` from
 `lib/manufacturing-workflow.ts` (or equivalent logic) to set unstarted
-operation readiness and the Production Requirement status. This makes future
-syncs idempotent and keeps CAM for a later operation independent of earlier
-physical work.
+operation readiness and the Production Requirement status. It always takes the
+requirement's QC and finishing context (QC passed, finishing required and
+complete, and the QC point); the stored requirement status is not an input.
+This makes future syncs idempotent and keeps CAM for a later operation
+independent of earlier physical work.
 
 ## Initializing new Supabase routes
 
@@ -39,8 +41,7 @@ without a routed OP1 receive `Needs Triage`; the initializer does not invent
 machine selections. Reconciliation of changes to already initialized routes
 remains subject to the contract above.
 
-Test with `node scripts/manufacturing-migration/initialize-routing.test.mjs`.
-Set `PGLITE_MODULE` to an installed PGlite module entrypoint if it is not in
-`node_modules`. Optionally set `ROUTING_SNAPSHOT` to a private local JSON export
-of the five normalized manufacturing entities to verify that initialized work
-is preserved. Tests run only in memory and never call Supabase or Onshape.
+`npm test` runs `scripts/manufacturing-migration/initialize-routing.test.mjs`
+against the complete current schema: CAM task creation, stage ordering, the QC
+gate, preserved work, idempotence, grants, and the trigger on failed and partial
+syncs. It runs only in memory and never calls Supabase or Onshape.

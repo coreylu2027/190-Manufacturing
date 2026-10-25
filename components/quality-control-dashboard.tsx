@@ -4,10 +4,9 @@ import { CopyPartNumber } from "@/components/copy-part-number";
 
 import { ForceQcPicker } from "@/components/force-qc";
 
-import { themeQuartz, type ColDef } from "ag-grid-community";
+import type { ColDef } from "ag-grid-community";
 import { AgGridReact } from "ag-grid-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import dynamic from "next/dynamic";
 import {
   Check,
   ChevronRight,
@@ -30,47 +29,26 @@ import { toast } from "sonner";
 
 import { StorageLocationEditor } from "@/components/storage-location-editor";
 import { ManufacturingFileLink } from "@/components/manufacturing-file-link";
+import { saveProductionNotes } from "@/components/production-requirement-notes";
+import { BASE_ROW_SELECTION, FILTERABLE_COL_DEF, isUserSelectionSource, SELECTION_COLUMN_DEF, syncGridSelection, workspaceGridTheme } from "@/components/workspace-grid";
+import { EmptyState, PartModelPreview, QualityFailureCallout, StatTiles } from "@/components/workspace-ui";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { Checkbox } from "@/components/ui/checkbox";
-import { mergeVisibleSelection, settleSequentially } from "@/lib/bulk-selection";
+import { mergeVisibleSelection, partitionSettled, settleSequentially } from "@/lib/bulk-selection";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
-import { robotPlacementAllowed } from "@/lib/obsoletion";
-import { canUseOnRobotLocation } from "@/lib/storage-locations";
-import type { AdminResponse, QualityControlItem, QualityFailureSummary, QualityResult } from "@/lib/types";
+import { formatShortDateTime } from "@/lib/date-format";
+import { onRobotAllowed, workAllowed } from "@/lib/obsoletion";
+import { requestJson } from "@/lib/request-json";
+import type { AdminResponse, QualityControlItem, QualityResult } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-const PartModelPreview = dynamic(
-  () => import("@/components/part-model-preview").then((module) => module.PartModelPreview),
-  {
-    ssr: false,
-    loading: () => <Skeleton className="h-[22rem] rounded-xl sm:h-[26rem]" />,
-  },
-);
-
-const gridTheme = themeQuartz.withParams({
-  accentColor: "var(--primary)",
-  backgroundColor: "var(--card)",
-  borderColor: "var(--border)",
-  foregroundColor: "var(--foreground)",
-  headerBackgroundColor: "var(--muted)",
-  headerTextColor: "var(--muted-foreground)",
-  rowHoverColor: "var(--muted)",
-  selectedRowBackgroundColor: "var(--accent)",
-  fontFamily: "var(--font-geist-sans), ui-sans-serif",
-  fontSize: 13,
-  headerFontSize: 11,
-  headerFontWeight: 650,
-  rowHeight: 82,
-  headerHeight: 42,
-  wrapperBorderRadius: 0,
-  spacing: 6,
-});
+const gridTheme = workspaceGridTheme(82);
 
 const resultStyles: Record<QualityResult, string> = {
   pending: "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-400/30 dark:bg-amber-400/15 dark:text-amber-200",
@@ -84,61 +62,34 @@ const resultLabels: Record<QualityResult, string> = {
   failed: "QC failed",
 };
 
-async function fetchQualityControl(): Promise<AdminResponse> {
-  const response = await fetch("/api/admin", { cache: "no-store" });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error ?? "Unable to load quality control");
-  return body;
+function fetchQualityControl() {
+  return requestJson<AdminResponse>("/api/admin", { cache: "no-store" }, "Unable to load quality control");
 }
 
-async function submitReview(item: QualityControlItem, result: "passed" | "failed", notes: string, rejectedQuantity?: number) {
-  const response = await fetch(`/api/admin/qc/${item.requirementId}`, {
+function submitReview(item: QualityControlItem, result: "passed" | "failed", notes: string, rejectedQuantity?: number) {
+  return requestJson(`/api/admin/qc/${item.requirementId}`, {
     method: "PATCH",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(result === "failed" ? { result, notes, rejectedQuantity } : { result, notes }),
-  });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error ?? "Unable to record the quality review");
-  return body;
+  }, "Unable to record the quality review");
 }
 
 function canBulkPass(item: QualityControlItem) {
   return item.result === "pending" && item.operations.length > 0
-    && item.operations.every((operation) => operation.status === "Complete" && !operation.obsolete && operation.activeInBom);
+    && item.operations.every((operation) => operation.status === "Complete" && workAllowed(operation));
 }
 
-async function undoPassedReview(item: QualityControlItem) {
-  const response = await fetch(`/api/admin/qc/${item.requirementId}`, { method: "DELETE" });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error ?? "Unable to undo the QC pass");
-  return body;
+function undoPassedReview(item: QualityControlItem) {
+  return requestJson(`/api/admin/qc/${item.requirementId}`, { method: "DELETE" }, "Unable to undo the QC pass");
 }
 
-async function updateInspectionNotes(item: QualityControlItem, notes: string): Promise<{ review: { notes: string; reviewedAt: string; reviewedBy: string } }> {
-  const response = await fetch(`/api/admin/qc/${item.requirementId}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ notes }),
-  });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error ?? "Unable to update inspection notes");
-  return body;
+function updateInspectionNotes(item: QualityControlItem, notes: string) {
+  return requestJson<{ review: { notes: string; reviewedAt: string; reviewedBy: string } }>(`/api/admin/qc/${item.requirementId}`, {
+    method: "PUT", body: JSON.stringify({ notes }),
+  }, "Unable to update inspection notes");
 }
 
-async function deleteProductionNotes(item: QualityControlItem): Promise<{ productionNotes: string }> {
-  const response = await fetch(`/api/requirements/${item.requirementId}/notes`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ notes: "" }),
-  });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error ?? "Unable to delete production notes");
-  return body;
-}
-
-function formatDate(value: string | null) {
-  if (!value) return "Not reviewed";
-  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(value));
+function deleteProductionNotes(item: QualityControlItem) {
+  return saveProductionNotes(item.requirementId, "", "Unable to delete production notes");
 }
 
 function completedBy(item: QualityControlItem) {
@@ -181,7 +132,7 @@ function ResultCell({ data }: { data?: QualityControlItem }) {
     <div className="flex h-full flex-col justify-center gap-2">
       <ResultBadge result={data.result} />
       <div className="text-[11px] leading-4 text-muted-foreground">
-        <p>{formatDate(data.reviewedAt)}</p>
+        <p>{formatShortDateTime(data.reviewedAt, "Not reviewed")}</p>
         {data.reviewedBy && <p className="truncate" title={data.reviewedBy}>{data.reviewedBy}</p>}
       </div>
     </div>
@@ -200,22 +151,6 @@ function ActionCell({ data, onOpen }: { data?: QualityControlItem; onOpen: (item
       <Button size="sm" variant={data.result === "pending" ? "default" : "outline"} onClick={() => onOpen(data)}>
         {data.result === "pending" ? "Review" : "Open"}<ChevronRight />
       </Button>
-    </div>
-  );
-}
-
-function QualityFailureCallout({ failure }: { failure: QualityFailureSummary | null }) {
-  if (!failure) return null;
-  return (
-    <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-rose-950 dark:border-rose-400/30 dark:bg-rose-400/10 dark:text-rose-50">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-xs font-bold uppercase tracking-[.14em] text-rose-800 dark:text-rose-300">Previous QC failure</p>
-        <p className="text-xs text-rose-700 dark:text-rose-300">
-          {failure.rejectedQuantity ? `${failure.rejectedQuantity} rejected · ` : ""}{formatDate(failure.reviewedAt)}
-          {failure.reviewedBy ? ` · ${failure.reviewedBy}` : ""}
-        </p>
-      </div>
-      <p className="mt-2 whitespace-pre-wrap text-sm leading-6">{failure.notes || "No failure reason was recorded."}</p>
     </div>
   );
 }
@@ -278,10 +213,8 @@ export function QualityControlDashboard() {
           throw new Error(`${item.operations[0].partNumber}: ${error instanceof Error ? error.message : "Unable to pass QC"}`);
         }
       });
-      return {
-        succeeded: results.flatMap((entry) => entry.status === "fulfilled" ? [entry.value] : []),
-        errors: results.flatMap((entry) => entry.status === "rejected" ? [String(entry.reason instanceof Error ? entry.reason.message : entry.reason)] : []),
-      };
+      const { succeeded, failures } = partitionSettled(results);
+      return { succeeded, errors: failures.map((reason) => String(reason instanceof Error ? reason.message : reason)) };
     },
     onSuccess: ({ succeeded, errors }) => {
       setBulkIds((ids) => ids.filter((id) => !succeeded.includes(id)));
@@ -360,13 +293,8 @@ export function QualityControlDashboard() {
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to delete production notes"),
   });
-  const mutateReview = reviewMutation.mutate;
   const reviewIsPending = reviewMutation.isPending || bulkReviewMutation.isPending;
-  const mutateUndoReview = undoReviewMutation.mutate;
-  const undoReviewIsPending = undoReviewMutation.isPending;
-  const mutateNotes = updateNotesMutation.mutate;
   const notesArePending = updateNotesMutation.isPending;
-  const productionNotesAreDeleting = deleteProductionNotesMutation.isPending;
 
   const items = useMemo(() => query.data?.qualityControl ?? [], [query.data?.qualityControl]);
   const machines = useMemo(() => [...new Set(items.flatMap((item) => item.operations.map((operation) => operation.machine)))].sort(), [items]);
@@ -407,10 +335,10 @@ export function QualityControlDashboard() {
     ? bulkReviewMutation.variables ?? []
     : bulkEligible.map((item) => ({ item, notes: draftNotes[item.requirementId] ?? item.notes }));
   const visibleBulkIds = filtered.filter(canBulkPass).map((item) => item.requirementId);
-  const bulkBusy = reviewIsPending || undoReviewIsPending || notesArePending;
+  const bulkBusy = reviewIsPending || undoReviewMutation.isPending || notesArePending;
 
   const stats = useMemo(() => ({
-    pending: items.filter((item) => item.result === "pending").length,
+    pending: items.filter(canBulkPass).length,
     passed: items.filter((item) => item.result === "passed").length,
     failed: items.filter((item) => item.result === "failed").length,
   }), [items]);
@@ -431,7 +359,27 @@ export function QualityControlDashboard() {
     if (!Number.isInteger(rejectedQuantity) || rejectedQuantity < 1 || rejectedQuantity > maximum) {
       return toast.error(`Enter a whole number from 1 to ${maximum}`);
     }
-    mutateReview({ item: failureDialogItem, result: "failed", notes: failureReason, rejectedQuantity });
+    reviewMutation.mutate({ item: failureDialogItem, result: "failed", notes: failureReason, rejectedQuantity });
+  };
+  /** The review buttons for one item, shared by the mobile card and the larger detail sheet footer. */
+  const reviewActions = (item: QualityControlItem, sheet: boolean) => {
+    const size = sheet ? "lg" : "default";
+    const tall = sheet ? "h-11" : undefined;
+    const draft = draftNotes[item.requirementId];
+    if (item.result === "pending") {
+      const disabled = !canBulkPass(item) || reviewIsPending;
+      return <>
+        <Button size={size} variant="destructive" className={tall} onClick={() => openFailureDialog(item)} disabled={disabled}><X /> Fail QC</Button>
+        <Button size={size} className={cn(tall, "bg-emerald-600 hover:bg-emerald-700")} onClick={() => reviewMutation.mutate({ item, result: "passed", notes: draft ?? item.notes })} disabled={disabled}>{reviewIsPending ? <LoaderCircle className="animate-spin" /> : <Check />} Pass QC</Button>
+      </>;
+    }
+    if (item.result === "passed") return <>
+      <Button size={size} className={tall} onClick={() => updateNotesMutation.mutate({ item, notes: draft ?? item.notes })} disabled={notesArePending || draft === undefined || draft === item.notes}>{notesArePending ? <LoaderCircle className="animate-spin" /> : <Save />} Save note</Button>
+      <Button size={size} variant="outline" className={tall} onClick={() => undoReviewMutation.mutate(item)} disabled={!workAllowed(item.operations[0]) || undoReviewMutation.isPending || notesArePending}>{sheet && undoReviewMutation.isPending ? <LoaderCircle className="animate-spin" /> : <Clock3 />} Undo QC pass</Button>
+    </>;
+    return sheet
+      ? <div className="rounded-xl bg-rose-50 p-3 text-center text-sm font-medium text-rose-800 dark:bg-rose-400/15 dark:text-rose-200">Complete the reopened route to request QC again.</div>
+      : <p className="text-xs text-muted-foreground">Complete the reopened route to request QC again.</p>;
   };
   const openItem = (item: QualityControlItem) => setSelectedId(item.requirementId);
   const columnDefs = useMemo<ColDef<QualityControlItem>[]>(() => [
@@ -480,16 +428,12 @@ export function QualityControlDashboard() {
   ], []);
 
   const rowSelection = useMemo(() => ({
-    mode: "multiRow" as const, checkboxes: true, headerCheckbox: true,
-    selectAll: "filtered" as const, hideDisabledCheckboxes: false, enableClickSelection: false,
+    ...BASE_ROW_SELECTION,
+    selectAll: "filtered" as const,
     isRowSelectable: ({ data }: { data?: QualityControlItem }) => Boolean(data && canBulkPass(data)),
   }), []);
   const syncSelection = useCallback(() => {
-    const api = qcGridRef.current?.api;
-    if (!api) return;
-    api.forEachNode((node) => {
-      if (node.data) node.setSelected(canBulkPass(node.data) && bulkIds.includes(node.data.requirementId), false, "api");
-    });
+    syncGridSelection(qcGridRef.current?.api, (item) => canBulkPass(item) && bulkIds.includes(item.requirementId));
   }, [bulkIds]);
   useEffect(() => { syncSelection(); }, [syncSelection, filtered]);
 
@@ -510,18 +454,11 @@ export function QualityControlDashboard() {
         </div>
         <div className="flex flex-col items-stretch gap-2 sm:items-end">
           <ForceQcPicker />
-          <div className="grid grid-cols-3 gap-2">
-            {[
-              { label: "Awaiting QC", value: stats.pending, icon: ClipboardCheck, tone: "bg-violet-50 text-violet-700 dark:bg-violet-400/15 dark:text-violet-300" },
-              { label: "Passed", value: stats.passed, icon: Check, tone: "bg-emerald-50 text-emerald-700 dark:bg-emerald-400/15 dark:text-emerald-300" },
-              { label: "Failed", value: stats.failed, icon: X, tone: "bg-rose-50 text-rose-700 dark:bg-rose-400/15 dark:text-rose-300" },
-            ].map(({ label, value, icon: Icon, tone }) => (
-              <div key={label} className="flex min-w-28 items-center gap-3 rounded-xl border bg-card px-3 py-2.5 shadow-sm">
-                <div className={cn("grid size-8 place-items-center rounded-lg", tone)}><Icon className="size-4" /></div>
-                <div><div className="text-lg font-bold leading-none">{value}</div><div className="mt-1 text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{label}</div></div>
-              </div>
-            ))}
-          </div>
+          <StatTiles className="grid grid-cols-3 gap-2" tileMinWidth="min-w-28" items={[
+            { label: "Awaiting QC", value: stats.pending, icon: ClipboardCheck, tone: "bg-violet-50 text-violet-700 dark:bg-violet-400/15 dark:text-violet-300" },
+            { label: "Passed", value: stats.passed, icon: Check, tone: "bg-emerald-50 text-emerald-700 dark:bg-emerald-400/15 dark:text-emerald-300" },
+            { label: "Failed", value: stats.failed, icon: X, tone: "bg-rose-50 text-rose-700 dark:bg-rose-400/15 dark:text-rose-300" },
+          ]} />
         </div>
       </div>
 
@@ -567,28 +504,28 @@ export function QualityControlDashboard() {
         {query.isPending ? (
           <div className="space-y-3 p-5">{Array.from({ length: 5 }).map((_, index) => <Skeleton key={index} className="h-28 w-full" />)}</div>
         ) : query.isError && !query.data ? (
-          <div className="grid min-h-80 place-items-center p-6 text-center"><div><ShieldCheck className="mx-auto mb-3 size-10 text-destructive" /><h2 className="font-semibold">Couldn’t load quality control</h2><p className="mt-1 text-sm text-muted-foreground">{query.error.message}</p><Button className="mt-4" onClick={() => query.refetch()}>Try again</Button></div></div>
+          <EmptyState icon={ShieldCheck} iconClassName="size-10 text-destructive" title="Couldn’t load quality control" message={query.error.message}><Button className="mt-4" onClick={() => query.refetch()}>Try again</Button></EmptyState>
         ) : items.length === 0 ? (
-          <div className="grid min-h-60 place-items-center p-6 text-center"><div><ClipboardCheck className="mx-auto mb-3 size-10 text-emerald-600 dark:text-emerald-400" /><h3 className="font-semibold">QC queue is clear</h3><p className="mt-1 text-sm text-muted-foreground">Requirements will appear after all pre-QC manufacturing operations are complete.</p></div></div>
+          <EmptyState className="min-h-60" icon={ClipboardCheck} iconClassName="size-10 text-emerald-600 dark:text-emerald-400" titleAs="h3" title="QC queue is clear" message="Requirements will appear after all pre-QC manufacturing operations are complete." />
         ) : filtered.length === 0 ? (
-          <div className="grid min-h-80 place-items-center p-6 text-center"><div><Search className="mx-auto mb-3 size-10 text-muted-foreground/60" /><h2 className="font-semibold">No QC items match</h2><p className="mt-1 text-sm text-muted-foreground">Try another status, machine, or location, or clear the search.</p><Button variant="outline" className="mt-4" onClick={clearFilters}>Clear filters</Button></div></div>
+          <EmptyState icon={Search} iconClassName="size-10 text-muted-foreground/60" title="No QC items match" message="Try another status, machine, or location, or clear the search."><Button variant="outline" className="mt-4" onClick={clearFilters}>Clear filters</Button></EmptyState>
         ) : (
           <>
             <div className="hidden h-[min(66vh,760px)] min-h-[500px] md:block">
               <AgGridReact<QualityControlItem>
                 ref={qcGridRef}
                 rowSelection={rowSelection}
-                selectionColumnDef={{ width: 48, pinned: "left", resizable: false }}
+                selectionColumnDef={SELECTION_COLUMN_DEF}
                 onGridReady={syncSelection}
                 onRowDataUpdated={syncSelection}
                 onSelectionChanged={({ api, source }) => {
-                  if (["api", "rowDataChanged", "gridInitializing", "selectableChanged"].includes(source)) return;
+                  if (!isUserSelectionSource(source)) return;
                   setBulkIds((ids) => mergeVisibleSelection(ids, filtered.map((item) => item.requirementId), api.getSelectedRows().map((item) => item.requirementId)));
                 }}
                 theme={gridTheme}
                 rowData={filtered}
                 columnDefs={columnDefs}
-                defaultColDef={{ sortable: true, filter: true, resizable: true }}
+                defaultColDef={FILTERABLE_COL_DEF}
                 getRowId={({ data }) => String(data.requirementId)}
                 onRowDoubleClicked={({ data }) => data && openItem(data)}
                 pagination
@@ -622,15 +559,15 @@ export function QualityControlDashboard() {
                     />
                     <ProductionNotesForQc
                       item={item}
-                      deleting={productionNotesAreDeleting}
+                      deleting={deleteProductionNotesMutation.isPending}
                       onDelete={deleteProductionNotesMutation.mutate}
                     />
-                    <div className="mt-3"><StorageLocationEditor requirementId={item.requirementId} value={item.storageLocation} updatedBy={item.locationUpdatedBy} updatedAt={item.locationUpdatedAt} canEdit allowOnRobot={robotPlacementAllowed(operation) && canUseOnRobotLocation(item.effectiveQcResult === "passed", operation.finishingComplete)} /></div>
+                    <div className="mt-3"><StorageLocationEditor requirementId={item.requirementId} value={item.storageLocation} updatedBy={item.locationUpdatedBy} updatedAt={item.locationUpdatedAt} allowOnRobot={onRobotAllowed(operation, item.effectiveQcResult === "passed", operation.finishingComplete)} /></div>
                     <div className="mt-3 flex flex-wrap items-center gap-2">
                       <Button variant="outline" nativeButton={!operation.hasDrawingPdf} render={operation.hasDrawingPdf ? <a href={`/api/operations/${operation.id}/files/drawing-pdf`} target="_blank" rel="noreferrer" /> : undefined} disabled={!operation.hasDrawingPdf}><FileText /> Drawing PDF</Button>
                       <Button variant="outline" nativeButton={!operation.onshapeUrl} render={operation.onshapeUrl ? <a href={operation.onshapeUrl} target="_blank" rel="noreferrer" /> : undefined} disabled={!operation.onshapeUrl}><ExternalLink /> Onshape source</Button>
                       <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
-                        {item.result === "pending" ? <><Button variant="destructive" onClick={() => openFailureDialog(item)} disabled={operation.obsolete || !operation.activeInBom || reviewIsPending || !item.operations.every((row) => row.status === "Complete")}><X /> Fail QC</Button><Button className="bg-emerald-600 hover:bg-emerald-700" onClick={() => mutateReview({ item, result: "passed", notes: draftNotes[item.requirementId] ?? item.notes })} disabled={operation.obsolete || !operation.activeInBom || reviewIsPending || !item.operations.every((row) => row.status === "Complete")}>{reviewIsPending ? <LoaderCircle className="animate-spin" /> : <Check />} Pass QC</Button></> : item.result === "passed" ? <><Button onClick={() => mutateNotes({ item, notes: draftNotes[item.requirementId] ?? item.notes })} disabled={notesArePending || draftNotes[item.requirementId] === undefined || draftNotes[item.requirementId] === item.notes}>{notesArePending ? <LoaderCircle className="animate-spin" /> : <Save />} Save note</Button><Button variant="outline" onClick={() => mutateUndoReview(item)} disabled={operation.obsolete || !operation.activeInBom || undoReviewIsPending || notesArePending}><Clock3 /> Undo QC pass</Button></> : <p className="text-xs text-muted-foreground">Complete the reopened route to request QC again.</p>}
+                        {reviewActions(item, false)}
                       </div>
                     </div>
                   </article>
@@ -662,7 +599,6 @@ export function QualityControlDashboard() {
         <SheetContent detailView className="w-full overflow-y-auto sm:max-w-xl">
           {selected && (() => {
             const operation = selected.operations[0];
-            const ready = selected.operations.every((item) => item.status === "Complete");
             return <>
               <SheetHeader className="border-b p-6 pr-14">
                 <div className="mb-2 flex flex-wrap items-center gap-2">
@@ -704,10 +640,10 @@ export function QualityControlDashboard() {
                   />
                   <ProductionNotesForQc
                     item={selected}
-                    deleting={productionNotesAreDeleting}
+                    deleting={deleteProductionNotesMutation.isPending}
                     onDelete={deleteProductionNotesMutation.mutate}
                   />
-                  {selected.reviewedAt && <p className="mt-2 text-xs text-muted-foreground">Reviewed {formatDate(selected.reviewedAt)}{selected.reviewedBy ? ` by ${selected.reviewedBy}` : ""}</p>}
+                  {selected.reviewedAt && <p className="mt-2 text-xs text-muted-foreground">Reviewed {formatShortDateTime(selected.reviewedAt)}{selected.reviewedBy ? ` by ${selected.reviewedBy}` : ""}</p>}
                 </section>
 
                 <section>
@@ -716,8 +652,7 @@ export function QualityControlDashboard() {
                     value={selected.storageLocation}
                     updatedBy={selected.locationUpdatedBy}
                     updatedAt={selected.locationUpdatedAt}
-                    canEdit
-                    allowOnRobot={robotPlacementAllowed(operation) && canUseOnRobotLocation(selected.effectiveQcResult === "passed", operation.finishingComplete)}
+                    allowOnRobot={onRobotAllowed(operation, selected.effectiveQcResult === "passed", operation.finishingComplete)}
                   />
                 </section>
 
@@ -731,17 +666,7 @@ export function QualityControlDashboard() {
               </div></div>
 
               <SheetFooter className="sticky bottom-0 border-t bg-card/95 p-4 backdrop-blur">
-                {selected.result === "pending" ? <>
-                  <Button size="lg" variant="destructive" className="h-11" onClick={() => openFailureDialog(selected)} disabled={operation.obsolete || !operation.activeInBom || reviewIsPending || !ready}><X /> Fail QC</Button>
-                  <Button size="lg" className="h-11 bg-emerald-600 hover:bg-emerald-700" onClick={() => mutateReview({ item: selected, result: "passed", notes: draftNotes[selected.requirementId] ?? selected.notes })} disabled={operation.obsolete || !operation.activeInBom || reviewIsPending || !ready}>{reviewIsPending ? <LoaderCircle className="animate-spin" /> : <Check />} Pass QC</Button>
-                </> : selected.result === "passed" ? (
-                  <>
-                    <Button size="lg" className="h-11" onClick={() => mutateNotes({ item: selected, notes: draftNotes[selected.requirementId] ?? selected.notes })} disabled={notesArePending || draftNotes[selected.requirementId] === undefined || draftNotes[selected.requirementId] === selected.notes}>{notesArePending ? <LoaderCircle className="animate-spin" /> : <Save />} Save note</Button>
-                    <Button size="lg" variant="outline" className="h-11" onClick={() => mutateUndoReview(selected)} disabled={operation.obsolete || !operation.activeInBom || undoReviewIsPending || notesArePending}>{undoReviewIsPending ? <LoaderCircle className="animate-spin" /> : <Clock3 />} Undo QC pass</Button>
-                  </>
-                ) : (
-                  <div className="rounded-xl bg-rose-50 p-3 text-center text-sm font-medium text-rose-800 dark:bg-rose-400/15 dark:text-rose-200">Complete the reopened route to request QC again.</div>
-                )}
+                {reviewActions(selected, true)}
                 <Button variant="outline" onClick={() => setSelectedId(null)}>Close</Button>
               </SheetFooter>
             </>;

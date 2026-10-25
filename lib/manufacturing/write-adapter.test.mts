@@ -1,33 +1,29 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { ENTITIES, normalizeRow, runtimeRow, type NormalizedRow, type RawRow } from "./model.ts";
+import type { NormalizedRow } from "./model.ts";
 import { createSupabaseWriteAdapter, ManufacturingWriteError, type WriteState } from "./write-adapter.ts";
 import { formatSlackManufacturingEvent } from "../slack-notifications-core.ts";
 
 const ACTOR = { id: "00000000-0000-4000-8000-000000000190", name: "Alex A." };
 
-for (const metadata of ["absent", "stale"] as const) {
-  test(`native CAM claims resolve current identities with ${metadata} migration metadata`, async () => {
-    const state = fixture({ operation: { "Work Type": { value: "CAM" } } });
-    for (const records of Object.values(state.rows)) for (const row of records) {
-      delete row.baserow_id;
-      delete row.source_row;
-      if (metadata === "stale") row.source_row = { id: row.id,
-        "Production Requirement": [{ id: 20, value: "OLD — Obsolete [OLD-ASSEMBLY]" }],
-        Status: { value: "Complete" }, "Claimed Quantity": 999 };
-    }
-    state.rows.assemblies[0].assembly_number = "a26c-0002";
-    const { adapter, commits } = harness(state);
-    const result = await adapter.applyQuantityAction(10, "claim", 1, ACTOR);
-    const payload = formatSlackManufacturingEvent({ ...result.notificationContext,
-      type: "operation_claimed", actorName: ACTOR.name, quantity: 1 });
-    assert.match(payload.text, /P-1 — Fixture/);
-    assert.match(JSON.stringify(payload.blocks), /Assembly a26c-0002/);
-    assert.doesNotMatch(JSON.stringify(payload), /OLD|Unknown|Unassigned/);
-    assert.equal(commits.length, 1);
-  });
-}
+test("native CAM claims resolve current identities, not stale Baserow source rows", async () => {
+  const state = fixture({ operation: { work_type: "CAM" } });
+  for (const records of Object.values(state.rows)) for (const row of records) {
+    row.source_row = { id: row.id,
+      "Production Requirement": [{ id: 20, value: "OLD — Obsolete [OLD-ASSEMBLY]" }],
+      Status: { value: "Complete" }, "Claimed Quantity": 999 };
+  }
+  state.rows.assemblies[0].assembly_number = "a26c-0002";
+  const { adapter, commits } = harness(state);
+  const result = await adapter.applyQuantityAction(10, "claim", 1, ACTOR);
+  const payload = formatSlackManufacturingEvent({ ...result.notificationContext,
+    type: "operation_claimed", actorName: ACTOR.name, quantity: 1 });
+  assert.match(payload.text, /P-1 — Fixture/);
+  assert.match(JSON.stringify(payload.blocks), /Assembly a26c-0002/);
+  assert.doesNotMatch(JSON.stringify(payload), /OLD|Unknown|Unassigned/);
+  assert.equal(commits.length, 1);
+});
 
 test("write snapshots without identity tables load current part and assembly columns", async () => {
   const state = fixture();
@@ -59,14 +55,14 @@ test("write snapshots without identity tables load current part and assembly col
 
 test("Force QC preserves completed credit, clears claims, includes CAM, and commits one passed review", async () => {
   const state = fixture({ operation: {
-    Status: { value: "In Progress" }, "Completed Quantity": 1, "Claimed Quantity": 1,
-    "Quantity Ledger": JSON.stringify([{ userId: "other", name: "Other", claimed: 1, completed: 1 }]),
+    status: "In Progress", completed_quantity: 1, claimed_quantity: 1,
+    quantity_ledger: JSON.stringify([{ userId: "other", name: "Other", claimed: 1, completed: 1 }]),
   } });
-  state.rows.operations.push(normalized("operations", {
-    id: 12, Operation: "fixture|OP1|CAM", "Production Requirement": [{ id: 20 }],
-    "Operation Number": { value: "OP1" }, "Work Type": { value: "CAM" }, "Active in Routing": true,
-    Status: { value: "Planned" }, "CAM Program Path": "existing.nc", "CAM Notes": "Keep this",
-  }));
+  state.rows.operations.push({
+    id: 12, operation_key: "fixture|OP1|CAM", requirement_id: 20,
+    operation_number: "OP1", work_type: "CAM", active_in_routing: true,
+    status: "Planned", cam_program_path: "existing.nc", cam_notes: "Keep this",
+  });
   const { adapter, commits } = harness(state);
   const preview = await adapter.previewForceQuality(20);
   assert.equal(commits.length, 0);
@@ -97,8 +93,8 @@ test("Force QC preserves completed credit, clears claims, includes CAM, and comm
 
 test("Force QC can fail an unfinished batch and return it to manufacturing atomically", async () => {
   const { adapter, commits } = harness(withThreadedInsert(fixture({ operation: {
-    Status: { value: "In Progress" }, "Completed Quantity": 1, "Claimed Quantity": 1,
-    "Quantity Ledger": JSON.stringify([{ userId: "other", name: "Other", claimed: 1, completed: 1 }]),
+    status: "In Progress", completed_quantity: 1, claimed_quantity: 1,
+    quantity_ledger: JSON.stringify([{ userId: "other", name: "Other", claimed: 1, completed: 1 }]),
   } })));
   const preview = await adapter.previewForceQuality(20);
   const review = await adapter.forceQualityReview(20, "Rejected batch", preview.token, ACTOR, "failed");
@@ -109,6 +105,9 @@ test("Force QC can fail an unfinished batch and return it to manufacturing atomi
   const qc = commits[0].p_qc as Record<string, unknown>;
   assert.equal(qc.result, "failed");
   assert.equal(qc.notes, "Rejected batch");
+  // The commit RPC rejects a failed review without a whole-number rejected quantity.
+  assert.equal(qc.rejected_quantity, 2);
+  assert.equal(review.rejectedQuantity, 2);
   const changes = commits[0].p_changes as Array<{ entity: string; id: number; patch: Record<string, unknown> }>;
   const machining = changes.find(change => change.entity === "operations" && change.id === 10)!.patch;
   assert.equal(machining.status, "Ready");
@@ -120,9 +119,68 @@ test("Force QC can fail an unfinished batch and return it to manufacturing atomi
   assert.equal(changes.find(change => change.entity === "operations" && change.id === 11), undefined);
 });
 
+test("Force QC failure requires a reason and passes send no rejected quantity", async () => {
+  const blank = harness(fixture());
+  const preview = await blank.adapter.previewForceQuality(20);
+  await assert.rejects(blank.adapter.forceQualityReview(20, "   ", preview.token, ACTOR, "failed"),
+    (error) => error instanceof ManufacturingWriteError && error.status === 400 && /reason/.test(error.message));
+  assert.equal(blank.commits.length, 0);
+
+  const passed = harness(fixture());
+  const review = await passed.adapter.forceQualityReview(20, "", (await passed.adapter.previewForceQuality(20)).token, ACTOR);
+  assert.equal(review.rejectedQuantity, null);
+  assert.equal("rejected_quantity" in (passed.commits[0].p_qc as Record<string, unknown>), false);
+});
+
+test("Force QC refuses to fail a batch whose required quantity is not finite", async () => {
+  // to_jsonb writes numeric NaN as the string "NaN".
+  const { adapter, commits } = harness(fixture({ requirement: { required_quantity: "NaN" } }));
+  const preview = await adapter.previewForceQuality(20);
+  await assert.rejects(adapter.forceQualityReview(20, "Rejected batch", preview.token, ACTOR, "failed"),
+    (error) => error instanceof ManufacturingWriteError && error.status === 409
+      && error.message === "Rejected quantity must be a whole number from 1 to NaN");
+  assert.equal(commits.length, 0);
+});
+
+test("workflow rule violations are conflicts and invalid CAM quantities are bad requests", async () => {
+  const claimed = harness(fixture());
+  await assert.rejects(claimed.adapter.applyQuantityAction(10, "claim", 3, ACTOR),
+    (error) => error instanceof ManufacturingWriteError && error.status === 409 && /Only 2 part\(s\) remain available/.test(error.message));
+  const cam = harness(fixture({ operation: { work_type: "CAM" } }));
+  await assert.rejects(cam.adapter.applyQuantityAction(10, "claim", 2, ACTOR),
+    (error) => error instanceof ManufacturingWriteError && error.status === 400 && /single task/.test(error.message));
+
+  const prints = harness(fixture({ operation: {
+    machine: "Bambu 3D Printer", status: "In Progress", claimed_quantity: 1,
+    quantity_ledger: JSON.stringify([{ userId: "other", name: "Other", claimed: 1, completed: 0 }]),
+  } }));
+  await assert.rejects(prints.adapter.applyQuantityAction(10, "complete", 2, ACTOR, { completeAllClaims: true }),
+    (error) => error instanceof ManufacturingWriteError && error.status === 409 && /print claims changed/.test(error.message));
+
+  const camState = fixture({ operation: {
+    work_type: "CAM", status: "Complete", completed_quantity: 1,
+    quantity_ledger: JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 1 }]),
+  } });
+  camState.rows.operations.push({
+    id: 13, operation_key: "fixture|OP1|Manufacturing", requirement_id: 20,
+    operation_number: "OP1", machine: "Haas CNC", work_type: "Manufacturing",
+    active_in_routing: true, status: "In Progress", claimed_quantity: 1,
+    quantity_ledger: JSON.stringify([{ userId: "other", name: "Other", claimed: 1, completed: 0 }]),
+  });
+  const reopenCam = harness(camState);
+  await assert.rejects(reopenCam.adapter.applyQuantityAction(10, "undo_complete", 1, ACTOR),
+    (error) => error instanceof ManufacturingWriteError && error.status === 409 && /cannot be reopened/.test(error.message));
+
+  // Unparseable and malformed ledgers get the same reconciliation message, not a parser error.
+  const corrupt = harness(fixture({ operation: { claimed_quantity: 1, quantity_ledger: "{not json" } }));
+  await assert.rejects(corrupt.adapter.applyQuantityAction(10, "claim", 1, ACTOR),
+    (error) => error instanceof ManufacturingWriteError && error.status === 409 && /reconciliation is required/.test(error.message));
+  assert.equal(claimed.commits.length + cam.commits.length + prints.commits.length + reopenCam.commits.length + corrupt.commits.length, 0);
+});
+
 test("Force QC routes finishing and post-QC work without completing inserts", async () => {
   for (const finishing of ["None", "Black"]) {
-    const state = withThreadedInsert(fixture({ requirement: { Finishing: { value: finishing } } }));
+    const state = withThreadedInsert(fixture({ requirement: { finishing } }));
     const { adapter, commits } = harness(state);
     const preview = await adapter.previewForceQuality(20);
     assert.equal(preview.operations.length, 1);
@@ -138,7 +196,7 @@ test("Force QC routes finishing and post-QC work without completing inserts", as
 
 test("Force QC can complete finishing in the same passed review", async () => {
   for (const postQcWork of [false, true]) {
-    const base = fixture({ requirement: { Finishing: { value: "Black" } }, finishing: { Machinist: "Other" } });
+    const base = fixture({ requirement: { finishing: "Black" }, finishing: { machinist: "Other" } });
     const { adapter, commits } = harness(postQcWork ? withThreadedInsert(base) : base);
     const preview = await adapter.previewForceQuality(20);
     const review = await adapter.forceQualityReview(20, "Finished", preview.token, ACTOR, "passed", true);
@@ -156,7 +214,7 @@ test("Force QC can complete finishing in the same passed review", async () => {
   const plain = harness(fixture());
   const plainPreview = await plain.adapter.previewForceQuality(20);
   assert.equal((await plain.adapter.forceQualityReview(20, "", plainPreview.token, ACTOR, "passed", true)).finishingCompleted, false);
-  const failing = harness(fixture({ requirement: { Finishing: { value: "Black" } } }));
+  const failing = harness(fixture({ requirement: { finishing: "Black" } }));
   await assert.rejects(failing.adapter.forceQualityReview(20, "", "fixture-token", ACTOR, "failed", true), /only be completed when QC passes/);
   assert.equal(failing.commits.length, 0);
 });
@@ -165,11 +223,11 @@ test("Force QC rejects stale previews, inactive requirements, completed prerequi
   const stale = harness(fixture());
   await assert.rejects(stale.adapter.forceQualityReview(20, "", "old-token", ACTOR), /Refresh the preview/);
   assert.equal(stale.commits.length, 0);
-  const inactive = harness(fixture({ requirement: { "Active in BOM": false } }));
+  const inactive = harness(fixture({ requirement: { active_in_bom: false } }));
   await assert.rejects(inactive.adapter.previewForceQuality(20), /inactive/);
-  const complete = harness(fixture({ operation: { Status: { value: "Complete" }, "Completed Quantity": 2 } }));
+  const complete = harness(fixture({ operation: { status: "Complete", completed_quantity: 2 } }));
   await assert.rejects(complete.adapter.previewForceQuality(20), /normal QC/);
-  const passed = harness(fixture({ operation: { Status: { value: "Complete" }, "Completed Quantity": 2 }, reviews: [{
+  const passed = harness(fixture({ operation: { status: "Complete", completed_quantity: 2 }, reviews: [{
     id: 1, production_requirement_id: 20, operation_id: null, result: "passed", reviewed_at: "2026-09-01T00:00:00Z",
   }] }));
   await assert.rejects(passed.adapter.previewForceQuality(20), /current QC pass/);
@@ -204,7 +262,7 @@ test("Force QC transport retries reuse the atomic payload and database conflicts
 });
 
 test("Force QC normalizes legacy rework rows and propagates database permission rejection without changing its input state", async () => {
-  const state = fixture({ operation: { Status: { value: "Needs Rework" } }, requirement: { "QC Outcome": { value: "Failed" } } });
+  const state = fixture({ operation: { status: "Needs Rework" }, requirement: { qc_outcome: "Failed" } });
   const original = structuredClone(state);
   const denied = harness(state, () => Response.json({ code: "42501" }, { status: 403 }));
   const preview = await denied.adapter.previewForceQuality(20);
@@ -214,83 +272,74 @@ test("Force QC normalizes legacy rework rows and propagates database permission 
   assert.deepEqual(state, original);
 });
 
-function normalized(entityName: string, raw: RawRow): NormalizedRow {
-  const entity = ENTITIES.find((candidate) => candidate.name === entityName);
-  assert.ok(entity);
-  const row = normalizeRow(entity, raw) as NormalizedRow;
-  delete row.source_row;
-  delete row.baserow_id;
-  return row;
-}
-
 function fixture(options: {
-  operation?: Partial<RawRow>;
-  requirement?: Partial<RawRow>;
-  finishing?: Partial<RawRow>;
-  reviews?: WriteState["reviews"];
+  operation?: Partial<NormalizedRow>;
+  requirement?: Partial<NormalizedRow>;
+  finishing?: Partial<NormalizedRow>;
+  reviews?: Array<Pick<WriteState["reviews"][number], "id" | "production_requirement_id" | "operation_id" | "result" | "reviewed_at">>;
   retractions?: WriteState["retractions"];
 } = {}): WriteState {
-  const requirement = normalized("requirements", {
+  const requirement = {
     id: 20,
-    "Production Key": "fixture",
-    Part: [{ id: 40 }], Assembly: [{ id: 50 }],
-    "Required Quantity": 2,
-    Finishing: { value: "None" },
-    "Active in BOM": true,
-    Status: { value: "Ready for Manufacturing" },
-    Machinist: "",
-    "QC Outcome": { value: "Not Inspected" },
-    "QC Notes": "",
-    "QC Reviewed By": "",
+    production_key: "fixture",
+    part_id: 40, assembly_id: 50,
+    required_quantity: 2,
+    finishing: "None",
+    active_in_bom: true,
+    status: "Ready for Manufacturing",
+    machinist: "",
+    qc_outcome: "Not Inspected",
+    qc_notes: "",
+    qc_reviewed_by: "",
     ...options.requirement,
-  });
-  const operation = normalized("operations", {
+  };
+  const operation = {
     id: 10,
-    Operation: "fixture|OP1|Manufacturing",
-    "Production Requirement": [{ id: 20, value: "P-1 — Fixture [A-1]" }],
-    "Operation Number": { value: "OP1" },
-    Machine: { value: "Mill" },
-    "Work Type": { value: "Manufacturing" },
-    "Active in Routing": true,
-    Status: { value: "Ready" },
-    Machinist: "",
-    "Claimed Quantity": 0,
-    "Completed Quantity": 0,
-    "Quantity Ledger": "",
+    operation_key: "fixture|OP1|Manufacturing",
+    requirement_id: 20,
+    operation_number: "OP1",
+    machine: "Mill",
+    work_type: "Manufacturing",
+    active_in_routing: true,
+    status: "Ready",
+    machinist: "",
+    claimed_quantity: 0,
+    completed_quantity: 0,
+    quantity_ledger: "",
     ...options.operation,
-  });
-  const finishing = normalized("finishing", {
+  };
+  const finishing = {
     id: 30,
-    "Production Key": "fixture",
-    "Production Requirement": [{ id: 20, value: "P-1 — Fixture [A-1]" }],
-    Active: true,
-    Machinist: "",
+    production_key: "fixture",
+    requirement_id: 20,
+    active: true,
+    machinist: "",
     ...options.finishing,
-  });
+  };
   return {
     token: "fixture-token",
     rows: { parts: [{ id: 40, part_number: "P-1", name: "Fixture" }], assemblies: [{ id: 50, assembly_number: "A-1" }], operations: [operation], requirements: [requirement], finishing: [finishing] },
-    reviews: options.reviews ?? [],
+    reviews: (options.reviews ?? []).map(review => ({ notes: "", rejected_quantity: null, reviewed_by: ACTOR.id, ...review })),
     retractions: options.retractions ?? [],
   };
 }
 
-function withThreadedInsert(state: WriteState, overrides: Partial<RawRow> = {}) {
-  state.rows.operations.push(normalized("operations", {
+function withThreadedInsert(state: WriteState, overrides: Partial<NormalizedRow> = {}) {
+  state.rows.operations.push({
     id: 11,
-    Operation: "fixture|OP2|Manufacturing",
-    "Production Requirement": [{ id: 20, value: "P-1 — Fixture [A-1]" }],
-    "Operation Number": { value: "OP2" },
-    Machine: { value: "Threaded Insert" },
-    "Work Type": { value: "Manufacturing" },
-    "Active in Routing": true,
-    Status: { value: "Planned" },
-    Machinist: "",
-    "Claimed Quantity": 0,
-    "Completed Quantity": 0,
-    "Quantity Ledger": "",
+    operation_key: "fixture|OP2|Manufacturing",
+    requirement_id: 20,
+    operation_number: "OP2",
+    machine: "Threaded Insert",
+    work_type: "Manufacturing",
+    active_in_routing: true,
+    status: "Planned",
+    machinist: "",
+    claimed_quantity: 0,
+    completed_quantity: 0,
+    quantity_ledger: "",
     ...overrides,
-  }));
+  });
   return state;
 }
 
@@ -337,6 +386,7 @@ test("quantity claims are planned and sent as one compare-and-swap transaction",
     machine: "Mill",
     previousRequirementStatus: "Ready for Manufacturing",
     requirementStatus: "On Machine",
+    postQcWorkReady: false,
   });
   assert.equal(commits.length, 1);
   const commit = commits[0];
@@ -355,8 +405,23 @@ test("quantity claims are planned and sent as one compare-and-swap transaction",
   assert.match(String(operation?.quantity_ledger), /"claimed":1/);
 });
 
+test("a non-finite engineering quantity on another requirement does not block shop writes", async () => {
+  // to_jsonb writes numeric NaN and Infinity as strings; only shop columns are coerced for the commit.
+  const state = fixture();
+  state.rows.requirements.push({ id: 21, production_key: "broken", part_id: 40, assembly_id: 50, required_quantity: "NaN", finishing: "Anodize", active_in_bom: true, status: "Ready for Manufacturing" });
+  state.rows.finishing.push({ id: 31, production_key: "broken", requirement_id: 21, required_quantity: "Infinity", active: true, machinist: "" });
+  const { adapter, commits } = harness(state);
+  const result = await adapter.applyQuantityAction(10, "claim", 1, ACTOR);
+  assert.equal(result.status, "In Progress");
+  const changes = commits[0].p_changes as Array<{ entity: string; id: number }>;
+  assert.deepEqual(changes.map(({ entity, id }) => ({ entity, id })), [
+    { entity: "requirements", id: 20 },
+    { entity: "operations", id: 10 },
+  ]);
+});
+
 test("print claims save their printer in the same transaction and omission leaves location alone", async () => {
-  const state = fixture({ operation: { Machine: { value: "Bambu 3D Printer" } } });
+  const state = fixture({ operation: { machine: "Bambu 3D Printer" } });
   const { adapter, commits } = harness(state);
   const result = await adapter.applyQuantityAction(10, "claim", 1, ACTOR, { location: "Bambu X1C #2" });
   assert.equal(result.storageLocation, "Bambu X1C #2");
@@ -374,8 +439,8 @@ test("another user can complete all print claims and move the part without steal
     { userId: "other-2", name: "Other B.", claimed: 1, completed: 0 },
   ];
   const state = fixture({ operation: {
-    Machine: { value: "Bambu 3D Printer" }, Status: { value: "In Progress" },
-    "Claimed Quantity": 2, "Quantity Ledger": JSON.stringify(allocations),
+    machine: "Bambu 3D Printer", status: "In Progress",
+    claimed_quantity: 2, quantity_ledger: JSON.stringify(allocations),
   } });
   const { adapter, commits } = harness(state);
   const result = await adapter.applyQuantityAction(10, "complete", 2, ACTOR, { completeAllClaims: true, location: "Clarke 1" });
@@ -392,8 +457,8 @@ test("another user can complete all print claims and move the part without steal
 
 test("completion location is optional for ordinary manufacturing and forbidden on release or CAM", async () => {
   const state = fixture({ operation: {
-    Status: { value: "In Progress" }, "Claimed Quantity": 2,
-    "Quantity Ledger": JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 2, completed: 0 }]),
+    status: "In Progress", claimed_quantity: 2,
+    quantity_ledger: JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 2, completed: 0 }]),
   } });
   const { adapter, commits } = harness(state);
   const result = await adapter.applyQuantityAction(10, "complete", 2, ACTOR, { location: "Shelf 2" });
@@ -402,13 +467,13 @@ test("completion location is optional for ordinary manufacturing and forbidden o
   await assert.rejects(adapter.applyQuantityAction(10, "release", 2, ACTOR, { location: "Shelf 2" }), /Set a location/);
   await assert.rejects(adapter.applyQuantityAction(10, "complete", 2, ACTOR, { location: "On Robot" }), /after QC/);
   assert.equal(commits.length, 1);
-  const cam = harness(fixture({ operation: { "Work Type": { value: "CAM" } } }));
+  const cam = harness(fixture({ operation: { work_type: "CAM" } }));
   await assert.rejects(cam.adapter.applyQuantityAction(10, "claim", 1, ACTOR, { location: "Bambu H2D" }), /Set a location/);
   assert.equal(cam.commits.length, 0);
 });
 
 test("print completion and location retry with the identical idempotency payload", async () => {
-  const retry = harness(fixture({ operation: { Machine: { value: "Bambu 3D Printer" } } }), (body, attempt) => {
+  const retry = harness(fixture({ operation: { machine: "Bambu 3D Printer" } }), (body, attempt) => {
     if (attempt === 1) throw new TypeError("connection reset after commit");
     return Response.json(body.p_result);
   });
@@ -433,9 +498,9 @@ test("approved users can update a requirement production note independently of Q
 
 test("CAM completion, finishing, claim stealing, and QC use their atomic action envelopes", async () => {
   const camState = fixture({ operation: {
-    Operation: "fixture|OP1|CAM", Machine: { value: "Haas" }, "Work Type": { value: "CAM" },
-    Status: { value: "In Progress" }, Machinist: "Alex A.", "Claimed Quantity": 1,
-    "Quantity Ledger": JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 1, completed: 0 }]),
+    operation_key: "fixture|OP1|CAM", machine: "Haas", work_type: "CAM",
+    status: "In Progress", machinist: "Alex A.", claimed_quantity: 1,
+    quantity_ledger: JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 1, completed: 0 }]),
   }});
   const cam = harness(camState);
   await cam.adapter.applyQuantityAction(10, "complete", 1, ACTOR, { programPath: "shop/program.nc", notes: "Verified" });
@@ -444,15 +509,15 @@ test("CAM completion, finishing, claim stealing, and QC use their atomic action 
   assert.equal(camPatch?.cam_program_path, "shop/program.nc");
   assert.equal(camPatch?.cam_notes, "Verified");
 
-  const finishing = harness(fixture({ requirement: { Status: { value: "Ready for Finishing" }, Finishing: { value: "Black" } } }));
+  const finishing = harness(fixture({ requirement: { status: "Ready for Finishing", finishing: "Black" } }));
   await finishing.adapter.applyFabricationAction(30, "claim", ACTOR);
   assert.equal(finishing.commits[0].p_action, "finishing_claim");
   assert.deepEqual((finishing.commits[0].p_changes as Array<{ entity: string }>).map((change) => change.entity), ["finishing"]);
 
   const otherId = "00000000-0000-4000-8000-000000000191";
   const steal = harness(fixture({ operation: {
-    Status: { value: "In Progress" }, Machinist: "Blake B. (2)", "Claimed Quantity": 2,
-    "Quantity Ledger": JSON.stringify([{ userId: otherId, name: "Blake B.", claimed: 2, completed: 0 }]),
+    status: "In Progress", machinist: "Blake B. (2)", claimed_quantity: 2,
+    quantity_ledger: JSON.stringify([{ userId: otherId, name: "Blake B.", claimed: 2, completed: 0 }]),
   }}));
   const stolen = await steal.adapter.stealOperationClaim(10, ACTOR);
   assert.deepEqual(stolen.displaced, [{ userId: otherId, name: "Blake B.", quantity: 2 }]);
@@ -460,11 +525,11 @@ test("CAM completion, finishing, claim stealing, and QC use their atomic action 
 
   const qc = harness(fixture({
     operation: {
-      Status: { value: "Complete" }, Machinist: "Alex A. (2)", "Claimed Quantity": 0, "Completed Quantity": 2,
-      "Quantity Ledger": JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 2 }]),
-      "Completed At": "2026-09-05T00:00:00Z",
+      status: "Complete", machinist: "Alex A. (2)", claimed_quantity: 0, completed_quantity: 2,
+      quantity_ledger: JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 2 }]),
+      completed_at: "2026-09-05T00:00:00Z",
     },
-    requirement: { Status: { value: "Ready for QC" }, Machinist: "Alex A. (2)" },
+    requirement: { status: "Ready for QC", machinist: "Alex A. (2)" },
   }));
   const qcResult = await qc.adapter.recordQualityReview(20, "passed", "Looks good", ACTOR, "Clarke 1");
   assert.deepEqual(qcResult.notificationContext, {
@@ -474,6 +539,7 @@ test("CAM completion, finishing, claim stealing, and QC use their atomic action 
     assemblyNumber: "A-1",
     previousRequirementStatus: "Ready for QC",
     requirementStatus: "Complete",
+    postQcWorkReady: false,
   });
   assert.equal(qc.commits[0].p_action, "qc_review");
   assert.equal((qc.commits[0].p_qc as { result: string }).result, "passed");
@@ -484,34 +550,34 @@ test("CAM completion, finishing, claim stealing, and QC use their atomic action 
 test("partial QC rejection reopens every physical stage in order and leaves CAM complete", async () => {
   const otherId = "00000000-0000-4000-8000-000000000191";
   const state = fixture({
-    requirement: { "Required Quantity": 5, Status: { value: "Ready for QC" } },
+    requirement: { required_quantity: 5, status: "Ready for QC" },
     operation: {
-      Status: { value: "Complete" }, Machinist: "Other (2), Alex A. (3)", "Completed Quantity": 5,
-      "Quantity Ledger": JSON.stringify([
+      status: "Complete", machinist: "Other (2), Alex A. (3)", completed_quantity: 5,
+      quantity_ledger: JSON.stringify([
         { userId: otherId, name: "Other", claimed: 0, completed: 2 },
         { userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 3 },
       ]),
-      "Completed At": "2026-09-05T12:00:00Z",
+      completed_at: "2026-09-05T12:00:00Z",
     },
   });
-  state.rows.operations.push(normalized("operations", {
-    id: 11, Operation: "fixture|OP2|Manufacturing", "Production Requirement": [{ id: 20, value: "P-1 — Fixture [A-1]" }],
-    "Operation Number": { value: "OP2" }, Machine: { value: "Lathe" }, "Work Type": { value: "Manufacturing" },
-    "Active in Routing": true, Status: { value: "Complete" }, Machinist: "Alex A. (3), Other (2)",
-    "Claimed Quantity": 0, "Completed Quantity": 5, "Completed At": "2026-09-05T13:00:00Z",
-    "Quantity Ledger": JSON.stringify([
+  state.rows.operations.push({
+    id: 11, operation_key: "fixture|OP2|Manufacturing", requirement_id: 20,
+    operation_number: "OP2", machine: "Lathe", work_type: "Manufacturing",
+    active_in_routing: true, status: "Complete", machinist: "Alex A. (3), Other (2)",
+    claimed_quantity: 0, completed_quantity: 5, completed_at: "2026-09-05T13:00:00Z",
+    quantity_ledger: JSON.stringify([
       { userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 3 },
       { userId: otherId, name: "Other", claimed: 0, completed: 2 },
     ]),
-  }));
-  state.rows.operations.push(normalized("operations", {
-    id: 12, Operation: "fixture|OP1|CAM", "Production Requirement": [{ id: 20, value: "P-1 — Fixture [A-1]" }],
-    "Operation Number": { value: "OP1" }, Machine: { value: "Haas CNC" }, "Work Type": { value: "CAM" },
-    "Active in Routing": true, Status: { value: "Complete" }, Machinist: "Alex A.",
-    "Claimed Quantity": 0, "Completed Quantity": 1, "Completed At": "2026-09-05T11:00:00Z",
-    "Quantity Ledger": JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 1 }]),
-    "CAM Program Path": "programs/fixture.nc", "CAM Notes": "Keep",
-  }));
+  });
+  state.rows.operations.push({
+    id: 12, operation_key: "fixture|OP1|CAM", requirement_id: 20,
+    operation_number: "OP1", machine: "Haas CNC", work_type: "CAM",
+    active_in_routing: true, status: "Complete", machinist: "Alex A.",
+    claimed_quantity: 0, completed_quantity: 1, completed_at: "2026-09-05T11:00:00Z",
+    quantity_ledger: JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 1 }]),
+    cam_program_path: "programs/fixture.nc", cam_notes: "Keep",
+  });
 
   const qc = harness(state);
   const result = await qc.adapter.recordQualityReview(20, "failed", "Bore is oversized", ACTOR, null, 2);
@@ -540,11 +606,11 @@ test("partial QC rejection reopens every physical stage in order and leaves CAM 
 test("QC failure defaults to the full quantity and validates its reason and quantity", async () => {
   const complete = () => fixture({
     operation: {
-      Status: { value: "Complete" }, "Completed Quantity": 2,
-      "Quantity Ledger": JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 2 }]),
-      "Completed At": "2026-09-05T12:00:00Z",
+      status: "Complete", completed_quantity: 2,
+      quantity_ledger: JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 2 }]),
+      completed_at: "2026-09-05T12:00:00Z",
     },
-    requirement: { Status: { value: "Ready for QC" } },
+    requirement: { status: "Ready for QC" },
   });
   const defaulted = harness(complete());
   await defaulted.adapter.recordQualityReview(20, "failed", "Surface finish", ACTOR);
@@ -561,11 +627,11 @@ test("part locations are editable before QC while On Robot requires passed QC an
   const reviewedAt = "2026-09-05T13:00:00Z";
   const passedState = fixture({
     operation: {
-      Status: { value: "Complete" }, "Completed Quantity": 2,
-      "Quantity Ledger": JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 2 }]),
-      "Completed At": "2026-09-05T12:00:00Z",
+      status: "Complete", completed_quantity: 2,
+      quantity_ledger: JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 2 }]),
+      completed_at: "2026-09-05T12:00:00Z",
     },
-    requirement: { "QC Outcome": { value: "Passed" }, Status: { value: "Complete" } },
+    requirement: { qc_outcome: "Passed", status: "Complete" },
     reviews: [{ id: 50, production_requirement_id: 20, operation_id: null, result: "passed", reviewed_at: reviewedAt }],
   });
   const changed = harness(fixture());
@@ -589,16 +655,16 @@ test("part locations are editable before QC while On Robot requires passed QC an
   assert.equal(withoutQc.commits.length, 0);
 
   const awaitingFinishing = harness(fixture({
-    operation: runtimeRow(ENTITIES.find(entity => entity.name === "operations")!, passedState.rows.operations[0]),
-    requirement: { "QC Outcome": { value: "Passed" }, Finishing: { value: "Black" }, Status: { value: "Ready for Finishing" } },
+    operation: passedState.rows.operations[0],
+    requirement: { qc_outcome: "Passed", finishing: "Black", status: "Ready for Finishing" },
     reviews: passedState.reviews,
   }));
   await assert.rejects(awaitingFinishing.adapter.updatePartLocation(20, "On Robot", ACTOR), /Complete finishing/);
   assert.equal(awaitingFinishing.commits.length, 0);
 
   // Restoring from obsolete leaves the BOM row and routing inactive.
-  const historical = fixture({ operation: runtimeRow(ENTITIES.find(entity => entity.name === "operations")!, passedState.rows.operations[0]),
-    requirement: { "QC Outcome": { value: "Passed" }, Status: { value: "Complete" } }, reviews: passedState.reviews });
+  const historical = fixture({ operation: passedState.rows.operations[0],
+    requirement: { qc_outcome: "Passed", status: "Complete" }, reviews: passedState.reviews });
   Object.assign(historical.rows.requirements[0], { active_in_bom: false });
   Object.assign(historical.rows.operations[0], { active_in_routing: false });
   const neverObsoleted = harness(historical);
@@ -612,12 +678,12 @@ test("passed QC inspection notes can be revised without changing workflow status
   const reviewedAt = "2026-09-05T13:00:00Z";
   const state = fixture({
     operation: {
-      Status: { value: "Complete" }, "Completed Quantity": 2, "Completed At": "2026-09-05T12:00:00Z",
-      "Quantity Ledger": JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 2 }]),
+      status: "Complete", completed_quantity: 2, completed_at: "2026-09-05T12:00:00Z",
+      quantity_ledger: JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 2 }]),
     },
     requirement: {
-      Status: { value: "Complete" }, "QC Outcome": { value: "Passed" }, "QC Notes": "Original note",
-      "QC Reviewed By": "Robin R.", "QC Reviewed At": reviewedAt,
+      status: "Complete", qc_outcome: "Passed", qc_notes: "Original note",
+      qc_reviewed_by: "Robin R.", qc_reviewed_at: reviewedAt,
     },
     reviews: [{ id: 50, production_requirement_id: 20, operation_id: null, result: "passed", reviewed_at: reviewedAt }],
   });
@@ -648,11 +714,11 @@ test("QC and finishing cannot be reopened while the part is on the robot", async
   const reviewedAt = "2026-09-05T13:00:00Z";
   const qcState = fixture({
     operation: {
-      Status: { value: "Complete" }, "Completed Quantity": 2,
-      "Quantity Ledger": JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 2 }]),
-      "Completed At": "2026-09-05T12:00:00Z",
+      status: "Complete", completed_quantity: 2,
+      quantity_ledger: JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 2 }]),
+      completed_at: "2026-09-05T12:00:00Z",
     },
-    requirement: { "QC Outcome": { value: "Passed" }, Status: { value: "Complete" } },
+    requirement: { qc_outcome: "Passed", status: "Complete" },
     reviews: [{ id: 50, production_requirement_id: 20, operation_id: null, result: "passed", reviewed_at: reviewedAt }],
   });
   qcState.rows.requirements[0].part_location = "On Robot";
@@ -661,8 +727,8 @@ test("QC and finishing cannot be reopened while the part is on the robot", async
   assert.equal(qc.commits.length, 0);
 
   const finishingState = fixture({
-    requirement: { "QC Outcome": { value: "Passed" }, Finishing: { value: "Black" }, Status: { value: "Complete" } },
-    finishing: { Machinist: ACTOR.name },
+    requirement: { qc_outcome: "Passed", finishing: "Black", status: "Complete" },
+    finishing: { machinist: ACTOR.name },
   });
   finishingState.rows.requirements[0].part_location = "On Robot";
   const finishing = harness(finishingState);
@@ -673,36 +739,202 @@ test("QC and finishing cannot be reopened while the part is on the robot", async
 test("QC releases threaded inserts only after any required finishing completes", async () => {
   const readyForQc = withThreadedInsert(fixture({
     operation: {
-      Status: { value: "Complete" }, "Completed Quantity": 2,
-      "Quantity Ledger": JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 2 }]),
-      "Completed At": "2026-09-05T12:00:00Z",
+      status: "Complete", completed_quantity: 2,
+      quantity_ledger: JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 2 }]),
+      completed_at: "2026-09-05T12:00:00Z",
     },
-    requirement: { Status: { value: "Ready for QC" }, "QC Outcome": { value: "Not Inspected" } },
+    requirement: { status: "Ready for QC", qc_outcome: "Not Inspected" },
   }));
   const uncoated = harness(readyForQc);
-  await uncoated.adapter.recordQualityReview(20, "passed", "Primary work accepted", ACTOR);
+  const uncoatedReview = await uncoated.adapter.recordQualityReview(20, "passed", "Primary work accepted", ACTOR);
+  assert.equal(uncoatedReview.notificationContext.postQcWorkReady, true);
   const uncoatedChanges = uncoated.commits[0].p_changes as Array<{ entity: string; id: number; patch: Record<string, unknown> }>;
   assert.equal(uncoatedChanges.find(({ entity, id }) => entity === "operations" && id === 11)?.patch.status, "Ready");
   assert.equal(uncoatedChanges.find(({ entity }) => entity === "requirements")?.patch.status, "Ready for Manufacturing");
 
   const coatedState = withThreadedInsert(fixture({
-    operation: runtimeRow(ENTITIES.find(entity => entity.name === "operations")!, readyForQc.rows.operations[0]),
+    operation: readyForQc.rows.operations[0],
     requirement: {
-      Status: { value: "Ready for Finishing" }, Finishing: { value: "Black" },
-      "QC Outcome": { value: "Passed" },
+      status: "Ready for Finishing", finishing: "Black",
+      qc_outcome: "Passed",
     },
-    finishing: { Machinist: ACTOR.name },
+    finishing: { machinist: ACTOR.name },
   }));
   const coated = harness(coatedState);
   const result = await coated.adapter.applyFabricationAction(30, "complete", ACTOR);
   assert.equal(result.status, "Complete");
+  assert.equal(result.notificationContext.postQcWorkReady, true);
   assert.equal(result.requirementStatus, "Ready for Manufacturing");
   const coatedChanges = coated.commits[0].p_changes as Array<{ entity: string; id: number; patch: Record<string, unknown> }>;
   assert.equal(coatedChanges.find(({ entity, id }) => entity === "operations" && id === 11)?.patch.status, "Ready");
 });
 
+test("post-QC readiness reflects released work, not the requirement status", async () => {
+  const completeFirstStage = {
+    status: "Complete", completed_quantity: 2, completed_at: "2026-09-05T12:00:00Z",
+    quantity_ledger: JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 2 }]),
+  };
+  // Finishing comes first, so a pass releases nothing yet.
+  const coated = harness(withThreadedInsert(fixture({ operation: completeFirstStage,
+    requirement: { status: "Ready for QC", finishing: "Black" } })));
+  assert.equal((await coated.adapter.recordQualityReview(20, "passed", "", ACTOR)).notificationContext.postQcWorkReady, false);
+
+  // A failure reopens the route and never releases post-QC work.
+  const failed = harness(withThreadedInsert(fixture({ operation: completeFirstStage, requirement: { status: "Ready for QC" } })));
+  assert.equal((await failed.adapter.recordQualityReview(20, "failed", "Bad bore", ACTOR)).notificationContext.postQcWorkReady, false);
+
+  // QC after OP1 with a Haas OP2: the requirement can say Ready for Manufacturing while OP2 still waits on CAM.
+  const camGated = fixture({ operation: completeFirstStage, requirement: { status: "Ready for QC" } });
+  camGated.rows.requirements[0].qc_after_operation = 1;
+  camGated.rows.operations.push(
+    { id: 11, operation_key: "fixture|OP2|Manufacturing", requirement_id: 20,
+      operation_number: "OP2", machine: "Haas CNC", work_type: "Manufacturing",
+      active_in_routing: true, status: "Planned" },
+    { id: 12, operation_key: "fixture|OP2|CAM", requirement_id: 20,
+      operation_number: "OP2", work_type: "CAM", active_in_routing: true, status: "Ready" },
+  );
+  const gated = harness(camGated);
+  const gatedReview = await gated.adapter.recordQualityReview(20, "passed", "", ACTOR);
+  assert.equal(gatedReview.notificationContext.requirementStatus, "Ready for Manufacturing");
+  assert.equal(gatedReview.notificationContext.postQcWorkReady, false);
+
+  // A forced pass from unstarted pre-QC work still announces the released inserts.
+  const forced = harness(withThreadedInsert(fixture()));
+  const review = await forced.adapter.forceQualityReview(20, "", (await forced.adapter.previewForceQuality(20)).token, ACTOR);
+  assert.equal(review.notificationContext.previousRequirementStatus, "Ready for Manufacturing");
+  assert.equal(review.notificationContext.requirementStatus, "Ready for Manufacturing");
+  assert.equal(review.notificationContext.postQcWorkReady, true);
+});
+
+test("post-QC readiness covers stale Ready rows and CAM completion that releases gated work", async () => {
+  const completeFirstStage = {
+    status: "Complete", completed_quantity: 2, completed_at: "2026-09-05T12:00:00Z",
+    quantity_ledger: JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 2 }]),
+  };
+  // The insert row already says Ready, but QC is what makes it claimable.
+  const stale = harness(withThreadedInsert(fixture({ operation: completeFirstStage, requirement: { status: "Ready for QC" } }),
+    { status: "Ready" }));
+  assert.equal((await stale.adapter.recordQualityReview(20, "passed", "", ACTOR)).notificationContext.postQcWorkReady, true);
+
+  // QC passed after OP1; completing the CAM for the Haas OP2 is what releases it.
+  const gated = fixture({ operation: completeFirstStage,
+    requirement: { status: "Ready for Manufacturing", qc_outcome: "Passed" } });
+  gated.rows.requirements[0].qc_after_operation = 1;
+  gated.rows.operations.push(
+    { id: 11, operation_key: "fixture|OP2|Manufacturing", requirement_id: 20,
+      operation_number: "OP2", machine: "Haas CNC", work_type: "Manufacturing",
+      active_in_routing: true, status: "Planned" },
+    { id: 12, operation_key: "fixture|OP2|CAM", requirement_id: 20,
+      operation_number: "OP2", work_type: "CAM", active_in_routing: true, status: "In Progress",
+      claimed_quantity: 1, quantity_ledger: JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 1, completed: 0 }]) },
+  );
+  const cam = harness(gated);
+  const completed = await cam.adapter.applyQuantityAction(12, "complete", 1, ACTOR);
+  const changes = cam.commits[0].p_changes as Array<{ entity: string; id: number; patch: Record<string, unknown> }>;
+  assert.equal(changes.find(({ entity, id }) => entity === "operations" && id === 11)?.patch.status, "Ready");
+  assert.equal(completed.notificationContext.postQcWorkReady, true);
+});
+
+test("a part with a current QC pass cannot be reviewed again until the pass is undone", async () => {
+  const passed = fixture({
+    operation: { status: "Complete", completed_quantity: 2, completed_at: "2026-09-05T12:00:00Z",
+      quantity_ledger: JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 2 }]) },
+    requirement: { status: "Complete", qc_outcome: "Passed" },
+    reviews: [{ id: 1, production_requirement_id: 20, operation_id: null, result: "passed", reviewed_at: "2026-09-06T12:00:00Z" }],
+  });
+  for (const result of ["failed", "passed"] as const) {
+    const { adapter, commits } = harness(structuredClone(passed));
+    await assert.rejects(adapter.recordQualityReview(20, result, "Stale page", ACTOR),
+      (error) => error instanceof ManufacturingWriteError && error.status === 409 && /Undo the pass/.test(error.message));
+    assert.equal(commits.length, 0);
+  }
+});
+
+test("a rename changes only the renamer's entries in a requirement assignment", async () => {
+  const OTHER = { id: "00000000-0000-4000-8000-000000000191", name: "Bea B." };
+  const ADMIN = { id: "00000000-0000-4000-8000-000000000192", name: "Admin Z." };
+  const ledger = (...entries: Array<[{ id: string; name: string }, number]>) =>
+    JSON.stringify(entries.map(([actor, completed]) => ({ userId: actor.id, name: actor.name, claimed: 0, completed })));
+  const done = (actor: { id: string; name: string }) => ({
+    status: "Complete", completed_quantity: 2, machinist: `${actor.name} (2)`, quantity_ledger: ledger([actor, 2]),
+  });
+  const secondStage = (actor: { id: string; name: string }, overrides: Partial<NormalizedRow> = {}) => ({
+    id: 11, operation_key: "fixture|OP2|Manufacturing", requirement_id: 20, operation_number: "OP2",
+    machine: "Lathe", work_type: "Manufacturing", active_in_routing: true, ...done(actor), ...overrides,
+  });
+  const rename = async (state: WriteState) => {
+    const { adapter, commits } = harness(state);
+    await adapter.renameMachinistAllocations(ACTOR.id, ACTOR.name, "Alexis A.");
+    const changes = commits[0].p_changes as Array<{ entity: string; id: number; patch: Record<string, unknown> }>;
+    return {
+      requirement: changes.find(({ entity }) => entity === "requirements")?.patch,
+      finishing: changes.find(({ entity }) => entity === "finishing")?.patch,
+      operation: (id: number) => changes.find(({ entity, id: changed }) => entity === "operations" && changed === id)?.patch,
+    };
+  };
+
+  // OP1 by Alex, OP2 by Bea, who assigned the requirement last: Alex's rename leaves it alone.
+  const laterStage = fixture({ operation: done(ACTOR), requirement: { machinist: "Bea B. (2)" } });
+  laterStage.rows.operations.push(secondStage(OTHER));
+  assert.equal((await rename(laterStage)).requirement, undefined);
+
+  // Alex did the CAM, Bea machined the part: the CAM credit is renamed, the assignment is Bea's.
+  const cam = fixture({ operation: done(OTHER), requirement: { machinist: "Bea B. (2)" } });
+  cam.rows.operations.push(secondStage(ACTOR, { work_type: "CAM", operation_number: "OP1", machine: null,
+    completed_quantity: 1, machinist: ACTOR.name, quantity_ledger: ledger([ACTOR, 1]) }));
+  const camRename = await rename(cam);
+  assert.equal(camRename.requirement, undefined);
+  assert.equal(camRename.operation(11)?.machinist, "Alexis A.");
+
+  // The assignment Alex set follows the rename, keeping its count, even after Force QC rewrote the
+  // operation's credit, and alongside someone else's entry.
+  const own = fixture({ operation: done(ACTOR), requirement: { machinist: "Alex A. (2)" }, finishing: { machinist: ACTOR.name } });
+  const ownRename = await rename(own);
+  assert.deepEqual(ownRename.requirement, { machinist: "Alexis A. (2)" });
+  assert.deepEqual(ownRename.finishing, { machinist: "Alexis A." });
+  const forced = fixture({ requirement: { machinist: "Alex A. (2)" }, operation: {
+    status: "Complete", completed_quantity: 2, machinist: "Alex A. (1), Admin Z. (1)", quantity_ledger: ledger([ACTOR, 1], [ADMIN, 1]),
+  } });
+  const forcedRename = await rename(forced);
+  assert.deepEqual(forcedRename.requirement, { machinist: "Alexis A. (2)" });
+  assert.equal(forcedRename.operation(10)?.machinist, "Alexis A. (1), Admin Z. (1)");
+  const shared = fixture({ requirement: { machinist: "Alex A. (1), Bea B. (1)" } });
+  assert.deepEqual((await rename(shared)).requirement, { machinist: "Alexis A. (1), Bea B. (1)" });
+
+  // A partial QC failure left OP1 with one of Alex's two parts; the assignment still follows.
+  const partialFail = fixture({ requirement: { machinist: "Alex A. (2)", qc_outcome: "Failed" }, operation: {
+    status: "Ready", completed_quantity: 1, machinist: "Alex A. (1)", quantity_ledger: ledger([ACTOR, 1]),
+  } });
+  assert.deepEqual((await rename(partialFail)).requirement, { machinist: "Alexis A. (2)" });
+
+  // An admin credited Alex's CAM to Bea through "Completed by"; the rename keeps that correction.
+  const corrected = fixture({ requirement: { required_quantity: 1, machinist: "Bea B." }, operation: {
+    work_type: "CAM", status: "Complete", completed_quantity: 1, machinist: "Bea B.",
+    quantity_ledger: JSON.stringify([{ userId: ACTOR.id, name: "Bea B.", claimed: 0, completed: 1 }]),
+  } });
+  const correctedRename = await rename(corrected);
+  assert.equal(correctedRename.operation(10), undefined);
+  assert.equal(correctedRename.requirement, undefined);
+
+  // An earlier rename skipped this requirement while it was obsolete, so it still shows the name
+  // before that; the account's credit there carries the same name, which identifies it.
+  const restored = fixture({ requirement: { machinist: "Al A. (2)" }, operation: {
+    status: "Complete", completed_quantity: 2, machinist: "Al A. (2)",
+    quantity_ledger: JSON.stringify([{ userId: ACTOR.id, name: "Al A.", claimed: 0, completed: 2 }]),
+  } });
+  const restoredRename = await rename(restored);
+  assert.deepEqual(restoredRename.requirement, { machinist: "Alexis A. (2)" });
+  assert.equal(restoredRename.operation(10)?.machinist, "Alexis A. (2)");
+
+  // Obsolete requirements are frozen.
+  const frozen = fixture({ operation: done(ACTOR), requirement: { machinist: "Alex A. (2)", obsolete: true } });
+  const frozenRename = await rename(frozen);
+  assert.equal(frozenRename.requirement, undefined);
+  assert.equal(frozenRename.operation(10), undefined);
+});
+
 test("threaded inserts cannot be claimed before QC even if a stale row says Ready", async () => {
-  const state = withThreadedInsert(fixture(), { Status: { value: "Ready" } });
+  const state = withThreadedInsert(fixture(), { status: "Ready" });
   const { adapter, commits } = harness(state);
   await assert.rejects(adapter.applyQuantityAction(11, "claim", 1, ACTOR), /passed QC review/);
   assert.equal(commits.length, 0);
@@ -710,9 +942,9 @@ test("threaded inserts cannot be claimed before QC even if a stale row says Read
 
 test("release, completion undo, CAM edits, finishing completion, and QC undo are planned safely", async () => {
   const claimedState = fixture({ operation: {
-    Status: { value: "In Progress" }, Machinist: "Alex A. (1)", "Claimed Quantity": 1,
-    "Quantity Ledger": JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 1, completed: 0 }]),
-    "Started At": "2026-09-05T00:00:00Z",
+    status: "In Progress", machinist: "Alex A. (1)", claimed_quantity: 1,
+    quantity_ledger: JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 1, completed: 0 }]),
+    started_at: "2026-09-05T00:00:00Z",
   }});
   const release = harness(claimedState);
   const released = await release.adapter.applyQuantityAction(10, "release", 1, ACTOR);
@@ -720,10 +952,10 @@ test("release, completion undo, CAM edits, finishing completion, and QC undo are
   assert.equal(release.commits[0].p_action, "release");
 
   const completeState = fixture({ operation: {
-    Status: { value: "Complete" }, Machinist: "Alex A. (2)", "Completed Quantity": 2,
-    "Quantity Ledger": JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 2 }]),
-    "Started At": "2026-09-05T00:00:00Z", "Completed At": "2026-09-05T00:01:00Z",
-  }, requirement: { Status: { value: "Ready for QC" }, Machinist: "Alex A. (2)" } });
+    status: "Complete", machinist: "Alex A. (2)", completed_quantity: 2,
+    quantity_ledger: JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 2 }]),
+    started_at: "2026-09-05T00:00:00Z", completed_at: "2026-09-05T00:01:00Z",
+  }, requirement: { status: "Ready for QC", machinist: "Alex A. (2)" } });
   const undo = harness(completeState);
   const undone = await undo.adapter.applyQuantityAction(10, "undo_complete", 1, ACTOR);
   assert.equal(undone.status, "In Progress");
@@ -732,10 +964,10 @@ test("release, completion undo, CAM edits, finishing completion, and QC undo are
   assert.equal(undo.commits[0].p_action, "undo_complete");
 
   const camState = fixture({ operation: {
-    Operation: "fixture|OP1|CAM", Machine: { value: "Haas" }, "Work Type": { value: "CAM" },
-    Status: { value: "Complete" }, Machinist: "Alex A.", "Completed Quantity": 1,
-    "Quantity Ledger": JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 1 }]),
-    "Completed At": "2026-09-05T00:01:00Z",
+    operation_key: "fixture|OP1|CAM", machine: "Haas", work_type: "CAM",
+    status: "Complete", machinist: "Alex A.", completed_quantity: 1,
+    quantity_ledger: JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 1 }]),
+    completed_at: "2026-09-05T00:01:00Z",
   }});
   const camEdit = harness(camState);
   const edited = await camEdit.adapter.updateCamHandoff(10, { completedBy: "Blake B.", programPath: "new.nc", notes: "Updated" }, ACTOR);
@@ -743,16 +975,16 @@ test("release, completion undo, CAM edits, finishing completion, and QC undo are
   assert.equal(camEdit.commits[0].p_action, "cam_handoff");
 
   const finishingComplete = harness(fixture({
-    requirement: { Status: { value: "Ready for Finishing" }, Finishing: { value: "Black" } },
-    finishing: { Machinist: ACTOR.name },
+    requirement: { status: "Ready for Finishing", finishing: "Black" },
+    finishing: { machinist: ACTOR.name },
   }));
   const finished = await finishingComplete.adapter.applyFabricationAction(30, "complete", ACTOR);
   assert.equal(finished.requirementStatus, "Complete");
   assert.equal(finishingComplete.commits[0].p_action, "finishing_complete");
 
   const finishingUndo = harness(fixture({
-    requirement: { Status: { value: "Complete" }, Finishing: { value: "Black" } },
-    finishing: { Machinist: ACTOR.name },
+    requirement: { status: "Complete", finishing: "Black" },
+    finishing: { machinist: ACTOR.name },
   }));
   const reopened = await finishingUndo.adapter.applyFabricationAction(30, "undo_complete", ACTOR);
   assert.equal(reopened.requirementStatus, "Ready for Finishing");
@@ -761,13 +993,13 @@ test("release, completion undo, CAM edits, finishing completion, and QC undo are
   const passedAt = "2026-09-05T00:02:00Z";
   const qcUndo = harness(fixture({
     operation: {
-      Status: { value: "Complete" }, Machinist: "Alex A. (2)", "Completed Quantity": 2,
-      "Quantity Ledger": JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 2 }]),
-      "Completed At": "2026-09-05T00:01:00Z",
+      status: "Complete", machinist: "Alex A. (2)", completed_quantity: 2,
+      quantity_ledger: JSON.stringify([{ userId: ACTOR.id, name: ACTOR.name, claimed: 0, completed: 2 }]),
+      completed_at: "2026-09-05T00:01:00Z",
     },
     requirement: {
-      Status: { value: "Complete" }, Machinist: "Alex A. (2)", "QC Outcome": { value: "Passed" },
-      "QC Notes": "Looks good", "QC Reviewed By": ACTOR.name, "QC Reviewed At": passedAt,
+      status: "Complete", machinist: "Alex A. (2)", qc_outcome: "Passed",
+      qc_notes: "Looks good", qc_reviewed_by: ACTOR.name, qc_reviewed_at: passedAt,
     },
     reviews: [{ id: 50, production_requirement_id: 20, operation_id: null, result: "passed", reviewed_at: passedAt }],
   }));
@@ -784,6 +1016,35 @@ test("release, completion undo, CAM edits, finishing completion, and QC undo are
   });
   assert.equal(qcUndo.commits[0].p_action, "qc_undo");
   assert.deepEqual(qcUndo.commits[0].p_qc, { requirement_id: 20 });
+});
+
+test("an administrator status override can block work and reports what changed", async () => {
+  const { adapter, commits } = harness(fixture());
+  const result = await adapter.patchOperation(10, { status: "Blocked", machinist: "Blake B." }, ACTOR);
+  assert.deepEqual(result, {
+    status: "Blocked",
+    machinist: "Blake B.",
+    notificationContext: {
+      requirementId: 20,
+      partNumber: "P-1",
+      partName: "Fixture",
+      assemblyNumber: "A-1",
+      operationNumber: "OP1",
+      workType: "Manufacturing",
+      machine: "Mill",
+      previousOperationStatus: "Ready",
+      previousMachinist: "",
+      previousRequirementStatus: "Ready for Manufacturing",
+      requirementStatus: "Ready for Manufacturing",
+    },
+  });
+  assert.equal(commits[0].p_action, "patch_operation");
+  assert.deepEqual(commits[0].p_changes, [
+    { entity: "requirements", id: 20, patch: { machinist: "Blake B." } },
+    { entity: "operations", id: 10, patch: { status: "Blocked", machinist: "Blake B." } },
+  ]);
+  await assert.rejects(adapter.patchOperation(10, { status: "Complete" }, ACTOR), /Use quantity actions/);
+  assert.equal(commits.length, 1);
 });
 
 test("stale edits become 409 responses and transport retries reuse the request ID", async () => {
@@ -905,7 +1166,7 @@ test("visibility writes validate obsolete/version and retry the identical transa
 });
 
 test("finishing takeover atomically transfers only unfinished assignment", async () => {
-  const state = fixture({ requirement: { Status: { value: "Ready for Finishing" }, Finishing: { value: "Black" } }, finishing: { Machinist: "Blake B." } });
+  const state = fixture({ requirement: { status: "Ready for Finishing", finishing: "Black" }, finishing: { machinist: "Blake B." } });
   const { adapter, commits } = harness(state);
   const result = await adapter.applyFabricationAction(30, "steal", ACTOR);
   assert.equal(result.machinist, ACTOR.name);
@@ -926,7 +1187,7 @@ for (const scenario of [
   { name: "obsolete", status: "Ready for Finishing", machinist: "Blake B.", obsolete: true },
 ]) {
   test(`finishing takeover rejects ${scenario.name} jobs without writing`, async () => {
-    const state = fixture({ requirement: { Status: { value: scenario.status } }, finishing: { Machinist: scenario.machinist, Active: !scenario.inactive } });
+    const state = fixture({ requirement: { status: scenario.status }, finishing: { machinist: scenario.machinist, active: !scenario.inactive } });
     if (scenario.obsolete) state.rows.requirements[0].obsolete = true;
     const { adapter, commits } = harness(state);
     await assert.rejects(adapter.applyFabricationAction(30, "steal", ACTOR));

@@ -1,21 +1,16 @@
 import { NextResponse } from "next/server";
 
-import { getAppUser } from "@/lib/auth";
+import { parseId, requireUser } from "@/lib/api-route";
 import { readRequirementHistory } from "@/lib/manufacturing";
 import { ManufacturingWriteError } from "@/lib/manufacturing/write-adapter";
 import { buildRequirementHistory } from "@/lib/requirement-history";
 
-export const dynamic = "force-dynamic";
-
 export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const user = await getAppUser();
-  if (!user) return NextResponse.json({ error: "Authentication required" }, { status: 401 });
-  if (!user.approved) return NextResponse.json({ error: "Account approval required", code: "APPROVAL_REQUIRED" }, { status: 403 });
+  const { response } = await requireUser();
+  if (response) return response;
 
-  const requirementId = Number((await params).id);
-  if (!Number.isSafeInteger(requirementId) || requirementId <= 0) {
-    return NextResponse.json({ error: "Invalid production requirement ID" }, { status: 400 });
-  }
+  const requirementId = parseId((await params).id);
+  if (requirementId === null) return NextResponse.json({ error: "Invalid production requirement ID" }, { status: 400 });
 
   try {
     const history = await readRequirementHistory(requirementId);

@@ -1,14 +1,11 @@
 import { NextResponse } from "next/server";
 
-import { getAppUser } from "@/lib/auth";
+import { requireUser } from "@/lib/api-route";
 import { createAdminClient } from "@/lib/supabase/admin";
 
-export const dynamic = "force-dynamic";
-
 export async function GET() {
-  const user = await getAppUser();
-  if (!user) return NextResponse.json({ error: "Authentication required" }, { status: 401 });
-  if (!user.approved) return NextResponse.json({ error: "Account approval required" }, { status: 403 });
+  const { user, response } = await requireUser();
+  if (response) return response;
 
   const supabase = createAdminClient();
   if (!supabase) return NextResponse.json({ notifications: [] });

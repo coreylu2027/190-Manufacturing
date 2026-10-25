@@ -163,11 +163,11 @@ Slack alerts use the existing `SLACK_WEBHOOK_URL`.
 
 ## Verification
 
-- `npm run manufacturing:test-overrides` — PGlite; drives the real write adapter
-  through a PostgREST-shaped fetch: survival across simulated syncs, retirement,
-  failed syncs, revert, routing/CAM re-planning, off-the-shelf retire/restore,
-  work and QC guards, finishing, CAS tokens, permissions, RPC allowlists,
-  replacement files and previews, and the corrections report.
-- `npm test` (includes the Slack alert format), `npm run manufacturing:test-migration`
-  (includes the off-the-shelf projection), `npm run manufacturing:test-obsoletion`,
-  `npm run lint`, and `npx tsc --noEmit`.
+- `npm test`. Its PGlite suite `scripts/manufacturing-migration/engineering-overrides.test.mts`
+  drives the real write adapter through a PostgREST-shaped fetch: survival across
+  simulated syncs, retirement, failed syncs, revert, routing/CAM re-planning,
+  off-the-shelf retire/restore, work and QC guards, finishing, CAS tokens,
+  permissions, RPC allowlists, replacement files and previews, and the
+  corrections report. Unit tests cover the Slack alert format and the
+  off-the-shelf projection.
+- `npm run lint` and `npx tsc --noEmit`.

@@ -30,25 +30,21 @@ function review(overrides: Partial<QualityReviewRow> = {}): QualityReviewRow {
   return {
     id: 30, production_requirement_id: 20, operation_id: null, result: "passed", notes: "Good",
     rejected_quantity: null,
-    reviewed_by: "reviewer", reviewed_at: "2026-09-05T13:00:00Z", storage_location: "Clarke 1",
-    location_updated_by: "mover", location_updated_at: "2026-09-05T14:00:00Z", ...overrides,
+    reviewed_by: "reviewer", reviewed_at: "2026-09-05T13:00:00Z", ...overrides,
   };
 }
 
-const profiles = [
-  { id: "reviewer", display_name: "Robin R." },
-  { id: "mover", display_name: "Morgan M." },
-];
+const profiles = [{ id: "reviewer", display_name: "Robin R." }];
 
-test("effective passed QC exposes location and update attribution", () => {
+test("effective passed QC exposes its notes and reviewer", () => {
   const result = qualityMetadataByRequirement([operation()], [review()], [], profiles).metadata.get(20);
   assert.equal(result?.effectiveQcResult, "passed");
-  assert.equal(result?.storageLocation, "Clarke 1");
-  assert.equal(result?.locationUpdatedBy, "Morgan M.");
-  assert.equal(result?.locationUpdatedAt, "2026-09-05T14:00:00Z");
+  assert.equal(result?.notes, "Good");
+  assert.equal(result?.reviewedBy, "Robin R.");
+  assert.equal(result?.reviewedAt, "2026-09-05T13:00:00Z");
 });
 
-test("missing, stale, and retracted reviews are pending and expose no location", () => {
+test("missing, stale, and retracted reviews are pending and expose no review details", () => {
   const missing = qualityMetadataByRequirement([operation()], [], [], profiles).metadata.get(20);
   const stale = qualityMetadataByRequirement([operation("2026-09-05T15:00:00Z")], [review()], [], profiles).metadata.get(20);
   const retracted = qualityMetadataByRequirement([operation()], [review()], [30], profiles).metadata.get(20);
@@ -57,16 +53,15 @@ test("missing, stale, and retracted reviews are pending and expose no location",
   }], [review()], [], profiles).metadata.get(20);
   for (const result of [missing, stale, retracted, reopened]) {
     assert.equal(result?.effectiveQcResult, "pending");
-    assert.equal(result?.storageLocation, null);
-    assert.equal(result?.locationUpdatedBy, null);
+    assert.equal(result?.notes, "");
+    assert.equal(result?.reviewedBy, null);
   }
 });
 
-test("a failed review remains failed during rework and never exposes a location", () => {
+test("a failed review remains failed during rework", () => {
   const rework = { ...operation(), status: "Ready" as const, completedAt: null, completedQuantity: 0 };
   const result = qualityMetadataByRequirement([rework], [review({ result: "failed", rejected_quantity: 1 })], [], profiles).metadata.get(20);
   assert.equal(result?.effectiveQcResult, "failed");
-  assert.equal(result?.storageLocation, null);
   assert.deepEqual(result?.lastQualityFailure, {
     notes: "Good",
     rejectedQuantity: 1,
@@ -100,13 +95,6 @@ test("the latest QC failure remains visible when the completed reroute returns t
   assert.equal(result?.notes, "");
   assert.equal(result?.lastQualityFailure?.notes, "Thread is undersized");
   assert.equal(result?.lastQualityFailure?.rejectedQuantity, 1);
-});
-
-test("cleared locations retain the most recent editor attribution", () => {
-  const result = qualityMetadataByRequirement([operation()], [review({ storage_location: null })], [], profiles).metadata.get(20);
-  assert.equal(result?.storageLocation, null);
-  assert.equal(result?.locationUpdatedBy, "Morgan M.");
-  assert.equal(result?.locationUpdatedAt, "2026-09-05T14:00:00Z");
 });
 
 test("threaded inserts are excluded from the pre-QC gate and do not stale its review", () => {

@@ -9,14 +9,13 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CORRECTION_FIELD_LABELS, type EngineeringCorrection } from "@/lib/engineering-overrides";
+import { requestJson } from "@/lib/request-json";
 
 type KindFilter = "all" | EngineeringCorrection["kind"];
 const KIND_LABELS: Record<KindFilter, string> = { all: "All corrections", field: "Field values", file: "Replacement files", off_the_shelf: "Off-the-shelf parts" };
 
-async function fetchCorrections(): Promise<EngineeringCorrection[]> {
-  const response = await fetch("/api/admin/engineering-corrections", { cache: "no-store" });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error ?? "Unable to load corrections");
+async function fetchCorrections() {
+  const body = await requestJson<{ corrections: EngineeringCorrection[] }>("/api/admin/engineering-corrections", { cache: "no-store" }, "Unable to load corrections");
   return body.corrections;
 }
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { mergeVisibleSelection, settleSequentially } from "./bulk-selection.ts";
+import { mergeVisibleSelection, partitionSettled, settleSequentially } from "./bulk-selection.ts";
 
 test("bulk selection keeps rows hidden by search or filters", () => {
   assert.deepEqual(mergeVisibleSelection([1, 2], [2, 3], [2]), [1, 2]);
@@ -50,4 +50,20 @@ test("bulk mutations continue after an individual failure", async () => {
     { status: "rejected", reason: failure },
     { status: "fulfilled", value: 3 },
   ]);
+});
+
+test("settled results split into successes and failure reasons in order", () => {
+  const first = new Error("first failed");
+  assert.deepEqual(partitionSettled<number>([
+    { status: "rejected", reason: first },
+    { status: "fulfilled", value: 1 },
+    { status: "rejected", reason: "not an Error" },
+    { status: "fulfilled", value: 2 },
+  ]), { succeeded: [1, 2], failures: [first, "not an Error"] });
+});
+
+test("settled results with every item failed have no successes", () => {
+  const failure = new Error("claim failed");
+  assert.deepEqual(partitionSettled([{ status: "rejected", reason: failure }]), { succeeded: [], failures: [failure] });
+  assert.deepEqual(partitionSettled([]), { succeeded: [], failures: [] });
 });

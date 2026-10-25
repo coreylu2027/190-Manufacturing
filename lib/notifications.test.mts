@@ -1,20 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync } from "node:fs";
-import { runInNewContext } from "node:vm";
 import { timingSafeEqual } from "node:crypto";
-import ts from "typescript";
+
+import { loadModule } from "./test-module-loader.mts";
 
 function load(path: string, dependencies: Record<string, unknown>, globals: Record<string, unknown> = {}) {
-  const exports: Record<string, (...args: unknown[]) => Promise<Record<string, unknown>>> = {};
-  const source = ts.transpileModule(readFileSync(new URL(path, import.meta.url), "utf8"), {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-  }).outputText;
-  runInNewContext(source, { exports, require: (name: string) => {
-    assert.ok(name in dependencies, `Unexpected import ${name}`);
-    return dependencies[name];
-  }, AbortSignal, Buffer, Date, ...globals });
-  return exports;
+  return loadModule<Record<string, (...args: unknown[]) => Promise<Record<string, unknown>>>>(
+    new URL(path, import.meta.url), dependencies, { AbortSignal, Buffer, Date, ...globals });
 }
 
 test("stored notifications reuse the email framework, escaping and idempotency key", async () => {
@@ -84,4 +76,20 @@ test("email webhook authenticates and only passes a notification ID to the sende
   assert.equal((await api.POST(request("Bearer test-secret", { ...event, table: "profiles" }))).status, 400);
   assert.equal((await api.POST(request("Bearer test-secret"))).status, 200);
   assert.deepEqual(ids, [id]);
+});
+
+test("a failed delivery-status write is logged without failing the delivery", async () => {
+  const notification = { id: "alert-2", recipient_id: "user-1", title: "Claim taken", message: "Heads up", data: {}, email_status: "pending", created_at: new Date().toISOString() };
+  const logged: unknown[][] = [];
+  const client = { from: (table: string) => ({
+    select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: table === "profiles" ? { email: "worker@example.com" } : notification }) }) }),
+    update: () => ({ eq: () => ({ then: (resolve: (result: object) => void) => resolve({ error: { message: "database unavailable" } }) }) }),
+  }) };
+  const api = load("./notifications.ts", { "server-only": {}, "@/lib/supabase/admin": { createAdminClient: () => client } }, {
+    process: { env: { RESEND_API_KEY: "test", NOTIFICATION_EMAIL_FROM: "shop@example.com" } },
+    fetch: async () => ({ ok: true, status: 200, json: async () => ({ id: "email-2" }) }),
+    console: { error: (...args: unknown[]) => logged.push(args) },
+  });
+  assert.equal((await api.deliverStoredNotificationEmail("alert-2")).email, "sent");
+  assert.match(String(logged[0]?.[0]), /Unable to record notification email delivery/);
 });

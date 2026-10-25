@@ -1,17 +1,19 @@
 // Pure planning for administrator corrections to synced engineering data. The
 // database re-applies stored overrides after each Onshape sync; this module
 // plans the edit itself, including routing, CAM prerequisites, and readiness.
-import { deduplicateOperations, isPostQcOperation, planRequirementWorkflow, requiresCam, targetMachineHasStarted, type WorkflowOperationStatus } from "../manufacturing-workflow.ts";
+import {
+  deduplicateOperations, isFinishingComplete, isPostQcOperation, normalizeOperationStatus, planRequirementWorkflow, requiresCam, targetMachineHasStarted,
+} from "../manufacturing-workflow.ts";
 import {
   MAX_DESCRIPTION_LENGTH, MAX_MATERIAL_LENGTH, MAX_NAME_LENGTH, MAX_OVERRIDE_QUANTITY, ROUTING_FIELDS, normalizeFinishColor, routingError,
   type EngineeringOverrideFields, type EngineeringOverrideState, type FinishColor, type OverrideField, type Routing,
 } from "../engineering-overrides.ts";
-import type { OperationAllocation } from "../types.ts";
+import { HttpError } from "../http-error.ts";
+import type { OperationAllocation, OperationStatus } from "../types.ts";
 import type { NormalizedRow } from "./model.ts";
 
-export class EngineeringOverrideError extends Error {
-  status: number;
-  constructor(message: string, status = 409) { super(message); this.status = status; }
+export class EngineeringOverrideError extends HttpError {
+  constructor(message: string, status = 409) { super(message, status); }
 }
 
 export interface OverrideInstruction {
@@ -36,10 +38,7 @@ type Row = Record<string, unknown> & { id: number };
 const same = (left: unknown, right: unknown) => JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
 const count = (value: unknown) => Number(value ?? 0) || 0;
 const text = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : null;
-const operationStatus = (row: Row): WorkflowOperationStatus => {
-  const status = String(row.status ?? "Planned");
-  return (status === "Needs Rework" ? "Ready" : status) as WorkflowOperationStatus;
-};
+const operationStatus = (row: Row): OperationStatus => normalizeOperationStatus(String(row.status ?? "Planned"));
 const isCam = (row: Row) => row.work_type === "CAM";
 const hasWork = (row: Row) => targetMachineHasStarted({
   status: operationStatus(row), claimedQuantity: count(row.claimed_quantity), completedQuantity: count(row.completed_quantity),
@@ -409,8 +408,7 @@ export function planEngineeringOverrides({ rows, state, requirementId, fields, a
   if (workflowChanged && !requirement.off_the_shelf) {
     const finishingRequired = normalizeFinishColor(requirement.finishing) !== "None";
     const requirementStatus = String(requirement.status ?? "Needs Triage");
-    const finishingComplete = finishingNewlyRequired ? false
-      : !finishingRequired || qcPassed && !["Ready for QC", "Ready for Finishing"].includes(requirementStatus);
+    const finishingComplete = !finishingNewlyRequired && isFinishingComplete({ finishingRequired, qcPassed, status: requirementStatus });
     const active = activeOperations();
     const plan = planRequirementWorkflow(active.map((row) => ({
       id: row.id,
@@ -424,7 +422,7 @@ export function planEngineeringOverrides({ rows, state, requirementId, fields, a
       completedQuantity: count(row.completed_quantity),
       startedAt: row.started_at as string | null,
       completedAt: row.completed_at as string | null,
-    })), requirementStatus, { qcPassed, finishingRequired, finishingComplete, qcAfterOperation: qcAfter });
+    })), { qcPassed, finishingRequired, finishingComplete, qcAfterOperation: qcAfter });
     for (const patch of plan.operationPatches) {
       const row = active.find((candidate) => candidate.id === patch.id);
       if (row) row.status = patch.status;

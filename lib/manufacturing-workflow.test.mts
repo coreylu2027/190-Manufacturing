@@ -3,13 +3,18 @@ import test from "node:test";
 
 import {
   deduplicateOperations,
+  isFinishingComplete,
   isPostQcOperation,
   nextWorkflowAction,
+  normalizeOperationStatus,
   planRequirementWorkflow,
   targetMachineHasStarted,
   validateCamAction,
   type WorkflowOperation,
 } from "./manufacturing-workflow.ts";
+
+/** No finishing and no QC pass yet: only the inspected operations can advance. */
+const BEFORE_QC = { qcPassed: false, finishingRequired: false, finishingComplete: true };
 
 function operation(overrides: Partial<WorkflowOperation> & Pick<WorkflowOperation, "id" | "operationNumber" | "machine">): WorkflowOperation {
   return {
@@ -58,7 +63,7 @@ test("handoff keeps partial and parallel stages ahead of downstream work and res
 test("a non-CNC route becomes ready for manufacturing", () => {
   const plan = planRequirementWorkflow([
     operation({ id: 1, operationNumber: "OP1", machine: "Bandsaw" }),
-  ]);
+  ], BEFORE_QC);
   assert.deepEqual(plan.operationPatches, [{ id: 1, status: "Ready" }]);
   assert.equal(plan.requirementStatus, "Ready for Manufacturing");
 });
@@ -67,7 +72,7 @@ test("CAM for OP1 blocks only its target", () => {
   const plan = planRequirementWorkflow([
     operation({ id: 1, operationNumber: "OP1", machine: "Haas CNC", status: "Ready" }),
     operation({ id: 2, operationNumber: "OP1", machine: "Haas CNC", workType: "CAM", status: "Ready" }),
-  ]);
+  ], BEFORE_QC);
   assert.deepEqual(plan.operationPatches, [{ id: 1, status: "Planned" }]);
   assert.equal(plan.requirementStatus, "Ready for CAM");
 });
@@ -77,7 +82,7 @@ test("earlier manufacturing and later CAM can be ready together", () => {
     operation({ id: 1, operationNumber: "OP1", machine: "Bandsaw" }),
     operation({ id: 2, operationNumber: "OP2", machine: "Haas CNC" }),
     operation({ id: 3, operationNumber: "OP2", machine: "Haas CNC", workType: "CAM", status: "Ready" }),
-  ]);
+  ], BEFORE_QC);
   assert.deepEqual(plan.operationPatches, [{ id: 1, status: "Ready" }]);
   assert.equal(plan.requirementStatus, "Ready for CAM");
 });
@@ -87,14 +92,14 @@ test("target unlocks only after both physical and CAM prerequisites finish", () 
     operation({ id: 1, operationNumber: "OP1", machine: "Bandsaw", status: "Ready" }),
     operation({ id: 2, operationNumber: "OP2", machine: "Haas CNC" }),
     operation({ id: 3, operationNumber: "OP2", machine: "Haas CNC", workType: "CAM", status: "Complete" }),
-  ]);
+  ], BEFORE_QC);
   assert.deepEqual(waitingOnPhysical.operationPatches, []);
 
   const ready = planRequirementWorkflow([
     operation({ id: 1, operationNumber: "OP1", machine: "Bandsaw", status: "Complete" }),
     operation({ id: 2, operationNumber: "OP2", machine: "Haas CNC" }),
     operation({ id: 3, operationNumber: "OP2", machine: "Haas CNC", workType: "CAM", status: "Complete" }),
-  ]);
+  ], BEFORE_QC);
   assert.deepEqual(ready.operationPatches, [{ id: 2, status: "Ready" }]);
   assert.equal(ready.requirementStatus, "Ready for Manufacturing");
 });
@@ -103,13 +108,13 @@ test("a downstream partial-completion row stays held until the reopened prior st
   const held = planRequirementWorkflow([
     operation({ id: 1, operationNumber: "OP1", machine: "Bandsaw", status: "Ready", completedQuantity: 3 }),
     operation({ id: 2, operationNumber: "OP2", machine: "Lathe", status: "Planned", completedQuantity: 3 }),
-  ]);
+  ], BEFORE_QC);
   assert.deepEqual(held.operationPatches, []);
 
   const released = planRequirementWorkflow([
     operation({ id: 1, operationNumber: "OP1", machine: "Bandsaw", status: "Complete", completedQuantity: 5 }),
     operation({ id: 2, operationNumber: "OP2", machine: "Lathe", status: "Planned", completedQuantity: 3 }),
-  ]);
+  ], BEFORE_QC);
   assert.deepEqual(released.operationPatches, [{ id: 2, status: "Ready" }]);
 });
 
@@ -119,7 +124,7 @@ test("multiple CNC operations keep independent CAM prerequisites", () => {
     operation({ id: 2, operationNumber: "OP1", machine: "Shop Sabre CNC", workType: "CAM", status: "Complete" }),
     operation({ id: 3, operationNumber: "OP2", machine: "Haas CNC" }),
     operation({ id: 4, operationNumber: "OP2", machine: "Haas CNC", workType: "CAM", status: "Ready" }),
-  ]);
+  ], BEFORE_QC);
   assert.deepEqual(plan.operationPatches, [{ id: 1, status: "Ready" }]);
   assert.equal(plan.requirementStatus, "Ready for CAM");
 });
@@ -129,7 +134,7 @@ test("duplicate physical rows at the same operation number unlock in parallel", 
     operation({ id: 1, operationNumber: "OP1", machine: "Bandsaw" }),
     operation({ id: 2, operationNumber: "OP1", machine: "Bandsaw" }),
     operation({ id: 3, operationNumber: "OP2", machine: "Tapping" }),
-  ]);
+  ], BEFORE_QC);
   assert.deepEqual(plan.operationPatches, [
     { id: 1, status: "Ready" },
     { id: 2, status: "Ready" },
@@ -141,7 +146,7 @@ test("exact duplicate operation keys collapse to one canonical task", () => {
   const original = operation({ id: 1, operationNumber: "OP1", machine: "Bandsaw", operationKey: "part|OP1" });
   assert.deepEqual(deduplicateOperations([duplicate, original]).map(({ id }) => id), [1]);
 
-  const plan = planRequirementWorkflow([duplicate, original]);
+  const plan = planRequirementWorkflow([duplicate, original], BEFORE_QC);
   assert.deepEqual(plan.operationPatches, [{ id: 1, status: "Ready" }]);
 });
 
@@ -163,7 +168,7 @@ test("a route without OP1 remains in triage", () => {
   const plan = planRequirementWorkflow([
     operation({ id: 1, operationNumber: "OP2", machine: "Haas CNC" }),
     operation({ id: 2, operationNumber: "OP2", machine: "Haas CNC", workType: "CAM", status: "Ready" }),
-  ]);
+  ], BEFORE_QC);
   assert.equal(plan.requirementStatus, "Needs Triage");
 });
 
@@ -172,15 +177,13 @@ test("physical work in progress takes status precedence over outstanding CAM", (
     operation({ id: 1, operationNumber: "OP1", machine: "Bandsaw", status: "In Progress" }),
     operation({ id: 2, operationNumber: "OP2", machine: "Haas CNC" }),
     operation({ id: 3, operationNumber: "OP2", machine: "Haas CNC", workType: "CAM", status: "Ready" }),
-  ]);
+  ], BEFORE_QC);
   assert.equal(plan.requirementStatus, "On Machine");
 });
 
-test("completed manufacturing advances to QC while downstream lifecycle states are preserved", () => {
+test("completed manufacturing advances to QC", () => {
   const rows = [operation({ id: 1, operationNumber: "OP1", machine: "Bandsaw", status: "Complete" })];
-  assert.equal(planRequirementWorkflow(rows).requirementStatus, "Ready for QC");
-  assert.equal(planRequirementWorkflow(rows, "Ready for Finishing").requirementStatus, "Ready for Finishing");
-  assert.equal(planRequirementWorkflow(rows, "Complete").requirementStatus, "Complete");
+  assert.equal(planRequirementWorkflow(rows, BEFORE_QC).requirementStatus, "Ready for QC");
 });
 
 test("threaded inserts remain planned until QC and finishing release them", () => {
@@ -189,28 +192,37 @@ test("threaded inserts remain planned until QC and finishing release them", () =
     operation({ id: 2, operationNumber: "OP2", machine: "Threaded Insert", status: "Planned" }),
   ];
 
-  const awaitingQc = planRequirementWorkflow(rows, "Ready for Manufacturing", {
+  const awaitingQc = planRequirementWorkflow(rows, {
     qcPassed: false, finishingRequired: false, finishingComplete: true,
   });
   assert.equal(awaitingQc.requirementStatus, "Ready for QC");
   assert.deepEqual(awaitingQc.operationPatches, []);
 
-  const awaitingFinishing = planRequirementWorkflow(rows, "Ready for Finishing", {
+  const awaitingFinishing = planRequirementWorkflow(rows, {
     qcPassed: true, finishingRequired: true, finishingComplete: false,
   });
   assert.equal(awaitingFinishing.requirementStatus, "Ready for Finishing");
   assert.deepEqual(awaitingFinishing.operationPatches, []);
 
-  const released = planRequirementWorkflow(rows, "Ready for Manufacturing", {
+  const released = planRequirementWorkflow(rows, {
     qcPassed: true, finishingRequired: true, finishingComplete: true,
   });
   assert.equal(released.requirementStatus, "Ready for Manufacturing");
   assert.deepEqual(released.operationPatches, [{ id: 2, status: "Ready" }]);
 
-  const complete = planRequirementWorkflow([{ ...rows[0] }, { ...rows[1], status: "Complete" }], "On Machine", {
+  const complete = planRequirementWorkflow([{ ...rows[0] }, { ...rows[1], status: "Complete" }], {
     qcPassed: true, finishingRequired: true, finishingComplete: true,
   });
   assert.equal(complete.requirementStatus, "Complete");
+});
+
+test("finishing holds post-QC work until QC passed and the part left finishing", () => {
+  assert.equal(isFinishingComplete({ finishingRequired: false, qcPassed: false, status: "Ready for QC" }), true);
+  assert.equal(isFinishingComplete({ finishingRequired: true, qcPassed: false, status: "Complete" }), false);
+  assert.equal(isFinishingComplete({ finishingRequired: true, qcPassed: true, status: "Ready for Finishing" }), false);
+  assert.equal(isFinishingComplete({ finishingRequired: true, qcPassed: true, status: "Ready for Manufacturing" }), true);
+  assert.equal(normalizeOperationStatus("Needs Rework"), "Ready");
+  assert.equal(normalizeOperationStatus("Blocked"), "Blocked");
 });
 
 test("a configured QC point inspects OP1..OPN and holds later operations for QC and finishing", () => {
@@ -225,14 +237,14 @@ test("a configured QC point inspects OP1..OPN and holds later operations for QC 
     operation({ id: 3, operationNumber: "OP3", machine: "Threaded Insert", status: "Planned" }),
   ];
   const context = { qcPassed: false, finishingRequired: true, finishingComplete: false, qcAfterOperation: 1 };
-  const awaitingQc = planRequirementWorkflow(rows, "Ready for Manufacturing", context);
+  const awaitingQc = planRequirementWorkflow(rows, context);
   assert.equal(awaitingQc.requirementStatus, "Ready for QC");
   assert.deepEqual(awaitingQc.operationPatches, [{ id: 2, status: "Planned" }]);
   assert.equal(nextWorkflowAction(rows.map((row) => ({ ...row, status: row.id === 2 ? "Planned" : row.status })), context).label, "QC");
 
   const planned = rows.map((row) => ({ ...row, status: row.id === 1 ? row.status : "Planned" as const }));
-  assert.equal(planRequirementWorkflow(planned, "Ready for QC", { ...context, qcPassed: true }).requirementStatus, "Ready for Finishing");
-  const released = planRequirementWorkflow(planned, "Ready for Manufacturing", { ...context, qcPassed: true, finishingComplete: true });
+  assert.equal(planRequirementWorkflow(planned, { ...context, qcPassed: true }).requirementStatus, "Ready for Finishing");
+  const released = planRequirementWorkflow(planned, { ...context, qcPassed: true, finishingComplete: true });
   assert.equal(released.requirementStatus, "Ready for Manufacturing");
   assert.deepEqual(released.operationPatches, [{ id: 2, status: "Ready" }]);
 });
