@@ -2,7 +2,7 @@ import "server-only";
 
 import { unstable_cache } from "next/cache";
 
-import { enrichOperationsWithQuality } from "../quality-control";
+import { enrichOperationsWithQuality, qualityMetadataByRequirement } from "../quality-control";
 import { loadQualitySourceData } from "../quality-control-server";
 import { getManufacturingDataVersion, getManufacturingSnapshot } from "./index";
 
@@ -10,10 +10,13 @@ const loadSnapshotByVersion = unstable_cache(
   async (version: string) => {
     void version;
     const base = await getManufacturingSnapshot();
-    const quality = await loadQualitySourceData(base.operations);
-    const operations = enrichOperationsWithQuality(base.operations, quality.metadata);
+    // Fetched after the entity reads so a cold build stays within their bounded read concurrency.
+    const quality = await loadQualitySourceData();
+    const { metadata: qualityByRequirement } = qualityMetadataByRequirement(
+      base.operations, quality.reviews, quality.retractedIds, quality.profiles);
+    const operations = enrichOperationsWithQuality(base.operations, qualityByRequirement);
     const jobs = base.jobs.map((job) => {
-      const metadata = quality.metadata.get(job.requirementId);
+      const metadata = qualityByRequirement.get(job.requirementId);
       return {
         ...job,
         qcNotes: metadata?.notes ?? "",
@@ -30,7 +33,7 @@ const loadSnapshotByVersion = unstable_cache(
       retractedQualityReviewIds: quality.retractedIds,
     };
   },
-  ["manufacturing-projected-snapshot-v7-cots"],
+  ["manufacturing-projected-snapshot-v8"],
   { revalidate: false },
 );
 

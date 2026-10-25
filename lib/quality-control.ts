@@ -1,6 +1,4 @@
-import type { ManufacturingOperation, QualityControlItem, QualityResult, QualityLocationFields } from "./types.ts";
-import type { StorageLocation } from "./storage-locations.ts";
-import { isStorageLocation } from "./storage-locations.ts";
+import type { ManufacturingOperation, QualityControlItem, QualityFailureSummary, QualityResult } from "./types.ts";
 import { isPostQcOperation } from "./manufacturing-workflow.ts";
 
 export interface QualityReviewRow {
@@ -12,9 +10,6 @@ export interface QualityReviewRow {
   rejected_quantity: number | null;
   reviewed_by: string;
   reviewed_at: string;
-  storage_location: string | null;
-  location_updated_by: string | null;
-  location_updated_at: string | null;
 }
 
 export interface QualityProfileRow {
@@ -22,20 +17,14 @@ export interface QualityProfileRow {
   display_name: string;
 }
 
-export interface EffectiveQualityMetadata extends QualityLocationFields {
-  reviewId: number | null;
+export interface EffectiveQualityMetadata {
   requirementId: number;
+  effectiveQcResult: QualityResult;
   notes: string;
   reviewedAt: string | null;
   reviewedBy: string | null;
+  lastQualityFailure: QualityFailureSummary | null;
 }
-
-const PENDING_LOCATION: Omit<QualityLocationFields, "effectiveQcResult"> = {
-  storageLocation: null,
-  locationUpdatedBy: null,
-  locationUpdatedAt: null,
-  lastQualityFailure: null,
-};
 
 function timestamp(value: string | null | undefined) {
   return value ? new Date(value).getTime() : Number.NEGATIVE_INFINITY;
@@ -102,24 +91,16 @@ export function qualityMetadataByRequirement(
     const effectiveQcResult: QualityResult = !review || retracted.has(review.id) || completedAfterReview || passedReviewHasIncompleteWork
       ? "pending"
       : review.result;
-    const effectivePass = effectiveQcResult === "passed";
     const lastFailure = (reviewHistoryByRequirement.get(requirementId) ?? [])
       .filter((candidate) => candidate.result === "failed" && !retracted.has(candidate.id))
       .sort((left, right) => timestamp(right.reviewed_at) - timestamp(left.reviewed_at) || right.id - left.id)[0];
-    const storageLocation: StorageLocation | null = effectivePass && isStorageLocation(review?.storage_location)
-      ? review.storage_location
-      : null;
 
     metadata.set(requirementId, {
-      reviewId: effectiveQcResult === "pending" ? null : review?.id ?? null,
       requirementId,
       effectiveQcResult,
       notes: effectiveQcResult === "pending" ? "" : review?.notes ?? "",
       reviewedAt: effectiveQcResult === "pending" ? null : review?.reviewed_at ?? null,
       reviewedBy: effectiveQcResult === "pending" ? null : names.get(review?.reviewed_by ?? "") ?? null,
-      storageLocation,
-      locationUpdatedBy: effectivePass ? names.get(review?.location_updated_by ?? "") ?? null : null,
-      locationUpdatedAt: effectivePass ? review?.location_updated_at ?? null : null,
       lastQualityFailure: lastFailure ? {
         notes: lastFailure.notes,
         rejectedQuantity: lastFailure.rejected_quantity,
@@ -140,9 +121,6 @@ export function enrichOperationsWithQuality(
     const quality = operation.requirementId ? metadata.get(operation.requirementId) : undefined;
     return {
       ...operation,
-      storageLocation: operation.storageLocation,
-      locationUpdatedBy: operation.locationUpdatedBy,
-      locationUpdatedAt: operation.locationUpdatedAt,
       effectiveQcResult: quality?.effectiveQcResult ?? "pending",
       qualityNotes: quality?.notes ?? "",
       qualityReviewedBy: quality?.reviewedBy ?? null,
@@ -175,13 +153,11 @@ export function projectQualityControl(
     ))
     .map(([requirementId, operations]) => {
       const quality = metadata.get(requirementId) ?? {
-        reviewId: null,
-        requirementId,
         effectiveQcResult: "pending" as const,
         notes: "",
         reviewedAt: null,
         reviewedBy: null,
-        ...PENDING_LOCATION,
+        lastQualityFailure: null,
       };
       return {
         requirementId,

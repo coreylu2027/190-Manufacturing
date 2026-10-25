@@ -6,37 +6,40 @@ import { requirementStatus } from "../production-status.ts";
 
 const requirement = {
   id: 2,
-  Part: [{ id: 3, value: "P-1" }],
-  "Required Quantity": 2,
-  Status: { value: "Ready for Finishing" },
-  "Drawing PDF": [{ url: "https://legacy-source.invalid/legacy.pdf", visible_name: "legacy.pdf" }],
-  "STEP File": [{ url: "https://legacy-source.invalid/legacy.step", visible_name: "legacy.step" }],
+  part_id: 3,
+  required_quantity: 2,
+  status: "Ready for Finishing",
 };
 
 test("hidden obsolete history retains visibility metadata for the admin archive", () => {
-  const archived = { ...requirement, Obsolete: true, Hidden: true, "Visibility Version": 3, "Active in BOM": false };
-  const [op] = projectOperations([{ ...operation, "Active in Routing": false }], [archived], [part]);
+  const archived = { ...requirement, obsolete: true, hidden: true, visibility_version: 3, active_in_bom: false };
+  const [op] = projectOperations([{ ...operation, active_in_routing: false }], [archived], [part]);
   assert.equal(op.hidden, true);
   assert.equal(op.visibilityVersion, 3);
   assert.equal(op.obsolete, true);
-  const [job] = projectFinishing([{ ...finishing, Active: false }], [archived]);
+  const [job] = projectFinishing([{ ...finishing, active: false }], [archived]);
   assert.equal(job.hidden, true);
   assert.equal(job.visibilityVersion, 3);
 });
 const operation = {
   id: 1,
-  Operation: "root|part|OP1",
-  "Production Requirement": [{ id: 2, value: "P-1 — Bracket [A-1]" }],
-  "Operation Number": { value: "OP1" },
-  "Work Type": { value: "Manufacturing" },
-  Machine: { value: "Mill" },
-  Status: { value: "Ready" },
-  "Active in Routing": true,
+  operation_key: "root|part|OP1",
+  requirement_id: 2,
+  operation_number: "OP1",
+  work_type: "Manufacturing",
+  machine: "Mill",
+  status: "Ready",
+  active_in_routing: true,
 };
-const part = { id: 3, Material: "Aluminum" };
+const part = {
+  id: 3,
+  material: "Aluminum",
+  drawing_files: [{ url: "https://legacy-source.invalid/legacy.pdf", visible_name: "legacy.pdf" }],
+  step_files: [{ url: "https://legacy-source.invalid/legacy.step", visible_name: "legacy.step" }],
+};
 test("production stays pending until required powder coating completes, including post-finishing inserts", () => {
-  const coatedRequirement = { ...requirement, Finishing: { value: "Black" }, "QC Outcome": { value: "Passed" } };
-  const completedOperation = { ...operation, Status: { value: "Complete" } };
+  const coatedRequirement = { ...requirement, finishing: "Black", qc_outcome: "Passed" };
+  const completedOperation = { ...operation, status: "Complete" };
   const [pendingQc] = projectOperations([completedOperation], [coatedRequirement], [part]);
   assert.equal(requirementStatus([pendingQc]), "QC Pending");
   const passed = { ...pendingQc, effectiveQcResult: "passed" as const };
@@ -45,7 +48,7 @@ test("production stays pending until required powder coating completes, includin
   const inserts = { ...passed, id: 5, machine: "Threaded Insert", status: "Planned" as const };
   assert.equal(requirementStatus([passed, inserts]), "Finishing Pending");
 
-  const finished = projectOperations([completedOperation], [{ ...coatedRequirement, Status: { value: "Complete" } }], [part])
+  const finished = projectOperations([completedOperation], [{ ...coatedRequirement, status: "Complete" }], [part])
     .map(row => ({ ...row, effectiveQcResult: "passed" as const }));
   assert.equal(requirementStatus(finished), "Complete");
   assert.equal(requirementStatus([...finished, { ...inserts, finishingComplete: true, status: "Ready" }]), "Ready");
@@ -53,9 +56,9 @@ test("production stays pending until required powder coating completes, includin
 });
 const finishing = {
   id: 4,
-  "Production Key": "root|part",
-  "Production Requirement": [{ id: 2, value: "P-1 — Bracket [A-1]" }],
-  Active: true,
+  production_key: "root|part",
+  requirement_id: 2,
+  active: true,
 };
 const attachments = [
   { partId: 3, kind: "drawing-pdf" as const, position: 0, originalName: "P-1 REV B.pdf" },
@@ -63,22 +66,22 @@ const attachments = [
 ];
 
 test("obsolete and restored historical requirements remain visible without resurrecting deactivated stages of active routes", () => {
-  const historical = { ...requirement, Obsolete: true, "Obsoletion Version": 1, "Active in BOM": false,
-    "Required Part Revision": "A", "Obsoletion Origin": "automatic", "Replacement Requirement": 99 };
-  const done = { ...operation, "Active in Routing": false, Status: { value: "Complete" }, "Completed Quantity": 2 };
+  const historical = { ...requirement, obsolete: true, obsoletion_version: 1, active_in_bom: false,
+    required_part_revision: "A", obsoletion_origin: "automatic", obsolete_replacement_id: 99 };
+  const done = { ...operation, active_in_routing: false, status: "Complete", completed_quantity: 2 };
   const [projected] = projectOperations([done], [historical], [part]);
   assert.equal(projected.obsolete, true);
   assert.equal(projected.completedQuantity, 2);
   assert.equal(projected.revision, "A");
   assert.equal(projected.activeInRouting, false);
   assert.equal(projected.replacementRequirementId, 99);
-  const [restored] = projectOperations([done], [{ ...historical, Obsolete: false, "Obsoletion Version": 2 }], [part]);
+  const [restored] = projectOperations([done], [{ ...historical, obsolete: false, obsoletion_version: 2 }], [part]);
   assert.equal(restored.obsolete, false);
   assert.equal(restored.activeInRouting, false);
   assert.equal(restored.status, "Complete");
-  assert.equal(projectFinishing([{ ...finishing, Active: false }], [historical])[0].obsolete, true);
+  assert.equal(projectFinishing([{ ...finishing, active: false }], [historical])[0].obsolete, true);
   assert.equal(projectOperations([done], [requirement], [part]).length, 0);
-  const active = { ...operation, id: 8, Operation: "new-route" };
+  const active = { ...operation, id: 8, operation_key: "new-route" };
   assert.deepEqual(projectOperations([done, active], [historical], [part]).map(row => row.id), [8]);
 });
 
@@ -105,20 +108,20 @@ test("threaded inserts stay hidden behind QC and finishing while completed finis
   const threadedInsert = {
     ...operation,
     id: 5,
-    Operation: "root|part|OP2",
-    "Operation Number": { value: "OP2" },
-    Machine: { value: "Threaded Insert" },
-    Status: { value: "Ready" },
+    operation_key: "root|part|OP2",
+    operation_number: "OP2",
+    machine: "Threaded Insert",
+    status: "Ready",
   };
   const awaitingFinishing = {
     ...requirement,
-    Finishing: { value: "Black" },
-    "QC Outcome": { value: "Passed" },
-    Status: { value: "Ready for Finishing" },
+    finishing: "Black",
+    qc_outcome: "Passed",
+    status: "Ready for Finishing",
   };
   assert.equal(projectOperations([threadedInsert], [awaitingFinishing], [part])[0].status, "Planned");
 
-  const finishingComplete = { ...awaitingFinishing, Status: { value: "Ready for Manufacturing" } };
+  const finishingComplete = { ...awaitingFinishing, status: "Ready for Manufacturing" };
   assert.equal(projectOperations([threadedInsert], [finishingComplete], [part])[0].status, "Ready");
   assert.equal(projectFinishing([finishing], [finishingComplete], [], [threadedInsert])[0].status, "Complete");
 });
@@ -126,16 +129,16 @@ test("threaded inserts stay hidden behind QC and finishing while completed finis
 test("requirement projections include independent location and lifecycle details", () => {
   const [projected] = projectOperations([operation], [{
     ...requirement,
-    "Production Key": "root|part",
-    Configuration: "Main",
-    "BOM Positions": "2, 5",
-    Finishing: { value: "Black" },
-    "QC Outcome": { value: "Passed" },
-    Status: { value: "Ready for Manufacturing" },
-    "Part Location": "Shelf 2",
-    "Production Notes": "Deburr before inspection",
-    "Location Updated By": "Morgan M.",
-    "Location Updated At": "2026-09-05T15:00:00Z",
+    production_key: "root|part",
+    configuration: "Main",
+    bom_positions: "2, 5",
+    finishing: "Black",
+    qc_outcome: "Passed",
+    status: "Ready for Manufacturing",
+    part_location: "Shelf 2",
+    production_notes: "Deburr before inspection",
+    location_updated_by: "Morgan M.",
+    location_updated_at: "2026-09-05T15:00:00Z",
   }], [part]);
 
   assert.equal(projected.requirementKey, "root|part");
@@ -149,10 +152,10 @@ test("requirement projections include independent location and lifecycle details
 
   const [projectedFinishing] = projectFinishing([finishing], [{
     ...requirement,
-    "Part Location": "Shelf 2",
-    "Production Notes": "Keep masking installed",
-    "Location Updated By": "Morgan M.",
-    "Location Updated At": "2026-09-05T15:00:00Z",
+    part_location: "Shelf 2",
+    production_notes: "Keep masking installed",
+    location_updated_by: "Morgan M.",
+    location_updated_at: "2026-09-05T15:00:00Z",
   }]);
   assert.equal(projectedFinishing.storageLocation, "Shelf 2");
   assert.equal(projectedFinishing.locationUpdatedBy, "Morgan M.");
@@ -160,7 +163,7 @@ test("requirement projections include independent location and lifecycle details
 });
 
  test("production status identifies pending QC before completion and post-QC inserts", () => {
-  const completed = projectOperations([{ ...operation, Status: { value: "Complete" } }], [requirement], [part]);
+  const completed = projectOperations([{ ...operation, status: "Complete" }], [requirement], [part]);
   assert.equal(requirementStatus(completed), "QC Pending");
   const inserts = { ...completed[0], id: 5, machine: "Threaded Insert", status: "Planned" as const };
   assert.equal(requirementStatus([...completed, inserts]), "QC Pending");
@@ -171,28 +174,28 @@ test("requirement projections include independent location and lifecycle details
 });
 
 test("off-the-shelf requirements keep their retired routes visible with an Off the Shelf production status", () => {
-  const bought = { ...requirement, "Off The Shelf": true, "Active in BOM": true };
-  const [op] = projectOperations([{ ...operation, "Active in Routing": false }], [bought], [part]);
+  const bought = { ...requirement, off_the_shelf: true, active_in_bom: true };
+  const [op] = projectOperations([{ ...operation, active_in_routing: false }], [bought], [part]);
   assert.equal(op.offTheShelf, true);
   assert.equal(op.activeInRouting, false);
   assert.equal(requirementStatus([op]), "Off the Shelf");
-  assert.equal(projectOperations([{ ...operation, "Active in Routing": false }], [{ ...requirement, "Active in BOM": true }], [part]).length, 0);
+  assert.equal(projectOperations([{ ...operation, active_in_routing: false }], [{ ...requirement, active_in_bom: true }], [part]).length, 0);
 });
 
 test("imported subassembly parts report the document of the root assembly they were synced through", () => {
-  const assemblies = [{ id: 10, "Assembly Number": "A-ROOT" }, { id: 11, "Assembly Number": "A-ROLLER" }, { id: 12, "Assembly Number": "A-OTHER" }];
+  const assemblies = [{ id: 10, assembly_number: "A-ROOT" }, { id: 11, assembly_number: "A-ROLLER" }, { id: 12, assembly_number: "A-OTHER" }];
   const row = (id: number, assembly: number, document: string, extra: Record<string, unknown> = {}) => ({
-    ...requirement, id, Assembly: [{ id: assembly }], "Source Root": assembly === 12 ? "A-OTHER" : "A-ROOT",
-    "Source Document": document, "Active in BOM": true, ...extra,
+    ...requirement, id, assembly_id: assembly, source_root: assembly === 12 ? "A-OTHER" : "A-ROOT",
+    source_document: document, active_in_bom: true, ...extra,
   });
   const requirements = [
     row(20, 10, "A-26C-0004"), row(21, 10, "A-26C-0004"), row(22, 10, "Imported bracket"),
-    row(23, 10, "Retired document", { Obsolete: true }), row(24, 10, "Retired document", { Obsolete: true }),
+    row(23, 10, "Retired document", { obsolete: true }), row(24, 10, "Retired document", { obsolete: true }),
     row(25, 11, "Configurable Roller"),
     // A root whose only direct part is inactive still resolves.
-    row(26, 12, "A-26C-0009", { "Active in BOM": false }),
+    row(26, 12, "A-26C-0009", { active_in_bom: false }),
   ];
-  const operations = requirements.map((item) => ({ ...operation, id: item.id, Operation: `op-${item.id}`, "Production Requirement": [{ id: item.id }] }));
+  const operations = requirements.map((item) => ({ ...operation, id: item.id, operation_key: `op-${item.id}`, requirement_id: item.id }));
   const byRequirement = new Map(projectOperations(operations, requirements, [part], [], assemblies).map((op) => [op.requirementId, op]));
   assert.deepEqual([byRequirement.get(25)?.documentName, byRequirement.get(25)?.syncedFromDocument], ["Configurable Roller", "A-26C-0004"]);
   assert.equal(byRequirement.get(22)?.syncedFromDocument, "A-26C-0004");
@@ -200,16 +203,16 @@ test("imported subassembly parts report the document of the root assembly they w
 });
 
 test("COTS requirements without routing are projected for production with their location", () => {
-  const cotsPart = { id: 7, "Part Number": "WCP-0215", Name: "Bearing", Vendor: "WCP", COTS: true };
-  const assembly = { id: 9, "Assembly Number": "A-1" };
+  const cotsPart = { id: 7, part_number: "WCP-0215", name: "Bearing", vendor: "WCP", cots: true };
+  const assembly = { id: 9, assembly_number: "A-1" };
   const cotsRequirement = {
-    id: 8, Part: [{ id: 7 }], Assembly: [{ id: 9 }], "Required Quantity": 6, "Active in BOM": true,
-    "Production Key": "A-1|A|A-1|WCP-0215|default|v2", "Source Root": "A-1",
-    "Part Location": "Shelf 2", "Location Updated By": "Sam", "Location Updated At": "2026-09-26T00:00:00Z",
+    id: 8, part_id: 7, assembly_id: 9, required_quantity: 6, active_in_bom: true,
+    production_key: "A-1|A|A-1|WCP-0215|default|v2", source_root: "A-1",
+    part_location: "Shelf 2", location_updated_by: "Sam", location_updated_at: "2026-09-26T00:00:00Z",
   };
-  const removed = { ...cotsRequirement, id: 10, "Active in BOM": false };
-  const obsolete = { ...removed, id: 11, Obsolete: true, "Obsoletion Version": 1 };
-  const made = { ...cotsRequirement, id: 12, Part: [{ id: 3 }] };
+  const removed = { ...cotsRequirement, id: 10, active_in_bom: false };
+  const obsolete = { ...removed, id: 11, obsolete: true, obsoletion_version: 1 };
+  const made = { ...cotsRequirement, id: 12, part_id: 3 };
   const [projected, ...rest] = projectCotsRequirements([cotsRequirement, removed, obsolete, made], [cotsPart, part], [assembly]);
   assert.equal(rest.length, 1);
   assert.equal(rest[0].requirementId, 11);

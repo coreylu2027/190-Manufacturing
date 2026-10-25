@@ -13,7 +13,6 @@ export type OperationStatus = (typeof OPERATION_STATUSES)[number];
 export type UserRole = "machinist" | "admin";
 export type OperationWorkType = "Manufacturing" | "CAM";
 export type OperationQuantityAction = "claim" | "release" | "complete" | "undo_complete";
-export type OperationAction = OperationQuantityAction | "steal";
 export type FabricationAction = "claim" | "release" | "complete" | "undo_complete" | "steal";
 
 export interface OperationAllocation {

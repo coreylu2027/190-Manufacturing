@@ -44,14 +44,6 @@ export async function setAttachmentOverride(requirementId: number, kind: Overrid
   return writer().setAttachmentOverride(requirementId, kind, file, expectedToken, reason, actor);
 }
 
-export async function getOperations() {
-  return reader().getOperations();
-}
-
-export async function getFabricationJobs() {
-  return reader().getFabricationJobs();
-}
-
 export async function getManufacturingDataVersion() {
   return reader().readDataVersion();
 }
@@ -115,12 +107,10 @@ export async function forceQualityReview(requirementId: number, notes: string, t
   return writer().forceQualityReview(requirementId, notes, token, actor, result, completeFinishing);
 }
 
-export const updateQualityLocation = updatePartLocation;
-
 export async function undoQualityReview(requirementId: number, actor: Actor) {
   return writer().undoQualityReview(requirementId, actor);
 }
 
-export async function getRetractedQualityReviewIds(): Promise<number[]> {
-  return writer().retractedReviewIds();
+export async function getQualityReviews() {
+  return writer().qualityReviews();
 }

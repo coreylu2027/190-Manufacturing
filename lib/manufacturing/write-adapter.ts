@@ -5,6 +5,7 @@ import type { NormalizedRow } from "./model.ts";
 import type { FabricationAction, OperationPatch, OperationQuantityAction, QualityResult } from "../types.ts";
 import { ROBOT_LOCATION, canUseOnRobotLocation, isStorageLocation, isPrintingOperation, type StorageLocation } from "../storage-locations.ts";
 import { robotPlacementAllowed } from "../obsoletion.ts";
+import type { QualityReviewRow } from "../quality-control.ts";
 
 import { notificationPartContext as resolvePartContext } from "./identity.ts";
 import { EngineeringOverrideError, planEngineeringOverrides } from "./engineering-override-plan.ts";
@@ -19,17 +20,7 @@ const STALE_OVERRIDE_MESSAGE = "Onshape data or another adjustment changed. Revi
 export interface WriteState {
   token: string;
   rows: Record<string, NormalizedRow[]>;
-  reviews: Array<{
-    id: number;
-    production_requirement_id: number | null;
-    operation_id: number | null;
-    result: "passed" | "failed";
-    reviewed_at: string;
-    rejected_quantity?: number | null;
-    storage_location?: StorageLocation | null;
-    location_updated_by?: string | null;
-    location_updated_at?: string | null;
-  }>;
+  reviews: QualityReviewRow[];
   retractions: Array<{ review_id: number }>;
 }
 type Actor = { id: string; name: string };
@@ -251,8 +242,10 @@ export function createSupabaseWriteAdapter(config: AdapterConfig) {
         location: null,
       }));
     },
-    async retractedReviewIds() {
-      return (await rpc<WriteState>("manufacturing_write_state")).retractions.map(row => row.review_id);
+    /** Every QC review and retraction. One RPC value, so PostgREST's max_rows never truncates it. */
+    async qualityReviews() {
+      const { reviews, retractions } = await rpc<WriteState>("manufacturing_write_state");
+      return { reviews, retractedIds: retractions.map(row => row.review_id) };
     },
     applyQuantityAction(id: number, action: OperationQuantityAction, quantity: number, actor: Actor, handoff?: { programPath?: string; notes?: string; location?: StorageLocation; completeAllClaims?: boolean }) {
       return transact(actor, action, async (plan, state) => {

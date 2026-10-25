@@ -274,7 +274,7 @@ function fixture(options: {
   operation?: Partial<RawRow>;
   requirement?: Partial<RawRow>;
   finishing?: Partial<RawRow>;
-  reviews?: WriteState["reviews"];
+  reviews?: Array<Pick<WriteState["reviews"][number], "id" | "production_requirement_id" | "operation_id" | "result" | "reviewed_at">>;
   retractions?: WriteState["retractions"];
 } = {}): WriteState {
   const requirement = normalized("requirements", {
@@ -317,7 +317,7 @@ function fixture(options: {
   return {
     token: "fixture-token",
     rows: { parts: [{ id: 40, part_number: "P-1", name: "Fixture" }], assemblies: [{ id: 50, assembly_number: "A-1" }], operations: [operation], requirements: [requirement], finishing: [finishing] },
-    reviews: options.reviews ?? [],
+    reviews: (options.reviews ?? []).map(review => ({ notes: "", rejected_quantity: null, reviewed_by: ACTOR.id, ...review })),
     retractions: options.retractions ?? [],
   };
 }
