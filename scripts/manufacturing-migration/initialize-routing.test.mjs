@@ -47,12 +47,13 @@ assert.deepEqual(await state(), initialized);
 assert.equal((await sql("select has_function_privilege('service_role','manufacturing.initialize_synced_routing()','execute') allowed"))[0].allowed, false);
 
 // Future successful/partial sync completion initializes new work in its transaction.
-await db.exec("insert into manufacturing.engineering_sync_runs values(1,'running')");
+const runs = (id) => `insert into manufacturing.engineering_sync_runs(id,status,github_run_url) values('00000000-0000-4000-8000-00000000000${id}','running','')`;
+await db.exec(runs(1));
 const future = await requirement("future");
 await operation(future, "future|OP1", "Bandsaw");
-await db.exec("update manufacturing.engineering_sync_runs set status='failed' where id=1");
+await db.exec("update manufacturing.engineering_sync_runs set status='failed' where id='00000000-0000-4000-8000-000000000001'");
 assert.equal((await sql("select status from manufacturing.operations where requirement_id=$1", [future]))[0].status, null);
-await db.exec("insert into manufacturing.engineering_sync_runs values(2,'running'); update manufacturing.engineering_sync_runs set status='partial' where id=2");
+await db.exec(`${runs(2)}; update manufacturing.engineering_sync_runs set status='partial' where id='00000000-0000-4000-8000-000000000002'`);
 assert.equal((await sql("select status from manufacturing.operations where requirement_id=$1", [future]))[0].status, "Ready");
 assert.equal((await sql("select status from manufacturing.requirements where id=$1", [future]))[0].status, "Ready for Manufacturing");
 await db.close();

@@ -1,20 +1,11 @@
 // Regression for the read-only production preflight: imported duplicate operation
 // keys and empty normalized revision fields. All data below is synthetic.
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
-const {PGlite}=await import(process.env.PGLITE_MODULE || '@electric-sql/pglite');
-const db=new PGlite();
-const query=async (q,p=[]) => (await db.query(q,p)).rows;
-const read=p=>readFile(new URL(p,import.meta.url),'utf8');
-await db.exec(`create role anon;create role authenticated;create role service_role;
-  create schema frc190_baserow_stage;
-  create table frc190_baserow_stage.snapshots(id uuid primary key);
-  create schema storage;
-  create table storage.buckets(id text primary key, public boolean not null);
-  create table storage.objects(bucket_id text,name text);`);
-await db.exec(await read('./fixtures/contract-normalized.sql'));
-await db.exec(await read('./fixtures/contract-attachments.sql'));
+import {createDatabase, SUPABASE_STUBS} from './pglite-fixture.mts';
+const {db, sql: query, install} = await createDatabase(SUPABASE_STUBS);
+await install('supabase/production/20260905_normalized_manufacturing.sql');
+await install('supabase/production/20260905_manufacturing_attachments.sql');
 await db.exec(`
   insert into manufacturing.assemblies(assembly_number,sync_schema_version) values('A-IMPORTED','source-document-v1');
   insert into manufacturing.parts(part_number,name,revision,step_export_key) values('P-IMPORTED','Plate','B','previous-export');
@@ -33,9 +24,9 @@ await db.exec(`
 // The migration must preserve duplicate rows while re-keying legacy identity in place.
 const before=await query('select * from manufacturing.operations order by id');
 const allocations=await query('select * from manufacturing.operation_allocations order by operation_id');
-await db.exec(await read('../../../supabase/production/20260906_onshape_engineering_sync.sql'));
-await db.exec(await read('../../../supabase/migrations/20260906143937_preserve_cam_operations.sql'));
-await db.exec(await read('../../../supabase/production/20260910_preserve_unchanged_part_revisions.sql'));
+await install('supabase/production/20260906_onshape_engineering_sync.sql');
+await install('supabase/migrations/20260906143937_preserve_cam_operations.sql');
+await install('supabase/production/20260910_preserve_unchanged_part_revisions.sql');
 assert.deepEqual(await query('select * from manufacturing.operations order by id'),before);
 const key='A-IMPORTED|B|A-IMPORTED|P-IMPORTED|default|v2';
 const payload={

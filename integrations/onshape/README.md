@@ -16,7 +16,7 @@ The delta workflow is not wired up here.
 | --- | --- |
 | `OnshapeToSupabase.py` | The sync CLI |
 | `test_onshape_to_supabase.py` | Mocked-Onshape unit tests (`npm run onshape:test`) |
-| `tests/*.test.mjs`, `tests/fixtures/` | PGlite tests of the engineering RPC against its contract fixtures |
+| `../../scripts/manufacturing-migration/onshape-*.test.mjs` | PGlite tests of the engineering RPC against the manufacturing schema |
 | `../../supabase/production/20260906_onshape_engineering_sync.sql` | The engineering RPC, plus `20260910_preserve_unchanged_part_revisions.sql` |
 | `../../.github/workflows/onshape-sync-poot-horse.yml` | Staged Poot Horse sync |
 | `../../.github/workflows/onshape-sync-tests.yml` | Offline tests on pull requests |
@@ -97,8 +97,8 @@ Built but disabled. Rollout: apply
 ## Tests
 
 ```sh
-npm run onshape:test      # Python, mocked Onshape and Supabase
-npm run onshape:test-sql  # PGlite: engineering RPC, imported data, staged review
+npm run onshape:test  # Python, mocked Onshape and Supabase
+npm test              # includes PGlite tests of the engineering RPC, imported data, and staged review
 ```
 
 Neither contacts Onshape or Supabase.

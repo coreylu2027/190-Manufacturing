@@ -9,8 +9,7 @@
     "lint": "eslint",
     "test": "node --experimental-strip-types --test \"lib/**/*.test.mts\" \"scripts/**/*.test.mts\" \"scripts/**/*.test.mjs\"",
     "manufacturing:generate-previews": "node --experimental-strip-types --env-file=.env.local scripts/manufacturing-migration/generate-part-previews.mts",
-    "onshape:test": "python -m unittest integrations/onshape/test_onshape_to_supabase.py",
-    "onshape:test-sql": "node integrations/onshape/tests/engineering-sync.test.mjs && node integrations/onshape/tests/imported-sync.test.mjs"
+    "onshape:test": "python -m unittest integrations/onshape/test_onshape_to_supabase.py"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

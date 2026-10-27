@@ -1,29 +1,18 @@
-// In-memory PostgreSQL only. No HTTP, Onshape, Supabase or backend credentials.
-// npm run onshape:test-sql
+// The Onshape sync's engineering RPC against the manufacturing schema it was
+// written for, in PGlite. No HTTP, Onshape, Supabase or backend credentials.
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-const { PGlite } = await import(process.env.PGLITE_MODULE || '@electric-sql/pglite');
-const db = new PGlite();
-const sql = async (text, values = []) => (await db.query(text, values)).rows;
-const read = path => readFile(new URL(path, import.meta.url), 'utf8');
-await db.exec(`
-  create role anon; create role authenticated; create role service_role;
-  create schema frc190_baserow_stage;
-  create table frc190_baserow_stage.snapshots(id uuid primary key);
-  create schema storage;
-  create table storage.buckets(id text primary key, public boolean not null);
-  create table storage.objects(bucket_id text, name text);
-  insert into storage.buckets values('manufacturing-files',false);
-`);
-await db.exec(await read('./fixtures/contract-normalized.sql'));
-await db.exec(await read('./fixtures/contract-attachments.sql'));
-await db.exec(await read('../../../supabase/production/20260906_onshape_engineering_sync.sql'));
-await db.exec(await read('../../../supabase/migrations/20260906143937_preserve_cam_operations.sql'));
-await db.exec(await read('../../../supabase/production/20260910_preserve_unchanged_part_revisions.sql'));
-await db.exec(await read('../../../supabase/migrations/20260926000000_cots_parts.sql'));
+import { SHOP_COLUMNS } from '../../lib/manufacturing/model.ts';
+import { createDatabase, SUPABASE_STUBS } from './pglite-fixture.mts';
+const { db, sql, install } = await createDatabase(SUPABASE_STUBS);
+await install('supabase/production/20260905_normalized_manufacturing.sql');
+await install('supabase/production/20260905_manufacturing_attachments.sql');
+await install('supabase/production/20260906_onshape_engineering_sync.sql');
+await install('supabase/migrations/20260906143937_preserve_cam_operations.sql');
+await install('supabase/production/20260910_preserve_unchanged_part_revisions.sql');
+await install('supabase/migrations/20260926000000_cots_parts.sql');
 // Reapplying the patch is a no-op.
-await db.exec(await read('../../../supabase/migrations/20260926000000_cots_parts.sql'));
+await install('supabase/migrations/20260926000000_cots_parts.sql');
 
 const begin = async () => {
   const id = randomUUID();
@@ -69,20 +58,17 @@ assert.equal(created.requirements[0].assembly_id, created.assemblies[0].id);
 assert.equal(created.operations[0].requirement_id, created.requirements[0].id);
 assert.equal(created.finishing[0].requirement_id, created.requirements[0].id);
 
-// Seed every shop-owned column from model.ts, plus normalized location fields.
-const model = await read('./fixtures/contract-model.ts');
-const shopByTable = {};
-for (const section of model.split('{ name: ').slice(1)) {
-  const match = section.match(/^"(\w+)"/);
-  if (!match) continue;
-  const table = match[1];
-  shopByTable[table] = [...section.matchAll(/\["(\w+)","[^"]+","(\w+)","shop"\]/g)]
-    .map(([, name, kind]) => [name, kind]);
-}
+// Seed every shop-owned column (what shop writes may change, plus assembly
+// notes), plus normalized location fields.
+const shopByTable = { assemblies: ['notes'], parts: [],
+  ...Object.fromEntries(Object.entries(SHOP_COLUMNS).map(([table, columns]) => [table, Object.keys(columns)])) };
+const columnTypes = new Map((await sql(`select table_name || '.' || column_name as name, data_type
+  from information_schema.columns where table_schema = 'manufacturing'`)).map(({ name, data_type }) => [name, data_type]));
 await db.exec("insert into manufacturing.locations(location_key,name) values('L','Shelf')");
 for (const [table, fields] of Object.entries(shopByTable)) {
-  for (const [name, kind] of fields) {
-    const value = kind === 'number' ? 7 : kind === 'date' ? '2026-09-01T00:00:00Z' : 'Shop-owned sentinel';
+  for (const name of fields) {
+    const type = columnTypes.get(`${table}.${name}`);
+    const value = type === 'numeric' ? 7 : type.startsWith('timestamp') ? '2026-09-01T00:00:00Z' : 'Shop-owned sentinel';
     await sql(`update manufacturing.${table} set ${name}=$1`, [value]);
   }
   await db.exec(`update manufacturing.${table} set location_id=1`);
@@ -99,7 +85,7 @@ first.finishing[0].required_quantity = 9;
 assert.equal((await apply(first)).status, 'success');
 const shopAfter = await snapshot();
 for (const [table, fields] of Object.entries(shopByTable)) {
-  for (const name of [...fields.map(([name])=>name),'location_id',
+  for (const name of [...fields,'location_id',
     ...(table === 'requirements' ? ['part_location','location_updated_by','location_updated_at'] : [])])
     assert.deepEqual(shopAfter[table][0][name], shopBefore[table][0][name], `${table}.${name}`);
 }
@@ -109,7 +95,7 @@ assert.equal(shopAfter.parts[0].name,'Revised engineering name');
 
 // Every shop column is rejected by the server as well as omitted by the client.
 for (const [table, fields] of Object.entries(shopByTable)) {
-  for (const [field] of fields) {
+  for (const field of fields) {
     const bad = structuredClone(first); bad[table][0][field]='forbidden';
     const before=await snapshot();
     assert.equal((await apply(bad)).status,'failed', `${table}.${field}`);
@@ -152,7 +138,7 @@ for (const table of ['requirements','operations','finishing']) {
     table==='requirements' ? row.id===beforeRequirement.id : row.requirement_id===beforeRequirement.id);
   const afterRow=scoped[table].find(row =>
     table==='requirements' ? row.id===preservedRequirement.id : row.requirement_id===preservedRequirement.id);
-  for (const name of fields.map(([name])=>name))
+  for (const name of fields)
     assert.deepEqual(afterRow[name],beforeRow[name],`${table}.${name} after parent revision`);
 }
 for (const table of ['requirements','operations','finishing']) {

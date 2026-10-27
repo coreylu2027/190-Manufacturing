@@ -33,17 +33,15 @@ export const PUBLIC_TABLE_STUBS = `
     notes text, rejected_quantity integer, reviewed_by uuid, reviewed_at timestamptz, updated_at timestamptz);
 `;
 
-/** The engineering sync (a separate repository) owns this table; the migrations hook its status changes. */
+/** The engineering sync's run table alone, for suites that install only the migrations hooking its status changes. */
 export const ENGINEERING_SYNC_STUB = `create table manufacturing.engineering_sync_runs(id integer primary key, status text,
   started_at timestamptz not null default clock_timestamp())`;
 
-const ENGINEERING_SYNC = "engineering-sync";
 /**
  * The schema in an order that installs cleanly on a fresh database; the
  * production-writes runbook gives the same order. SUPABASE_STUBS stands in for
- * supabase/staging, and the engineering-sync API goes where ENGINEERING_SYNC is.
- * The tests stub its run table and skip the two migrations that patch its apply
- * function (20260906143937_preserve_cam_operations and 20260926000000_cots_parts).
+ * supabase/staging. The engineering-sync API comes before the migrations that
+ * patch its apply function or hook its run status.
  */
 const SCHEMA_ORDER = [
   "migrations/202609010001_admin_approval_and_qc", "migrations/202609010002_profile_permissions",
@@ -57,13 +55,15 @@ const SCHEMA_ORDER = [
   "production/20260906_manufacturing_shared_cache", "production/20260907_manufacturing_part_previews",
   "production/20260909_requirement_notes", "production/20260909_qc_rejected_quantities",
   "migrations/20260916162511_printer_locations", "production/20260916_operation_locations",
-  ENGINEERING_SYNC,
+  "production/20260906_onshape_engineering_sync", "migrations/20260906143937_preserve_cam_operations",
+  "production/20260910_preserve_unchanged_part_revisions", "migrations/20260926000000_cots_parts",
   "migrations/20260910031802_assembly_glb_previews", "migrations/20260911033920_initialize_synced_routing",
   "migrations/20260918162451_requirement_obsoletion", "migrations/20260919030147_obsolete_work_notifications",
   "migrations/20260919222149_obsolete_removed_requirements", "migrations/20260919223625_hide_obsolete_requirements",
   "migrations/20260922190000_admin_engineering_overrides", "migrations/20260923040000_passed_qc_quantity_corrections",
   "migrations/20260923170000_requirement_history", "migrations/20260924000000_configurable_qc_point",
-  "migrations/20260926010000_restored_requirement_robot_location", "migrations/20261018000000_lock_down_public_tables",
+  "migrations/20260926010000_restored_requirement_robot_location", "migrations/20260929120000_engineering_sync_review",
+  "migrations/20261018000000_lock_down_public_tables",
 ];
 
 export async function createDatabase(setup: string) {
@@ -78,9 +78,6 @@ export async function createDatabase(setup: string) {
 /** A database with the complete current schema, installed in SCHEMA_ORDER. */
 export async function createSchemaDatabase() {
   const database = await createDatabase(SUPABASE_STUBS);
-  for (const file of SCHEMA_ORDER) {
-    if (file === ENGINEERING_SYNC) await database.db.exec(ENGINEERING_SYNC_STUB);
-    else await database.install(`supabase/${file}.sql`);
-  }
+  for (const file of SCHEMA_ORDER) await database.install(`supabase/${file}.sql`);
   return database;
 }

@@ -6,7 +6,8 @@ on:
       - 'integrations/onshape/**'
       - 'supabase/**'
       - 'lib/engineering-sync-review*'
-      - 'scripts/manufacturing-migration/engineering-sync-review.test.mts'
+      - 'lib/manufacturing/**'
+      - 'scripts/manufacturing-migration/**'
       - '.github/workflows/onshape-sync-*'
   workflow_dispatch:
 
@@ -29,5 +30,5 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
-      - name: Test the engineering transaction and staged review in PGlite
-        run: npm run onshape:test-sql
+      - name: Test the engineering transaction, staged review, and the rest of the suite in PGlite
+        run: npm test

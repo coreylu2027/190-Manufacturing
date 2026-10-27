@@ -1,63 +1,20 @@
-// Runs in isolated PostgreSQL/WASM; never contacts Supabase or Onshape. Loads the
-// real engineering-sync RPC, its patches, and every trigger that runs after a
-// sync, then drives staging, review, approval with exclusions, and denial.
+// Runs in isolated PostgreSQL/WASM; never contacts Supabase or Onshape. Uses the
+// complete schema: the real engineering-sync RPC, its patches, and every trigger
+// that runs after a sync. Drives staging, review, approval with exclusions, and denial.
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
-import test from "node:test";
-import { PGlite } from "@electric-sql/pglite";
+import test, { after } from "node:test";
 import { buildApprovedPayload, buildSyncReview, deniedReview, type SyncPayload, type SyncReviewState } from "../../lib/engineering-sync-review.ts";
+import { createSchemaDatabase } from "./pglite-fixture.mts";
 
-const db = new PGlite();
-const sql = async <T extends object = Record<string, unknown>>(query: string, params: unknown[] = []) => (await db.query<T>(query, params)).rows;
-const install = async (path: string) => db.exec(await readFile(new URL(`../../${path}`, import.meta.url), "utf8"));
-await db.exec(`
-  create role anon; create role authenticated; create role service_role;
-  create schema auth; create table auth.users(id uuid primary key);
-  create function auth.uid() returns uuid language sql as 'select null::uuid';
-  create table public.profiles(id uuid primary key, display_name text, approved boolean, role text);
-  create type public.quality_result as enum ('passed','failed');
-  create table public.quality_control(id bigint generated always as identity primary key,
-    production_requirement_id bigint, operation_id bigint, result public.quality_result,
-    notes text, rejected_quantity integer, reviewed_by uuid, reviewed_at timestamptz, updated_at timestamptz);
-  create schema frc190_baserow_stage; create table frc190_baserow_stage.snapshots(id uuid primary key);
-  create schema storage;
-  create table storage.buckets(id text primary key, public boolean not null default false);
-  create table storage.objects(bucket_id text references storage.buckets(id), name text, primary key(bucket_id, name));
-  insert into storage.buckets values('manufacturing-files', false);
-`);
-for (const path of [
-  "supabase/production/20260905_normalized_manufacturing.sql",
-  "supabase/production/20260905_manufacturing_writes.sql",
-  "supabase/production/20260905_manufacturing_attachments.sql",
-  "supabase/production/20260907_manufacturing_part_previews.sql",
-  "supabase/production/20260909_requirement_notes.sql",
-  "supabase/production/20260906_onshape_engineering_sync.sql",
-  "supabase/migrations/20260906143937_preserve_cam_operations.sql",
-  "supabase/production/20260910_preserve_unchanged_part_revisions.sql",
-  "supabase/migrations/20260926000000_cots_parts.sql",
-]) await install(path);
-await db.exec("create function manufacturing.broadcast_change() returns trigger language plpgsql as $$ begin return null; end $$;");
-for (const path of [
-  "supabase/migrations/202609010003_notifications.sql",
-  "supabase/migrations/20260910031802_assembly_glb_previews.sql",
-  "supabase/migrations/20260911033920_initialize_synced_routing.sql",
-  "supabase/migrations/20260918162451_requirement_obsoletion.sql",
-  "supabase/migrations/20260919030147_obsolete_work_notifications.sql",
-  "supabase/migrations/20260919222149_obsolete_removed_requirements.sql",
-  "supabase/migrations/20260919223625_hide_obsolete_requirements.sql",
-  "supabase/migrations/20260922190000_admin_engineering_overrides.sql",
-  "supabase/migrations/20260923040000_passed_qc_quantity_corrections.sql",
-  "supabase/migrations/20260923170000_requirement_history.sql",
-  "supabase/migrations/20260924000000_configurable_qc_point.sql",
-  "supabase/migrations/20260926010000_restored_requirement_robot_location.sql",
-  "supabase/migrations/20260929120000_engineering_sync_review.sql",
-]) await install(path);
+const { db, sql } = await createSchemaDatabase();
+after(() => db.close());
 
 const ADMIN = "00000000-0000-4000-8000-000000000190";
 const MACHINIST = "00000000-0000-4000-8000-000000000191";
-await sql("insert into auth.users values($1),($2)", [ADMIN, MACHINIST]);
-await sql("insert into public.profiles values($1,'Alex A.',true,'admin'),($2,'Sam M.',true,'machinist')", [ADMIN, MACHINIST]);
+await sql("insert into auth.users(id, email) values($1, 'admin@example.test'), ($2, 'machinist@example.test')", [ADMIN, MACHINIST]);
+await sql("update public.profiles set display_name='Alex A.', approved=true, role='admin' where id=$1", [ADMIN]);
+await sql("update public.profiles set display_name='Sam M.', approved=true, role='machinist' where id=$1", [MACHINIST]);
 
 const ROOT = "A-ROOT";
 type Entry = { part: string; rev?: string; quantity?: number; machines?: string[]; finishing?: string };

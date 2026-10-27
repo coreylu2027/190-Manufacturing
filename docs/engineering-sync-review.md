@@ -107,8 +107,9 @@ summary.
 ## Verification
 
 - `npm run onshape:test` — sync CLI, including staging (mocked APIs).
-- `npm run onshape:test-sql` — PGlite: the engineering RPC and its contract, and
-  the staged-review flow end to end (staging, alerts, review, approval with
-  skips, obsoletion, routing initialization, supersession, stale proposals,
-  failed commits, denial, and permissions).
-- `npm test` — review and payload-building rules.
+- `npm test` — review and payload-building rules, the review routes, and in
+  PGlite the engineering RPC and its contract
+  (`scripts/manufacturing-migration/onshape-*.test.mjs`) plus the staged-review
+  flow end to end (staging, alerts, review, approval with skips, obsoletion,
+  routing initialization, supersession, stale proposals, failed commits,
+  denial, and permissions).

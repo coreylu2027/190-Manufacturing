@@ -48,19 +48,15 @@ history, Realtime invalidation, and grants.
 For a new Supabase environment, follow these steps in order. The SQL tests
 install the same SQL order (`SCHEMA_ORDER` in
 `scripts/manufacturing-migration/pglite-fixture.mts`) on stand-ins for hosted
-Supabase, the staging table, and the engineering-sync API. Because the sync API
-is a stand-in, the tests skip the two migrations that patch it
-(`20260906143937_preserve_cam_operations.sql` and
-`20260926000000_cots_parts.sql`), so those two migrations and the placement of
-the sync install are not covered by tests. Applying `supabase/migrations` in
-filename order does not work, because the manufacturing schema comes from
-`supabase/production`.
+Supabase and the staging table. Applying `supabase/migrations` in filename
+order does not work, because the manufacturing schema and the engineering-sync
+API come from `supabase/production`, and migrations patch the sync API.
 
 1. Apply `supabase/staging/20260905_baserow_snapshot.sql`. The normalized
    schema's provenance columns still reference its (empty) `snapshots` table.
 2. Apply the files in `supabase/migrations` up to and including
    `20260909174808_qc_rejected_quantities.sql`, in filename order, except
-   `20260906143937_preserve_cam_operations.sql` (step 7).
+   `20260906143937_preserve_cam_operations.sql` (step 6).
 3. Apply `supabase/production/20260905_normalized_manufacturing.sql`, then
    `20260905_manufacturing_writes.sql`.
 4. Apply the rest of `supabase/production`:
@@ -101,14 +97,20 @@ filename order does not work, because the manufacturing schema comes from
    and the preview scripts all use it. If you restrict its MIME types, allow
    `application/pdf` and `application/step`; step 8 adds `model/gltf-binary`
    and raises a size limit below 50 MB to 50 MB.
-6. Install the engineering-sync API from the Onshape repository. It provides
+6. Install the engineering-sync API that the Onshape sync in
+   `integrations/onshape` calls, then its patches, in this order:
+   `supabase/production/20260906_onshape_engineering_sync.sql`,
+   `supabase/migrations/20260906143937_preserve_cam_operations.sql`,
+   `supabase/production/20260910_preserve_unchanged_part_revisions.sql`, and
+   `supabase/migrations/20260926000000_cots_parts.sql`. The API provides
    `manufacturing.engineering_sync_runs` and
-   `public.manufacturing_apply_engineering_sync`, which later migrations hook
-   and patch.
-7. Apply the remaining files in `supabase/migrations` in filename order:
-   `20260906143937_preserve_cam_operations.sql`, then
-   `20260910031802_assembly_glb_previews.sql` onward (skipping
-   `20260916162511_printer_locations.sql`, applied in step 4).
+   `public.manufacturing_apply_engineering_sync`, which later migrations hook.
+7. Apply the remaining files in `supabase/migrations` in filename order, from
+   `20260910031802_assembly_glb_previews.sql` through
+   `20260929120000_engineering_sync_review.sql` and
+   `20261018000000_lock_down_public_tables.sql`, skipping
+   `20260916162511_printer_locations.sql` (step 4) and
+   `20260926000000_cots_parts.sql` (step 6).
 8. Generate and verify the current STEP previews:
 
    ```powershell
