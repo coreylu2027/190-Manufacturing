@@ -296,7 +296,6 @@ interface Analysis {
   review: SyncReview;
   plans: RequirementChangePlan[];
   partChanges: Map<string, SyncChange>;
-  fileChanges: Map<string, SyncChange>;
   onshapeRequirementValue: (requirement: ReviewRequirement, column: string) => unknown;
   onshapePartValue: (part: ReviewPart, column: string) => unknown;
   partsByNumber: Map<string, ReviewPart>;
@@ -323,7 +322,12 @@ function analyze(state: SyncReviewState): Analysis {
     operationsByRequirement.set(operation.requirement_id, [...(operationsByRequirement.get(operation.requirement_id) ?? []), operation]);
   }
   const finishingByRequirement = new Map(finishing.filter((row) => row.requirement_id !== null).map((row) => [row.requirement_id!, row]));
-  const payloadOperationKeys = new Set(payload.operations.map((row) => text(row.production_key)));
+  const routedProductionKeys = new Set(payload.operations.map((row) => text(row.production_key)));
+  const operationKeyCounts = new Map<string, number>();
+  for (const operation of operations) {
+    const key = text(operation.operation_key);
+    operationKeyCounts.set(key, (operationKeyCounts.get(key) ?? 0) + 1);
+  }
 
   const onshapeRequirementValue = (requirement: ReviewRequirement, column: string) => {
     const override = overrides.get(`requirements:${requirement.id}:${column}`);
@@ -415,8 +419,7 @@ function analyze(state: SyncReviewState): Analysis {
     const slot = slotOf(row.source_root, row.assembly_number, row.part_number, row.configuration);
     activeAfter.set(slot, (activeAfter.get(slot) ?? 0) + 1);
   }
-  const duplicateOperations = payload.operations.some((row) =>
-    operations.filter((operation) => operation.operation_key === text(row.operation_key)).length > 1);
+  const duplicateOperations = payload.operations.some((row) => (operationKeyCounts.get(text(row.operation_key)) ?? 0) > 1);
   const partial = payload.warnings.length > 0 || duplicateOperations;
   if (partial) notices.push("This sync has warnings, so it commits as partial: requirements removed from the BOM are deactivated but not marked obsolete.");
 
@@ -427,7 +430,7 @@ function analyze(state: SyncReviewState): Analysis {
     const slot = slotOf(old.source_root, old.assembly_number, old.part_number, old.configuration);
     const active = activeAfter.get(slot) ?? 0;
     if (!replacement) return active === 0 ? "Marked obsolete: removed from the BOM. Claimants get a stop-work alert." : "Deactivated; another requirement for this part stays active.";
-    const hasRouting = payload.operations.some((operation) => text(operation.production_key) === text(replacement.production_key));
+    const hasRouting = routedProductionKeys.has(text(replacement.production_key));
     if (active === 1 && hasRouting && text(old.required_part_revision) && text(old.required_part_revision) !== text(replacement.required_part_revision)) {
       return `Marked obsolete and replaced by rev ${display(replacement.required_part_revision)}. Claimants get a stop-work alert.`;
     }
@@ -546,7 +549,7 @@ function analyze(state: SyncReviewState): Analysis {
     if (current.off_the_shelf) notes.push("Off the shelf in the app: routing and finishing stay retired.");
     if (current.obsolete) notes.push(restored ? "This requirement is obsolete. Restore it in Production if it should be made again." : "This requirement is obsolete.");
     if (legacy.has(key)) notes.push(`Re-keys legacy requirement #${current.id} in place.`);
-    if (!payloadOperationKeys.has(key) && !current.off_the_shelf && routing(row).some(Boolean)) notes.push("No operations are sent for this requirement.");
+    if (!routedProductionKeys.has(key) && !current.off_the_shelf && routing(row).some(Boolean)) notes.push("No operations are sent for this requirement.");
     plans.push({
       newKeys: [key], kept: [], current,
       change: {
@@ -645,7 +648,7 @@ function analyze(state: SyncReviewState): Analysis {
   review.token = fingerprint(JSON.stringify([state.proposal.id, state.proposal.status, state.stale, rootsSummary,
     changes.map((change) => [change.id, change.summary, change.details, change.excludable,
       change.fields.map((field) => [field.id, field.before, field.after])])]));
-  return { review, plans, partChanges, fileChanges, onshapeRequirementValue, onshapePartValue, partsByNumber, keepBlocked };
+  return { review, plans, partChanges, onshapeRequirementValue, onshapePartValue, partsByNumber, keepBlocked };
 }
 
 export function buildSyncReview(state: SyncReviewState): SyncReview {
@@ -688,6 +691,7 @@ export function buildApprovedPayload(state: SyncReviewState, exclusions: readonl
   const rebuildFinishing = new Set<string>();
   const extraParts = new Map<string, Row>();
   const partsSendCots = payload.parts.some((row) => "cots" in row);
+  const payloadPartNumbers = new Set(payload.parts.map((row) => text(row.part_number)));
 
   const keep = (current: ReviewRequirement) => {
     const blocked = analysis.keepBlocked(current);
@@ -706,7 +710,7 @@ export function buildApprovedPayload(state: SyncReviewState, exclusions: readonl
     rebuildFinishing.add(current.production_key);
     const partNumber = text(current.part_number);
     const part = analysis.partsByNumber.get(partNumber);
-    if (part && !payload.parts.some((candidate) => text(candidate.part_number) === partNumber)) {
+    if (part && !payloadPartNumbers.has(partNumber)) {
       extraParts.set(partNumber, {
         part_number: partNumber, name: analysis.onshapePartValue(part, "name"), description: analysis.onshapePartValue(part, "description"),
         material: analysis.onshapePartValue(part, "material"), manufacturing_method: part.manufacturing_method, vendor: part.vendor,
@@ -800,7 +804,9 @@ export function buildApprovedPayload(state: SyncReviewState, exclusions: readonl
     // Membership bookkeeping only: the engineering RPC rejects any rows without a root scope.
     ...payload, assemblies: [], parts: [], requirements: [], operations: [], finishing: [], attachments: [], synced_roots: [],
   };
-  const applied = (change: SyncChange) => !excluded.has(change.id) && !(change.root && excludedRoots.has(change.root));
+  // Part details and files are sent only with a requirement for that part, so they don't apply when every one is skipped.
+  const sent = (change: SyncChange) => (change.kind !== "part" && change.kind !== "files") || partNumbers.has(text(change.partNumber));
+  const applied = (change: SyncChange) => !excluded.has(change.id) && !(change.root && excludedRoots.has(change.root)) && sent(change);
   const review: StoredSyncReview = {
     token: analysis.review.token,
     roots: analysis.review.roots.map((root) => ({ root: root.root, name: root.name, before: root.before, after: root.after, applied: !excludedRoots.has(root.root) })),

@@ -3,6 +3,7 @@ import test from "node:test";
 import { z } from "zod";
 
 import * as bulkSelection from "./bulk-selection.ts";
+import { SyncReviewError } from "./engineering-sync-review.ts";
 import { HttpError } from "./http-error.ts";
 import { isUserId, ManufacturingWriteError } from "./manufacturing/write-adapter.ts";
 import * as profileName from "./profile-name.ts";
@@ -370,6 +371,57 @@ test("bulk routes report each outcome in order and announce only committed work 
   assert.equal(events[0].quantity, 2);
   assert.equal(events[0].becameReadyForQc, true);
   assert.equal(events[0].postQcWorkReady, true);
+});
+
+test("Onshape sync review routes are admin-only, validate proposal IDs, and report review conflicts as 409", async () => {
+  const id = "6f1c2b3a-1d2e-4f5a-8b9c-0d1e2f3a4b5c";
+  let user: unknown = { id: "pat", name: "Pat P.", approved: true, role: "machinist" };
+  let status = "pending";
+  let decision: unknown = null;
+  const decisions: unknown[][] = [];
+  const dependencies = {
+    zod: { z },
+    "@/lib/api-route": apiRoute(async () => user),
+    "@/lib/engineering-sync-review": { buildSyncReview: () => ({ token: "review-token", changes: [] }) },
+    "@/lib/manufacturing": {
+      listEngineeringSyncProposals: async () => [{ id, status }],
+      readEngineeringSyncReviewState: async (proposalId: string) => proposalId === id ? { proposal: { id, status }, stale: false, payload: {} } : null,
+      decideEngineeringSync: async (...args: unknown[]) => {
+        decisions.push(args);
+        if (decision instanceof Error) throw decision;
+        return { status: "success", proposal_status: "approved" };
+      },
+    },
+  };
+  const list = route("../app/api/admin/engineering-sync/route.ts", dependencies);
+  const proposal = route("../app/api/admin/engineering-sync/[id]/route.ts", dependencies);
+  const get = (proposalId = id) => proposal.GET(new Request("https://example.com/"), { params: Promise.resolve({ id: proposalId }) });
+  const decide = (body: unknown, proposalId = id) => proposal.POST(
+    new Request("https://example.com/", { method: "POST", body: typeof body === "string" ? body : JSON.stringify(body) }),
+    { params: Promise.resolve({ id: proposalId }) });
+  const approve = { decision: "approve", exclusions: ["root:A", "root:A"], token: "review-token", note: "  Looks right  " };
+
+  assert.equal((await list.GET()).status, 403);
+  assert.equal((await get()).status, 403);
+  assert.equal((await decide(approve)).status, 403);
+  user = admin;
+  assert.deepEqual(plain((await list.GET()).body), { proposals: [{ id, status: "pending" }] });
+  assert.equal((await get("not-a-uuid")).status, 400);
+  assert.equal((await get("00000000-0000-4000-8000-000000000000")).status, 404);
+  assert.equal(plain((await get()).body).review.token, "review-token");
+  status = "approved";
+  assert.equal((await get()).body.review, null);
+
+  assert.equal((await decide("{")).status, 400);
+  assert.equal((await decide({ ...approve, decision: "maybe" })).status, 400);
+  assert.equal((await decide(approve, "not-a-uuid")).status, 400);
+  assert.equal(decisions.length, 0);
+  assert.equal((await decide(approve)).status, 200);
+  assert.deepEqual(plain(decisions[0].slice(0, 5)), [id, "approve", ["root:A"], "review-token", "Looks right"]);
+  decision = new SyncReviewError("The proposed changes changed while you were reviewing. Review them again.");
+  assert.deepEqual(plain(await decide(approve)), { status: 409, body: { error: "The proposed changes changed while you were reviewing. Review them again." } });
+  decision = new ManufacturingWriteError("This sync proposal no longer exists", 404);
+  assert.equal((await decide(approve)).status, 404);
 });
 
 test("a committed steal still succeeds when notifying a displaced claimant fails", async () => {

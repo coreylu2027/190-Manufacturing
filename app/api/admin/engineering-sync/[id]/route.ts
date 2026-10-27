@@ -5,8 +5,9 @@ import { errorResponse, readJson, requireUser } from "@/lib/api-route";
 import { buildSyncReview } from "@/lib/engineering-sync-review";
 import { decideEngineeringSync, readEngineeringSyncReviewState } from "@/lib/manufacturing";
 
-// Approval commits the whole engineering transaction, as the sync itself does.
-export const maxDuration = 120;
+// Approval re-reads the review (up to 60 s) and then commits the whole engineering
+// transaction (up to 120 s), as the sync itself does.
+export const maxDuration = 300;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const decisionSchema = z.object({

@@ -101,6 +101,21 @@ test("an inactive requirement that returns can be kept out, and a changed state 
   assert.notEqual(changed.token, review.token);
 });
 
+test("part details and files are recorded as not applied when every requirement for the part is skipped", () => {
+  const input = state([current(1, "P-BACK", { active_in_bom: false })], [incoming("P-BACK")], { payload: {
+    parts: [{ part_number: "P-BACK", name: "Renamed" }],
+    attachments: [{ part_number: "P-BACK", kind: "drawing-pdf", export_key: "P-BACK|drawing", files: [{ original_name: "P-BACK.pdf" }] }],
+  } });
+  const review = buildSyncReview(input);
+  const restore = review.changes.find((change) => change.kind === "restored")!;
+  const { payload, review: stored } = buildApprovedPayload(input, [restore.id]);
+  assert.deepEqual([payload.parts, payload.attachments], [[], []]);
+  assert.deepEqual(stored.changes.map((change) => [change.kind, change.applied]).sort(),
+    [["files", false], ["part", false], ["restored", false]]);
+  // Applying the requirement applies its part details and files too.
+  assert.ok(buildApprovedPayload(input, []).review.changes.every((change) => change.applied));
+});
+
 test("a kept part that left every root is re-sent with its Onshape values", () => {
   const input = state([current(1, "P-KEEP"), current(2, "P-STAY")], [incoming("P-STAY")], {
     overrides: [{ entity: "parts", row_id: 1, field: "name", value: "Shop name", synced_value: "Onshape name" }],
