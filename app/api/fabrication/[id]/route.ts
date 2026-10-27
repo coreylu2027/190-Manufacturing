@@ -1,11 +1,10 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { getAppUser } from "@/lib/auth";
+import { errorResponse, parseId, readJson, requireUser } from "@/lib/api-route";
 import { applyFabricationAction } from "@/lib/manufacturing";
 import { isShopName } from "@/lib/profile-name";
-import { scheduleSlackManufacturingEvent } from "@/lib/slack-notifications";
-import { ManufacturingWriteError } from "@/lib/manufacturing/write-adapter";
+import { scheduleFinishingEvent } from "@/lib/slack-notifications";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createNotification } from "@/lib/notifications";
 
@@ -14,15 +13,13 @@ const requestSchema = z.union([z.object({
 }), z.object({ action: z.literal("steal"), confirmed: z.literal(true) })]);
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const user = await getAppUser();
-  if (!user) return NextResponse.json({ error: "Authentication required" }, { status: 401 });
-  if (!user.approved) return NextResponse.json({ error: "Account approval required", code: "APPROVAL_REQUIRED" }, { status: 403 });
+  const { user, response } = await requireUser();
+  if (response) return response;
 
-  const { id } = await params;
-  const jobId = Number(id);
-  if (!Number.isInteger(jobId)) return NextResponse.json({ error: "Invalid finishing job ID" }, { status: 400 });
+  const jobId = parseId((await params).id);
+  if (jobId === null) return NextResponse.json({ error: "Invalid finishing job ID" }, { status: 400 });
 
-  const parsed = requestSchema.safeParse(await request.json());
+  const parsed = await readJson(request, requestSchema);
   if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message }, { status: 400 });
 
   const machinist = user.name;
@@ -58,29 +55,9 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
         notificationWarning = "Finishing job taken over, but notification delivery failed.";
       }
     }
-    const eventType = {
-      claim: "finishing_claimed",
-      steal: "finishing_claimed",
-      complete: "finishing_completed",
-      release: "finishing_released",
-      undo_complete: "finishing_reopened",
-    } as const;
-    scheduleSlackManufacturingEvent({
-      type: eventType[parsed.data.action],
-      actorName: machinist,
-      requirementId: notificationContext.requirementId,
-      partNumber: notificationContext.partNumber,
-      partName: notificationContext.partName,
-      assemblyNumber: notificationContext.assemblyNumber,
-      color: notificationContext.color,
-      quantity: notificationContext.quantity,
-      postQcWorkReady: notificationContext.previousRequirementStatus !== "Ready for Manufacturing"
-        && notificationContext.requirementStatus === "Ready for Manufacturing",
-      becameComplete: notificationContext.previousRequirementStatus !== "Complete"
-        && notificationContext.requirementStatus === "Complete",
-    });
+    scheduleFinishingEvent(parsed.data.action, machinist, notificationContext);
     return NextResponse.json({ updated, notificationWarning });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to update finishing job" }, { status: error instanceof ManufacturingWriteError ? error.status : 502 });
+    return errorResponse(error, "Unable to update finishing job");
   }
 }

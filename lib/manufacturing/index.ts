@@ -2,125 +2,41 @@ import "server-only";
 import { createSupabaseManufacturingAdapter } from "./supabase-adapter";
 import { manufacturingSupabaseConfig } from "./config";
 import { createSupabaseWriteAdapter } from "./write-adapter";
-import type { FabricationAction, OperationPatch, OperationQuantityAction, QualityResult } from "../types";
-import type { StorageLocation } from "../storage-locations";
-import type { EngineeringOverrideFields, OverrideFileKind } from "../engineering-overrides";
 
-type Actor = { id: string; name: string };
+// Each call reads the server credentials, so a missing one fails that request rather than the import.
+type Writer = ReturnType<typeof createSupabaseWriteAdapter>;
+const reader = () => createSupabaseManufacturingAdapter(manufacturingSupabaseConfig());
+const writer = () => createSupabaseWriteAdapter(manufacturingSupabaseConfig());
 
-function reader() {
-  return createSupabaseManufacturingAdapter(manufacturingSupabaseConfig());
-}
+export const getManufacturingDataVersion = async () => reader().readDataVersion();
+export const getManufacturingSnapshot = async () => reader().readSnapshot();
+export const getQualityReviews: Writer["qualityReviews"] = async () => writer().qualityReviews();
 
-function writer() {
-  return createSupabaseWriteAdapter(manufacturingSupabaseConfig());
-}
-
-export async function setRequirementObsolete(requirementId: number, obsolete: boolean, expectedVersion: number, actor: Actor) {
-  return writer().setRequirementObsolete(requirementId, obsolete, expectedVersion, actor);
-}
-
-export async function setRequirementHidden(requirementId: number, hidden: boolean, expectedVersion: number, actor: Actor) {
-  return writer().setRequirementHidden(requirementId, hidden, expectedVersion, actor);
-}
-
-export async function readEngineeringOverrideState(requirementId: number) {
-  return writer().readEngineeringOverrideState(requirementId);
-}
-
-export async function readRequirementHistory(requirementId: number) {
-  return writer().readRequirementHistory(requirementId);
-}
-
-export async function readEngineeringCorrections() {
-  return writer().readEngineeringCorrections();
-}
-
-export async function applyEngineeringOverrides(requirementId: number, fields: EngineeringOverrideFields, expectedToken: string, reason: string, actor: Actor) {
-  return writer().applyEngineeringOverrides(requirementId, fields, expectedToken, reason, actor);
-}
-
-export async function setAttachmentOverride(requirementId: number, kind: OverrideFileKind, file: { name: string; sha256: string; byteSize: number } | null, expectedToken: string, reason: string, actor: Actor) {
-  return writer().setAttachmentOverride(requirementId, kind, file, expectedToken, reason, actor);
-}
-
-export async function getOperations() {
-  return reader().getOperations();
-}
-
-export async function getFabricationJobs() {
-  return reader().getFabricationJobs();
-}
-
-export async function getManufacturingDataVersion() {
-  return reader().readDataVersion();
-}
-
-export async function getManufacturingSnapshot() {
-  return reader().readSnapshot();
-}
-
-export async function applyQuantityAction(id: number, action: OperationQuantityAction, quantity: number, actor: Actor, handoff?: { programPath?: string; notes?: string; location?: StorageLocation; completeAllClaims?: boolean }) {
-  return writer().applyQuantityAction(id, action, quantity, actor, handoff);
-}
-
-export async function stealOperationClaim(id: number, actor: Actor) {
-  return writer().stealOperationClaim(id, actor);
-}
-
-export async function patchOperation(id: number, patch: OperationPatch, actor: Actor) {
-  return writer().patchOperation(id, patch, actor);
-}
-
-export async function updateCamHandoff(id: number, patch: { completedBy: string; programPath: string; notes: string }, actor: Actor) {
-  return writer().updateCamHandoff(id, patch, actor);
-}
-
-export async function applyFabricationAction(id: number, action: FabricationAction, actor: Actor) {
-  return writer().applyFabricationAction(id, action, actor);
-}
-
-export async function renameMachinistAllocations(userId: string, oldName: string, newName: string) {
-  return writer().renameMachinistAllocations(userId, oldName, newName);
-}
-
-export async function recordQualityReview(
-  requirementId: number,
-  result: Exclude<QualityResult, "pending">,
-  notes: string,
-  actor: Actor,
-  location: StorageLocation | null = null,
-  rejectedQuantity?: number,
-) {
-  return writer().recordQualityReview(requirementId, result, notes, actor, location, rejectedQuantity);
-}
-
-export async function updateRequirementNotes(requirementId: number, notes: string, actor: Actor) {
-  return writer().updateRequirementNotes(requirementId, notes, actor);
-}
-
-export async function updatePassedQualityNotes(requirementId: number, notes: string, actor: Actor) {
-  return writer().updatePassedQualityNotes(requirementId, notes, actor);
-}
-
-export async function updatePartLocation(requirementId: number, location: StorageLocation | null, actor: Actor) {
-  return writer().updatePartLocation(requirementId, location, actor);
-}
-
-export async function previewForceQuality(requirementId: number) {
-  return writer().previewForceQuality(requirementId);
-}
-
-export async function forceQualityReview(requirementId: number, notes: string, token: string, actor: Actor, result: "passed" | "failed" = "passed", completeFinishing = false) {
-  return writer().forceQualityReview(requirementId, notes, token, actor, result, completeFinishing);
-}
-
-export const updateQualityLocation = updatePartLocation;
-
-export async function undoQualityReview(requirementId: number, actor: Actor) {
-  return writer().undoQualityReview(requirementId, actor);
-}
-
-export async function getRetractedQualityReviewIds(): Promise<number[]> {
-  return writer().retractedReviewIds();
-}
+export const setRequirementObsolete: Writer["setRequirementObsolete"] = async (...args) => writer().setRequirementObsolete(...args);
+export const setRequirementHidden: Writer["setRequirementHidden"] = async (...args) => writer().setRequirementHidden(...args);
+export const readEngineeringOverrideState: Writer["readEngineeringOverrideState"] = async (...args) => writer().readEngineeringOverrideState(...args);
+export const readRequirementHistory: Writer["readRequirementHistory"] = async (...args) => writer().readRequirementHistory(...args);
+export const readEngineeringCorrections: Writer["readEngineeringCorrections"] = async () => writer().readEngineeringCorrections();
+export const listEngineeringSyncProposals: Writer["listEngineeringSyncProposals"] = async (...args) => writer().listEngineeringSyncProposals(...args);
+export const readEngineeringSyncReviewState: Writer["readEngineeringSyncReviewState"] = async (...args) => writer().readEngineeringSyncReviewState(...args);
+export const decideEngineeringSync: Writer["decideEngineeringSync"] = async (...args) => writer().decideEngineeringSync(...args);
+export const applyEngineeringOverrides: Writer["applyEngineeringOverrides"] = async (...args) => writer().applyEngineeringOverrides(...args);
+export const setAttachmentOverride: Writer["setAttachmentOverride"] = async (...args) => writer().setAttachmentOverride(...args);
+export const applyQuantityAction: Writer["applyQuantityAction"] = async (...args) => writer().applyQuantityAction(...args);
+export const applyQuantityActions: Writer["applyQuantityActions"] = async (...args) => writer().applyQuantityActions(...args);
+export const stealOperationClaim: Writer["stealOperationClaim"] = async (...args) => writer().stealOperationClaim(...args);
+export const patchOperation: Writer["patchOperation"] = async (...args) => writer().patchOperation(...args);
+export const updateCamHandoff: Writer["updateCamHandoff"] = async (...args) => writer().updateCamHandoff(...args);
+export const applyFabricationAction: Writer["applyFabricationAction"] = async (...args) => writer().applyFabricationAction(...args);
+export const applyFabricationActions: Writer["applyFabricationActions"] = async (...args) => writer().applyFabricationActions(...args);
+export const renameMachinistAllocations: Writer["renameMachinistAllocations"] = async (...args) => writer().renameMachinistAllocations(...args);
+export const recordQualityReview: Writer["recordQualityReview"] = async (...args) => writer().recordQualityReview(...args);
+export const updateRequirementNotes: Writer["updateRequirementNotes"] = async (...args) => writer().updateRequirementNotes(...args);
+export const updatePassedQualityNotes: Writer["updatePassedQualityNotes"] = async (...args) => writer().updatePassedQualityNotes(...args);
+export const updatePartLocation: Writer["updatePartLocation"] = async (...args) => writer().updatePartLocation(...args);
+export const updatePartLocations: Writer["updatePartLocations"] = async (...args) => writer().updatePartLocations(...args);
+export const passQualityReviews: Writer["passQualityReviews"] = async (...args) => writer().passQualityReviews(...args);
+export const previewForceQuality: Writer["previewForceQuality"] = async (...args) => writer().previewForceQuality(...args);
+export const forceQualityReview: Writer["forceQualityReview"] = async (...args) => writer().forceQualityReview(...args);
+export const forceQualityReviews: Writer["forceQualityReviews"] = async (...args) => writer().forceQualityReviews(...args);
+export const undoQualityReview: Writer["undoQualityReview"] = async (...args) => writer().undoQualityReview(...args);

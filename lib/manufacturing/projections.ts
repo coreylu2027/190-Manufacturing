@@ -1,31 +1,11 @@
-import { requirementStatus } from "../production-status.ts";
 import { projectObsoletion } from "../obsoletion.ts";
 import { requirementIdentity } from "./identity.ts";
 // Pure projections from normalized manufacturing rows and the Supabase attachment catalog.
-import { deduplicateOperations, isPostQcOperation } from "../manufacturing-workflow.ts";
-import type { CotsRequirement, ManufacturingOperation, FabricationJob, OperationWorkType, OperationStatus, OperationAllocation } from "../types.ts";
-import { projectQualityControl, qualityMetadataByRequirement, type QualityReviewRow } from "../quality-control.ts";
+import { deduplicateOperations, isFinishingComplete, isPostQcOperation, normalizeOperationStatus } from "../manufacturing-workflow.ts";
+import type { CotsRequirement, ManufacturingOperation, FabricationJob } from "../types.ts";
 import { isStorageLocation } from "../storage-locations.ts";
-import type { ManufacturingAttachment, RawRow as SourceRow } from "./model.ts";
-function selectValue(value: unknown, fallback = ""): string {
-  return typeof value === "object" && value !== null && "value" in value
-    ? String((value as { value: unknown }).value ?? fallback)
-    : fallback;
-}
-
-function operationWorkType(row: SourceRow): OperationWorkType {
-  return selectValue(row["Work Type"], "Manufacturing") === "CAM" ? "CAM" : "Manufacturing";
-}
-
-function taskQuantityForRow(row: SourceRow, requiredQuantity: number) {
-  return operationWorkType(row) === "CAM" ? 1 : requiredQuantity;
-}
-
-function linkedId(value: unknown): number | null {
-  return Array.isArray(value) && value[0] && typeof value[0] === "object" && "id" in value[0]
-    ? Number((value[0] as { id: unknown }).id)
-    : null;
-}
+import type { ManufacturingAttachment, NormalizedRow } from "./model.ts";
+import { fabricationStatus, linkedId, operationWorkType, quantitiesForRow, selectValue, taskQuantityForRow, textValue } from "./rows.ts";
 
 function attachmentIndex(attachments: ManufacturingAttachment[]) {
   const index = new Map<string, ManufacturingAttachment>();
@@ -36,18 +16,9 @@ function attachmentIndex(attachments: ManufacturingAttachment[]) {
   return index;
 }
 
-function textValue(value: unknown): string {
-  if (typeof value === "string") return value.trim();
-  if (Array.isArray(value) && value[0] && typeof value[0] === "object" && "value" in value[0]) {
-    return String((value[0] as { value: unknown }).value ?? "").trim();
-  }
-  return "";
-}
-
-function sourceDocumentName(requirement: SourceRow | undefined): string | null {
+function sourceDocumentName(requirement: NormalizedRow | undefined): string | null {
   if (!requirement) return null;
-  return textValue(requirement["Source Document"])
-    || null;
+  return textValue(requirement.source_document) || null;
 }
 
 /**
@@ -57,14 +28,14 @@ function sourceDocumentName(requirement: SourceRow | undefined): string | null {
  * roller, say) report the subassembly's document instead. So the root's
  * document is the most common one among its direct parts, preferring active ones.
  */
-function syncedFromDocuments(requirementRows: SourceRow[], assemblies: Map<number, SourceRow>) {
+function syncedFromDocuments(requirementRows: NormalizedRow[], assemblies: Map<number, NormalizedRow>) {
   const tallies = [new Map<string, Map<string, number>>(), new Map<string, Map<string, number>>()];
   for (const requirement of requirementRows) {
-    const root = textValue(requirement["Source Root"]);
+    const root = textValue(requirement.source_root);
     const document = sourceDocumentName(requirement);
-    const assembly = assemblies.get(linkedId(requirement.Assembly) ?? -1);
-    if (!root || !document || String(assembly?.["Assembly Number"] ?? "").trim() !== root) continue;
-    const current = requirement["Active in BOM"] !== false && requirement.Obsolete !== true;
+    const assembly = assemblies.get(linkedId(requirement.assembly_id) ?? -1);
+    if (!root || !document || String(assembly?.assembly_number ?? "").trim() !== root) continue;
+    const current = requirement.active_in_bom !== false && requirement.obsolete !== true;
     for (const tally of current ? tallies : tallies.slice(1)) {
       const documents = tally.get(root) ?? new Map<string, number>();
       documents.set(document, (documents.get(document) ?? 0) + 1);
@@ -81,80 +52,16 @@ function syncedFromDocuments(requirementRows: SourceRow[], assemblies: Map<numbe
   return result;
 }
 
-function qcPoint(requirement: SourceRow | undefined): number | null {
-  const value = requirement?.["QC After Operation"];
+function qcPoint(requirement: NormalizedRow | undefined): number | null {
+  const value = requirement?.qc_after_operation;
   return value === null || value === undefined || value === "" ? null : Number(value);
 }
 
-function revisionName(requirement: SourceRow | undefined, part: SourceRow | undefined): string | null {
-  for (const value of [requirement?.["Required Part Revision"], part?.Revision]) {
-    if (typeof value === "number") return String(value);
-    const revision = textValue(value) || selectValue(value);
-    if (revision) return revision;
-  }
-  return null;
+function revisionName(requirement: NormalizedRow | undefined, part: NormalizedRow | undefined): string | null {
+  return textValue(requirement?.required_part_revision) || textValue(part?.revision) || null;
 }
 
-function parseQuantityLedger(value: unknown): OperationAllocation[] {
-  if (typeof value !== "string" || !value.trim()) return [];
-  try {
-    const parsed: unknown = JSON.parse(value);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.flatMap((item): OperationAllocation[] => {
-      if (!item || typeof item !== "object") return [];
-      const allocation = item as Record<string, unknown>;
-      const userId = String(allocation.userId ?? "");
-      const name = String(allocation.name ?? "");
-      const claimed = Math.max(0, Math.floor(Number(allocation.claimed ?? 0)));
-      const completed = Math.max(0, Math.floor(Number(allocation.completed ?? 0)));
-      return userId && name && (claimed > 0 || completed > 0) ? [{ userId, name, claimed, completed }] : [];
-    });
-  } catch {
-    return [];
-  }
-}
-
-function quantitiesForRow(row: SourceRow, requiredQuantity: number, status: OperationStatus) {
-  let allocations = parseQuantityLedger(row["Quantity Ledger"]);
-  const hasStoredClaimed = row["Claimed Quantity"] !== null && row["Claimed Quantity"] !== undefined && row["Claimed Quantity"] !== "";
-  const hasStoredCompleted = row["Completed Quantity"] !== null && row["Completed Quantity"] !== undefined && row["Completed Quantity"] !== "";
-  const storedClaimed = Number(row["Claimed Quantity"]);
-  const storedCompleted = Number(row["Completed Quantity"]);
-  const claimedFallback = hasStoredClaimed && Number.isFinite(storedClaimed)
-    ? Math.max(0, Math.floor(storedClaimed))
-    : status === "In Progress" ? requiredQuantity : 0;
-  const completedFallback = hasStoredCompleted && Number.isFinite(storedCompleted)
-    ? Math.max(0, Math.floor(storedCompleted))
-    : status === "Complete" ? requiredQuantity : 0;
-
-  if (allocations.length === 0 && (claimedFallback > 0 || completedFallback > 0)) {
-    const legacyName = String(row.Machinist ?? "").trim() || "Legacy assignment";
-    allocations = [{
-      userId: `legacy:${legacyName.toLocaleLowerCase()}`,
-      name: legacyName,
-      claimed: claimedFallback,
-      completed: completedFallback,
-    }];
-  }
-
-  const claimedQuantity = allocations.reduce((sum, allocation) => sum + allocation.claimed, 0);
-  const completedQuantity = allocations.reduce((sum, allocation) => sum + allocation.completed, 0);
-  const canClaim = ["Ready", "In Progress"].includes(status);
-  return {
-    allocations,
-    claimedQuantity,
-    completedQuantity,
-    availableQuantity: canClaim ? Math.max(0, requiredQuantity - claimedQuantity - completedQuantity) : 0,
-  };
-}
-
-function fabricationStatus(requirementStatus: string, machinist: string): ManufacturingOperation["status"] {
-  if (requirementStatus === "Complete") return "Complete";
-  if (requirementStatus === "Ready for Finishing") return machinist ? "In Progress" : "Ready";
-  return "Planned";
-}
-
-export function projectOperations(operationRows: SourceRow[], requirementRows: SourceRow[], partRows: SourceRow[], attachments: ManufacturingAttachment[] = [], assemblyRows: SourceRow[] = []): ManufacturingOperation[] {
+export function projectOperations(operationRows: NormalizedRow[], requirementRows: NormalizedRow[], partRows: NormalizedRow[], attachments: ManufacturingAttachment[] = [], assemblyRows: NormalizedRow[] = []): ManufacturingOperation[] {
   const requirements = new Map(requirementRows.map((row) => [row.id, row]));
   const parts = new Map(partRows.map((row) => [row.id, row]));
   const assemblies = new Map(assemblyRows.map((row) => [row.id, row]));
@@ -162,30 +69,29 @@ export function projectOperations(operationRows: SourceRow[], requirementRows: S
   const rootDocuments = syncedFromDocuments(requirementRows, assemblies);
 
   const parsedOperations = operationRows.map((row) => {
-    const requirementId = linkedId(row["Production Requirement"]);
+    const requirementId = linkedId(row.requirement_id);
     const requirement = requirementId ? requirements.get(requirementId) : undefined;
-    const partId = linkedId(requirement?.Part);
+    const partId = linkedId(requirement?.part_id);
     const part = partId ? parts.get(partId) : undefined;
     const parsed = requirementIdentity(requirement, part,
-      assemblies.get(linkedId(requirement?.Assembly) ?? -1));
-    const operationNumber = selectValue(row["Operation Number"], "OP1") as ManufacturingOperation["operationNumber"];
-    const machine = selectValue(row.Machine, "Unassigned");
-    const rawStoredStatus = selectValue(row.Status, "Planned");
-    const storedStatus = (rawStoredStatus === "Needs Rework" ? "Ready" : rawStoredStatus) as OperationStatus;
-    const finishing = selectValue(requirement?.Finishing);
+      assemblies.get(linkedId(requirement?.assembly_id) ?? -1));
+    const operationNumber = selectValue(row.operation_number, "OP1") as ManufacturingOperation["operationNumber"];
+    const machine = selectValue(row.machine, "Unassigned");
+    const storedStatus = normalizeOperationStatus(selectValue(row.status, "Planned"));
+    const finishing = selectValue(requirement?.finishing);
     const finishingRequired = Boolean(finishing && finishing !== "None");
-    const requirementStatus = selectValue(requirement?.Status, "Needs Triage");
-    const finishingComplete = !finishingRequired
-      || selectValue(requirement?.["QC Outcome"]) === "Passed"
-        && !["Ready for QC", "Ready for Finishing"].includes(requirementStatus);
+    const requirementStatus = selectValue(requirement?.status, "Needs Triage");
+    const finishingComplete = isFinishingComplete({
+      finishingRequired, qcPassed: selectValue(requirement?.qc_outcome) === "Passed", status: requirementStatus,
+    });
     const qcAfterOperation = qcPoint(requirement);
     const waitingForQcOrFinishing = operationWorkType(row) === "Manufacturing" && isPostQcOperation({ machine, operationNumber }, qcAfterOperation)
-      && (selectValue(requirement?.["QC Outcome"]) !== "Passed"
-        || Boolean(finishing && finishing !== "None" && selectValue(requirement?.Status) === "Ready for Finishing"));
+      && (selectValue(requirement?.qc_outcome) !== "Passed"
+        || Boolean(finishing && finishing !== "None" && selectValue(requirement?.status) === "Ready for Finishing"));
     const status = waitingForQcOrFinishing && ["Planned", "Ready"].includes(storedStatus)
       ? "Planned"
       : storedStatus;
-    const quantity = Number(requirement?.["Required Quantity"] ?? 1);
+    const quantity = Number(requirement?.required_quantity ?? 1);
     const workType = operationWorkType(row);
     const taskQuantity = taskQuantityForRow(row, quantity);
     const quantities = quantitiesForRow(row, taskQuantity, status);
@@ -193,30 +99,30 @@ export function projectOperations(operationRows: SourceRow[], requirementRows: S
     const stepFile = partId ? files.get(`${partId}|step`) : undefined;
     return {
       requirementId,
-      requirementKey: textValue(requirement?.["Production Key"]) || null,
+      requirementKey: textValue(requirement?.production_key) || null,
       id: row.id,
       ...projectObsoletion(requirement),
-      operationKey: String(row.Operation ?? `${row.id}`),
+      operationKey: String(row.operation_key ?? `${row.id}`),
       ...parsed,
       revision: revisionName(requirement, part),
       documentName: sourceDocumentName(requirement),
-      syncedFromDocument: rootDocuments.get(textValue(requirement?.["Source Root"])) ?? null,
+      syncedFromDocument: rootDocuments.get(textValue(requirement?.source_root)) ?? null,
       qcAfterOperation,
-      sourceRoot: textValue(requirement?.["Source Root"]) || null,
-      sourceAssemblyRevision: textValue(requirement?.["Source Assembly Revision"]) || null,
-      requiredPartRevision: textValue(requirement?.["Required Part Revision"]) || null,
-      configuration: textValue(requirement?.Configuration) || null,
-      bomPositions: textValue(requirement?.["BOM Positions"]) || null,
-      material: textValue(part?.Material) || null,
+      sourceRoot: textValue(requirement?.source_root) || null,
+      sourceAssemblyRevision: textValue(requirement?.source_assembly_revision) || null,
+      requiredPartRevision: textValue(requirement?.required_part_revision) || null,
+      configuration: textValue(requirement?.configuration) || null,
+      bomPositions: textValue(requirement?.bom_positions) || null,
+      material: textValue(part?.material) || null,
       finishing: finishing || null,
       finishingRequired,
       finishingComplete,
       requirementStatus,
-      requirementMachinist: textValue(requirement?.Machinist) || null,
-      activeInBom: Boolean(requirement?.["Active in BOM"]),
-      engineeringChanged: Boolean(requirement?.["Engineering Changed"]),
-      disposition: selectValue(requirement?.Disposition) || null,
-      productionNotes: textValue(requirement?.["Production Notes"]),
+      requirementMachinist: textValue(requirement?.machinist) || null,
+      activeInBom: Boolean(requirement?.active_in_bom),
+      engineeringChanged: Boolean(requirement?.engineering_changed),
+      disposition: selectValue(requirement?.disposition) || null,
+      productionNotes: textValue(requirement?.production_notes),
       qualityNotes: "",
       qualityReviewedBy: null,
       qualityReviewedAt: null,
@@ -227,22 +133,22 @@ export function projectOperations(operationRows: SourceRow[], requirementRows: S
       workType,
       machine,
       status,
-      machinist: String(row.Machinist ?? ""),
-      startedAt: row["Started At"] ? String(row["Started At"]) : null,
-      completedAt: row["Completed At"] ? String(row["Completed At"]) : null,
-      activeInRouting: Boolean(row["Active in Routing"]),
-      camProgramPath: textValue(row["CAM Program Path"]) || null,
-      camNotes: textValue(row["CAM Notes"]),
+      machinist: String(row.machinist ?? ""),
+      startedAt: row.started_at ? String(row.started_at) : null,
+      completedAt: row.completed_at ? String(row.completed_at) : null,
+      activeInRouting: Boolean(row.active_in_routing),
+      camProgramPath: textValue(row.cam_program_path) || null,
+      camNotes: textValue(row.cam_notes),
       camDependency: null,
-      drawingUrl: part ? textValue(part["Onshape Drawing"]) || null : null,
+      drawingUrl: part ? textValue(part.drawing_url) || null : null,
       hasDrawingPdf: Boolean(drawingPdf),
       drawingPdfName: drawingPdf?.originalName ?? null,
       hasStepFile: Boolean(stepFile),
       stepName: stepFile?.originalName ?? null,
-      onshapeUrl: requirement?.["Onshape Source"] ? String(requirement["Onshape Source"]) : null,
-      storageLocation: isStorageLocation(requirement?.["Part Location"]) ? requirement["Part Location"] : null,
-      locationUpdatedBy: textValue(requirement?.["Location Updated By"]) || null,
-      locationUpdatedAt: textValue(requirement?.["Location Updated At"]) || null,
+      onshapeUrl: requirement?.onshape_url ? String(requirement.onshape_url) : null,
+      storageLocation: isStorageLocation(requirement?.part_location) ? requirement.part_location : null,
+      locationUpdatedBy: textValue(requirement?.location_updated_by) || null,
+      locationUpdatedAt: textValue(requirement?.location_updated_at) || null,
       effectiveQcResult: "pending" as const,
       lastQualityFailure: null,
     };
@@ -277,9 +183,9 @@ export function projectOperations(operationRows: SourceRow[], requirementRows: S
  * left to the operations projection.
  */
 export function projectCotsRequirements(
-  requirementRows: SourceRow[],
-  partRows: SourceRow[],
-  assemblyRows: SourceRow[] = [],
+  requirementRows: NormalizedRow[],
+  partRows: NormalizedRow[],
+  assemblyRows: NormalizedRow[] = [],
   operations: Pick<ManufacturingOperation, "requirementId">[] = [],
 ): CotsRequirement[] {
   const parts = new Map(partRows.map((row) => [row.id, row]));
@@ -288,37 +194,37 @@ export function projectCotsRequirements(
   const routed = new Set(operations.map((operation) => operation.requirementId));
 
   return requirementRows.flatMap((requirement): CotsRequirement[] => {
-    const part = parts.get(linkedId(requirement.Part) ?? -1);
-    if (part?.COTS !== true || routed.has(requirement.id)) return [];
+    const part = parts.get(linkedId(requirement.part_id) ?? -1);
+    if (part?.cots !== true || routed.has(requirement.id)) return [];
     const obsoletion = projectObsoletion(requirement);
-    const activeInBom = Boolean(requirement["Active in BOM"]);
+    const activeInBom = Boolean(requirement.active_in_bom);
     if (!activeInBom && !obsoletion.obsolete && obsoletion.obsoletionVersion === 0) return [];
     return [{
       requirementId: requirement.id,
-      requirementKey: textValue(requirement["Production Key"]) || null,
+      requirementKey: textValue(requirement.production_key) || null,
       ...obsoletion,
-      ...requirementIdentity(requirement, part, assemblies.get(linkedId(requirement.Assembly) ?? -1)),
+      ...requirementIdentity(requirement, part, assemblies.get(linkedId(requirement.assembly_id) ?? -1)),
       revision: revisionName(requirement, part),
       documentName: sourceDocumentName(requirement),
-      syncedFromDocument: rootDocuments.get(textValue(requirement["Source Root"])) ?? null,
-      sourceRoot: textValue(requirement["Source Root"]) || null,
-      sourceAssemblyRevision: textValue(requirement["Source Assembly Revision"]) || null,
-      requiredPartRevision: textValue(requirement["Required Part Revision"]) || null,
-      configuration: textValue(requirement.Configuration) || null,
-      bomPositions: textValue(requirement["BOM Positions"]) || null,
-      material: textValue(part.Material) || null,
-      vendor: textValue(part.Vendor) || null,
-      requirementStatus: selectValue(requirement.Status, "Needs Triage"),
-      requirementMachinist: textValue(requirement.Machinist) || null,
+      syncedFromDocument: rootDocuments.get(textValue(requirement.source_root)) ?? null,
+      sourceRoot: textValue(requirement.source_root) || null,
+      sourceAssemblyRevision: textValue(requirement.source_assembly_revision) || null,
+      requiredPartRevision: textValue(requirement.required_part_revision) || null,
+      configuration: textValue(requirement.configuration) || null,
+      bomPositions: textValue(requirement.bom_positions) || null,
+      material: textValue(part.material) || null,
+      vendor: textValue(part.vendor) || null,
+      requirementStatus: selectValue(requirement.status, "Needs Triage"),
+      requirementMachinist: textValue(requirement.machinist) || null,
       activeInBom,
-      engineeringChanged: Boolean(requirement["Engineering Changed"]),
-      disposition: selectValue(requirement.Disposition) || null,
-      productionNotes: textValue(requirement["Production Notes"]),
-      quantity: Number(requirement["Required Quantity"] ?? 1),
-      onshapeUrl: textValue(requirement["Onshape Source"]) || null,
-      storageLocation: isStorageLocation(requirement["Part Location"]) ? requirement["Part Location"] : null,
-      locationUpdatedBy: textValue(requirement["Location Updated By"]) || null,
-      locationUpdatedAt: textValue(requirement["Location Updated At"]) || null,
+      engineeringChanged: Boolean(requirement.engineering_changed),
+      disposition: selectValue(requirement.disposition) || null,
+      productionNotes: textValue(requirement.production_notes),
+      quantity: Number(requirement.required_quantity ?? 1),
+      onshapeUrl: textValue(requirement.onshape_url) || null,
+      storageLocation: isStorageLocation(requirement.part_location) ? requirement.part_location : null,
+      locationUpdatedBy: textValue(requirement.location_updated_by) || null,
+      locationUpdatedAt: textValue(requirement.location_updated_at) || null,
       effectiveQcResult: "pending",
       lastQualityFailure: null,
     }];
@@ -326,129 +232,72 @@ export function projectCotsRequirements(
 }
 
 export function projectFinishing(
-  finishingRows: SourceRow[],
-  requirementRows: SourceRow[],
+  finishingRows: NormalizedRow[],
+  requirementRows: NormalizedRow[],
   attachments: ManufacturingAttachment[] = [],
-  operationRows: SourceRow[] = [],
-  partRows: SourceRow[] = [],
-  assemblyRows: SourceRow[] = [],
+  operationRows: NormalizedRow[] = [],
+  partRows: NormalizedRow[] = [],
+  assemblyRows: NormalizedRow[] = [],
 ): FabricationJob[] {
   const requirements = new Map(requirementRows.map((row) => [row.id, row]));
   const parts = new Map(partRows.map((row) => [row.id, row]));
   const assemblies = new Map(assemblyRows.map((row) => [row.id, row]));
   const files = attachmentIndex(attachments);
   const requirementsWithPostQcWork = new Set(operationRows.filter((row) =>
-    Boolean(row["Active in Routing"])
+    Boolean(row.active_in_routing)
     && operationWorkType(row) === "Manufacturing"
-    && isPostQcOperation({ machine: selectValue(row.Machine), operationNumber: selectValue(row["Operation Number"], "OP1") },
-      qcPoint(requirements.get(linkedId(row["Production Requirement"]) ?? -1))),
+    && isPostQcOperation({ machine: selectValue(row.machine), operationNumber: selectValue(row.operation_number, "OP1") },
+      qcPoint(requirements.get(linkedId(row.requirement_id) ?? -1))),
   ).flatMap((row) => {
-    const requirementId = linkedId(row["Production Requirement"]);
+    const requirementId = linkedId(row.requirement_id);
     return requirementId ? [requirementId] : [];
   }));
 
   const jobs = finishingRows.flatMap((row): FabricationJob[] => {
-    const requirementId = linkedId(row["Production Requirement"]);
+    const requirementId = linkedId(row.requirement_id);
     const requirement = requirementId ? requirements.get(requirementId) : undefined;
     if (!requirementId || !requirement) return [];
 
-    const part = parts.get(linkedId(requirement.Part) ?? -1);
+    const part = parts.get(linkedId(requirement.part_id) ?? -1);
     const parsed = requirementIdentity(requirement, part,
-      assemblies.get(linkedId(requirement.Assembly) ?? -1));
-    const machinist = String(row.Machinist ?? "").trim();
-    const requirementStatus = selectValue(requirement.Status, "Needs Triage");
+      assemblies.get(linkedId(requirement.assembly_id) ?? -1));
+    const machinist = String(row.machinist ?? "").trim();
+    const requirementStatus = selectValue(requirement.status, "Needs Triage");
     const finishingCompleteBeforePostQcWork = requirementsWithPostQcWork.has(requirementId)
-      && selectValue(requirement["QC Outcome"]) === "Passed"
+      && selectValue(requirement.qc_outcome) === "Passed"
       && requirementStatus !== "Ready for Finishing";
-    const partId = linkedId(requirement.Part);
+    const partId = linkedId(requirement.part_id);
     const drawingPdf = partId ? files.get(`${partId}|drawing-pdf`) : undefined;
     const stepFile = partId ? files.get(`${partId}|step`) : undefined;
     return [{
       id: row.id,
       ...projectObsoletion(requirement),
-      productionKey: String(row["Production Key"] ?? row.id),
+      productionKey: String(row.production_key ?? row.id),
       requirementId,
       ...parsed,
       documentName: sourceDocumentName(requirement),
-      quantity: Math.max(1, Math.floor(Number(row["Required Quantity"] ?? requirement["Required Quantity"] ?? 1))),
-      color: selectValue(row["Powder Coat Color"], selectValue(requirement.Finishing, "Unspecified")),
-      productionNotes: textValue(requirement["Production Notes"]),
+      quantity: Math.max(1, Math.floor(Number(row.required_quantity ?? requirement.required_quantity ?? 1))),
+      color: selectValue(row.color, selectValue(requirement.finishing, "Unspecified")),
+      productionNotes: textValue(requirement.production_notes),
       qcNotes: "",
       status: finishingCompleteBeforePostQcWork ? "Complete" : fabricationStatus(requirementStatus, machinist),
       requirementStatus,
       machinist,
-      active: Boolean(row.Active) && requirement["Active in BOM"] !== false,
-      lastSyncedAt: row["Last Synced At"] ? String(row["Last Synced At"]) : null,
-      drawingUrl: part ? textValue(part["Onshape Drawing"]) || null : null,
+      active: Boolean(row.active) && requirement.active_in_bom !== false,
+      lastSyncedAt: row.last_synced_at ? String(row.last_synced_at) : null,
+      drawingUrl: part ? textValue(part.drawing_url) || null : null,
       hasDrawingPdf: Boolean(drawingPdf),
       drawingPdfName: drawingPdf?.originalName ?? null,
       hasStepFile: Boolean(stepFile),
       stepName: stepFile?.originalName ?? null,
-      onshapeUrl: requirement["Onshape Source"] ? String(requirement["Onshape Source"]) : null,
-      storageLocation: isStorageLocation(requirement["Part Location"]) ? requirement["Part Location"] : null,
-      locationUpdatedBy: textValue(requirement["Location Updated By"]) || null,
-      locationUpdatedAt: textValue(requirement["Location Updated At"]) || null,
+      onshapeUrl: requirement.onshape_url ? String(requirement.onshape_url) : null,
+      storageLocation: isStorageLocation(requirement.part_location) ? requirement.part_location : null,
+      locationUpdatedBy: textValue(requirement.location_updated_by) || null,
+      locationUpdatedAt: textValue(requirement.location_updated_at) || null,
       effectiveQcResult: "pending" as const,
       lastQualityFailure: null,
     }];
   });
 
   return jobs.filter(job => job.active || job.obsolete || job.obsoletionVersion > 0);
-}
-export type ReviewRow = Omit<QualityReviewRow, "storage_location" | "location_updated_by" | "location_updated_at" | "rejected_quantity"> &
-  Partial<Pick<QualityReviewRow, "storage_location" | "location_updated_by" | "location_updated_at" | "rejected_quantity">>;
-
-function normalizedReviews(reviews: ReviewRow[]): QualityReviewRow[] {
-  return reviews.map((review) => ({
-    ...review,
-    storage_location: review.storage_location ?? null,
-    location_updated_by: review.location_updated_by ?? null,
-    location_updated_at: review.location_updated_at ?? null,
-    rejected_quantity: review.rejected_quantity ?? null,
-  }));
-}
-
-export function projectQc(operations: ManufacturingOperation[], reviews: ReviewRow[], users: Array<{id:string;name:string}>) {
-  return projectQualityControl(
-    operations,
-    normalizedReviews(reviews),
-    [],
-    users.map((user) => ({ id: user.id, display_name: user.name })),
-  );
-}
-
-
-export function withFinishingQc(jobs: FabricationJob[], reviews: ReviewRow[], operations: ManufacturingOperation[]) {
-  const metadata = qualityMetadataByRequirement(operations, normalizedReviews(reviews), [], []).metadata;
-  return jobs.map((job) => ({ ...job, qcNotes: metadata.get(job.requirementId)?.notes ?? "" }));
-}
-
-export function projectProduction(operations: ManufacturingOperation[]) {
-    const grouped = new Map<string, ManufacturingOperation[]>();
-
-    for (const operation of operations) {
-      const key = `${operation.assemblyNumber}|${operation.partNumber}|${operation.revision ?? ""}`;
-      grouped.set(key, [...(grouped.get(key) ?? []), operation]);
-    }
-
-    return [...grouped.entries()].map(([key, routedOperations]) => {
-        const first = routedOperations[0];
-        return {
-          key,
-          partNumber: first.partNumber,
-          revision: first.revision,
-          partName: first.partName,
-          assemblyNumber: first.assemblyNumber,
-          documentName: first.documentName,
-          quantity: first.quantity,
-          completedOperations: routedOperations.filter((operation) => operation.status === "Complete").length,
-          totalOperations: routedOperations.length,
-          completedCamTasks: routedOperations.filter((operation) => operation.workType === "CAM" && operation.status === "Complete").length,
-          totalCamTasks: routedOperations.filter((operation) => operation.workType === "CAM").length,
-          completedManufacturingOperations: routedOperations.filter((operation) => operation.workType === "Manufacturing" && operation.status === "Complete").length,
-          totalManufacturingOperations: routedOperations.filter((operation) => operation.workType === "Manufacturing").length,
-          status: requirementStatus(routedOperations),
-        };
-      });
-
 }

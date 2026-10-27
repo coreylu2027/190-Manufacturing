@@ -5,6 +5,7 @@ export const WORKSPACE_ROUTES = {
   production: "/production",
   qc: "/qc",
   admin: "/admin",
+  sync: "/admin/sync",
 } as const;
 
 export type WorkspaceView = keyof typeof WORKSPACE_ROUTES;

@@ -33,10 +33,6 @@ export function isStorageLocation(value: unknown): value is StorageLocation {
   return storageLocationSchema.safeParse(value).success;
 }
 
-export function canUseOnRobotLocation(qcPassed: boolean, finishingComplete: boolean) {
-  return qcPassed && finishingComplete;
-}
-
 export function isPrintingOperation(operation: { machine: string; workType: string }) {
   return operation.workType === "Manufacturing" && /\b3d\s*print(?:er|ing)?\b/i.test(operation.machine);
 }

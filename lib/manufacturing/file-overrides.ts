@@ -3,6 +3,7 @@ import "server-only";
 import { createHash, randomUUID } from "node:crypto";
 
 import { MAX_OVERRIDE_FILE_BYTES, type OverrideFileKind } from "@/lib/engineering-overrides";
+import { HttpError } from "@/lib/http-error";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { safeManufacturingFileName } from "./file-names";
 
@@ -16,9 +17,8 @@ const KINDS = {
   step: { extension: "step", contentType: "application/step", names: /\.(step|stp)$/i, label: "a STEP file" },
 } as const;
 
-export class FileOverrideError extends Error {
-  status: number;
-  constructor(message: string, status = 400) { super(message); this.status = status; }
+class FileOverrideError extends HttpError {
+  constructor(message: string, status = 400) { super(message, status); }
 }
 
 function storage() {

@@ -1,25 +1,11 @@
 // Runs in isolated PostgreSQL/WASM; never contacts Supabase or Onshape.
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import { PGlite } from "@electric-sql/pglite";
-const db = new PGlite();
-const sql = async (query, params = []) => (await db.query(query, params)).rows;
-const install = async (path) => db.exec(await readFile(new URL(`../../${path}`, import.meta.url), "utf8"));
-await db.exec(`
-  create role anon; create role authenticated; create role service_role;
-  create schema auth; create table auth.users(id uuid primary key);
-  create function auth.uid() returns uuid language sql as 'select null::uuid';
-  create table public.profiles(id uuid primary key, display_name text, approved boolean, role text);
-  create type public.quality_result as enum ('passed','failed');
-  create table public.quality_control(id bigint generated always as identity primary key,
-    production_requirement_id bigint, operation_id bigint, result public.quality_result,
-    notes text, rejected_quantity integer, reviewed_by uuid, reviewed_at timestamptz, updated_at timestamptz);
-  create schema frc190_baserow_stage; create table frc190_baserow_stage.snapshots(id uuid primary key);
-`);
+import { createDatabase, ENGINEERING_SYNC_STUB, PUBLIC_TABLE_STUBS, SUPABASE_STUBS } from "./pglite-fixture.mts";
+const { db, sql, install } = await createDatabase(SUPABASE_STUBS + PUBLIC_TABLE_STUBS);
 await install("supabase/production/20260905_normalized_manufacturing.sql");
 await install("supabase/production/20260905_manufacturing_writes.sql");
 await install("supabase/production/20260909_requirement_notes.sql");
-await db.exec("create table manufacturing.engineering_sync_runs(id integer primary key, status text)");
+await db.exec(ENGINEERING_SYNC_STUB);
 await install("supabase/migrations/20260911033920_initialize_synced_routing.sql");
 await install("supabase/migrations/20260918162451_requirement_obsoletion.sql");
 await install("supabase/migrations/202609010003_notifications.sql");

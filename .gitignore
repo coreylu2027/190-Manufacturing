@@ -13,14 +13,10 @@
 # testing
 /coverage
 
-# python
+# python (integrations/onshape)
 __pycache__/
 *.py[cod]
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
 .venv/
-venv/
 
 # next.js
 /.next/
@@ -29,7 +25,8 @@ venv/
 # production
 /build
 
-# local database migration output and backups
+# private local output: preview inventories and GLBs, and old migration snapshots
+# that contain production records and QC notes
 /migration-artifacts/
 
 # misc
@@ -53,11 +50,5 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# Private migration snapshots contain production records and QC notes.
-/migration-artifacts/
-
-# IDE database connections may contain hosts, usernames, or credentials.
-/.idea/dataSources*
-/.idea/**/dataSources*
-__pycache__/
-*.pyc
+# JetBrains IDE settings (database connections may contain credentials)
+/.idea/

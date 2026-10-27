@@ -1,27 +1,30 @@
-import { ENTITIES, runtimeRow, type ManufacturingAttachment, type NormalizedRow, type RawRow } from "./model.ts";
+import type { ManufacturingAttachment, NormalizedRow } from "./model.ts";
 import { projectCotsRequirements, projectOperations, projectFinishing } from "./projections.ts";
 export interface AdapterConfig { url: string; serviceKey: string; fetch?: typeof fetch }
-export type ManufacturingRows = Record<string, RawRow[]>;
-const SNAPSHOT_ENTITY_NAMES = new Set(["assemblies", "parts", "requirements", "operations", "finishing"]);
+const SNAPSHOT_ENTITIES = ["assemblies", "parts", "requirements", "operations", "finishing"] as const;
 const READ_CONCURRENCY = 2;
-export function supabaseApiHeaders(key: string): Record<string, string> {
+function supabaseApiHeaders(key: string): Record<string, string> {
   const headers: Record<string, string> = { apikey: key };
   if (!key.startsWith("sb_")) headers.Authorization = `Bearer ${key}`;
   return headers;
 }
-export function createSupabaseManufacturingAdapter(config: AdapterConfig) {
-  const request = config.fetch ?? fetch;
-  const baseUrl = config.url.replace(/\/$/, "");
+/** Calls a PostgREST RPC with the service key: a POST with a JSON body, or a GET with query params. */
+export function postgrestRpc(config: AdapterConfig, name: string, { body, params, timeoutMs = 30_000 }: { body?: unknown; params?: URLSearchParams; timeoutMs?: number } = {}) {
   const headers = supabaseApiHeaders(config.serviceKey);
+  return (config.fetch ?? fetch)(`${config.url.replace(/\/$/, "")}/rest/v1/rpc/${name}${params ? `?${params}` : ""}`, {
+    method: body === undefined ? "GET" : "POST",
+    headers: body === undefined ? headers : { ...headers, "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    cache: "no-store", redirect: "error", signal: AbortSignal.timeout(timeoutMs),
+  });
+}
+export function createSupabaseManufacturingAdapter(config: AdapterConfig) {
   async function readEntity(entity: string): Promise<NormalizedRow[]> {
     const rows: NormalizedRow[] = [];
     let expected: number | undefined;
     for (let offset=0; ; ) {
       const params = new URLSearchParams({p_entity:entity,p_offset:String(offset),p_limit:"500"});
-      const response = await request(baseUrl+"/rest/v1/rpc/manufacturing_read_entity?"+params, {
-        method:"GET", headers,
-        cache:"no-store", redirect:"error", signal:AbortSignal.timeout(30_000)
-      });
+      const response = await postgrestRpc(config, "manufacturing_read_entity", { params });
       if (!response.ok) throw new Error("Supabase manufacturing read failed ("+response.status+")");
       const page = await response.json() as {rows:NormalizedRow[];total:number};
       if (!Array.isArray(page.rows) || !Number.isSafeInteger(page.total) || page.total<0) throw new Error("Invalid manufacturing page");
@@ -36,14 +39,7 @@ export function createSupabaseManufacturingAdapter(config: AdapterConfig) {
     return rows;
   }
   async function readAttachments(): Promise<ManufacturingAttachment[]> {
-    const response = await request(`${baseUrl}/rest/v1/rpc/manufacturing_attachment_manifest`, {
-      method: "POST",
-      headers: { ...headers, "Content-Type": "application/json" },
-      body: "{}",
-      cache: "no-store",
-      redirect: "error",
-      signal: AbortSignal.timeout(30_000),
-    });
+    const response = await postgrestRpc(config, "manufacturing_attachment_manifest", { body: {} });
     if (!response.ok) throw new Error(`Supabase manufacturing attachment read failed (${response.status})`);
     const data = await response.json() as unknown;
     if (!Array.isArray(data)) throw new Error("Invalid manufacturing attachment manifest");
@@ -64,14 +60,7 @@ export function createSupabaseManufacturingAdapter(config: AdapterConfig) {
     });
   }
   async function readDataVersion(): Promise<string> {
-    const response = await request(`${baseUrl}/rest/v1/rpc/manufacturing_data_version`, {
-      method: "POST",
-      headers: { ...headers, "Content-Type": "application/json" },
-      body: "{}",
-      cache: "no-store",
-      redirect: "error",
-      signal: AbortSignal.timeout(30_000),
-    });
+    const response = await postgrestRpc(config, "manufacturing_data_version", { body: {} });
     if (!response.ok) throw new Error(`Supabase manufacturing version read failed (${response.status})`);
     const data = await response.json() as unknown;
     if (typeof data !== "string" || !/^\d+$/.test(data)) {
@@ -79,40 +68,20 @@ export function createSupabaseManufacturingAdapter(config: AdapterConfig) {
     }
     return data;
   }
-  async function readRows(entities = ENTITIES): Promise<ManufacturingRows> {
-    const entries: Array<readonly [string, RawRow[]]> = [];
+  async function readRows(): Promise<Record<string, NormalizedRow[]>> {
+    const entries: Array<readonly [string, NormalizedRow[]]> = [];
     // Keep cold-cache reconstruction from opening one database statement per
     // entity at the same instant. A small amount of bounded parallelism is
     // faster in the normal case without causing a refresh stampede under load.
-    for (let index = 0; index < entities.length; index += READ_CONCURRENCY) {
-      const batch = await Promise.all(entities.slice(index, index + READ_CONCURRENCY).map(async entity => [entity.name,
-        (await readEntity(entity.name)).map(row => {
-          const raw = runtimeRow(entity, row);
-          return entity.name === "requirements" ? {
-            ...raw,
-            "Part Location": row.part_location ?? null,
-            "Location Updated By": row.location_updated_by ?? null,
-            "Location Updated At": row.location_updated_at ?? null,
-            "Obsolete": row.obsolete ?? false,
-            "Hidden": row.hidden ?? false,
-            "Off The Shelf": row.off_the_shelf ?? false,
-            "QC After Operation": row.qc_after_operation ?? null,
-            "Visibility Version": row.visibility_version ?? 0,
-            "Obsoletion Version": row.obsoletion_version ?? 0,
-            "Obsoletion Changed At": row.obsoletion_changed_at ?? null,
-            "Obsoletion Changed By": row.obsoletion_changed_by ?? null,
-            "Obsoletion Origin": row.obsoletion_origin ?? null,
-            "Replacement Requirement": row.obsolete_replacement_id ?? null,
-          } : entity.name === "parts" ? { ...raw, COTS: row.cots === true } : raw;
-        })
-          .sort((a,b)=>Number(a.order??a.id)-Number(b.order??b.id) || a.id-b.id)] as const));
+    for (let index = 0; index < SNAPSHOT_ENTITIES.length; index += READ_CONCURRENCY) {
+      const batch = await Promise.all(SNAPSHOT_ENTITIES.slice(index, index + READ_CONCURRENCY).map(async entity =>
+        [entity, (await readEntity(entity)).sort((a, b) => a.id - b.id)] as const));
       entries.push(...batch);
     }
     return Object.fromEntries(entries);
   }
   async function readSnapshot() {
-    const snapshotEntities = ENTITIES.filter(entity => SNAPSHOT_ENTITY_NAMES.has(entity.name));
-    const [rows, attachments] = await Promise.all([readRows(snapshotEntities), readAttachments()]);
+    const [rows, attachments] = await Promise.all([readRows(), readAttachments()]);
     const operations = projectOperations(rows.operations, rows.requirements, rows.parts, attachments, rows.assemblies);
     return {
       operations,
@@ -120,15 +89,5 @@ export function createSupabaseManufacturingAdapter(config: AdapterConfig) {
       cotsRequirements: projectCotsRequirements(rows.requirements, rows.parts, rows.assemblies, operations),
     };
   }
-  return {
-    readEntity, readAttachments, readDataVersion, readRows, readSnapshot,
-    async getOperations() {
-      const { operations } = await readSnapshot();
-      return { operations };
-    },
-    async getFabricationJobs() {
-      const { jobs } = await readSnapshot();
-      return { jobs };
-    }
-  };
+  return { readEntity, readAttachments, readDataVersion, readSnapshot };
 }

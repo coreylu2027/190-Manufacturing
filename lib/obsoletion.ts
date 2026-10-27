@@ -2,15 +2,15 @@ import type { ObsoletionFields } from "./types.ts";
 
 export function projectObsoletion(row: Record<string, unknown> | undefined): ObsoletionFields {
   return {
-    hidden: row?.Hidden === true,
-    offTheShelf: row?.["Off The Shelf"] === true,
-    visibilityVersion: Number(row?.["Visibility Version"] ?? 0),
-    obsolete: row?.Obsolete === true,
-    obsoletionVersion: Number(row?.["Obsoletion Version"] ?? 0),
-    obsoletionChangedAt: row?.["Obsoletion Changed At"] ? String(row["Obsoletion Changed At"]) : null,
-    obsoletionChangedBy: row?.["Obsoletion Changed By"] ? String(row["Obsoletion Changed By"]) : null,
-    obsoletionOrigin: row?.["Obsoletion Origin"] === "manual" ? "manual" : row?.["Obsoletion Origin"] === "automatic" ? "automatic" : null,
-    replacementRequirementId: row?.["Replacement Requirement"] == null ? null : Number(row["Replacement Requirement"]),
+    hidden: row?.hidden === true,
+    offTheShelf: row?.off_the_shelf === true,
+    visibilityVersion: Number(row?.visibility_version ?? 0),
+    obsolete: row?.obsolete === true,
+    obsoletionVersion: Number(row?.obsoletion_version ?? 0),
+    obsoletionChangedAt: row?.obsoletion_changed_at ? String(row.obsoletion_changed_at) : null,
+    obsoletionChangedBy: row?.obsoletion_changed_by ? String(row.obsoletion_changed_by) : null,
+    obsoletionOrigin: row?.obsoletion_origin === "manual" ? "manual" : row?.obsoletion_origin === "automatic" ? "automatic" : null,
+    replacementRequirementId: row?.obsolete_replacement_id == null ? null : Number(row.obsolete_replacement_id),
   };
 }
 
@@ -21,6 +21,11 @@ export function projectObsoletion(row: Record<string, unknown> | undefined): Obs
  */
 export function robotPlacementAllowed(requirement: { obsolete?: boolean; activeInBom: boolean; obsoletionVersion?: number }) {
   return !requirement.obsolete && (requirement.activeInBom || Number(requirement.obsoletionVersion ?? 0) > 0);
+}
+
+/** On Robot also needs a passed QC review and completed finishing. */
+export function onRobotAllowed(requirement: Parameters<typeof robotPlacementAllowed>[0], qcPassed: boolean, finishingComplete: boolean) {
+  return robotPlacementAllowed(requirement) && qcPassed && finishingComplete;
 }
 
 export function workAllowed(operation: { obsolete?: boolean; activeInBom: boolean; activeInRouting: boolean }) {
