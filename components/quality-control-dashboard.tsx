@@ -194,6 +194,8 @@ export function QualityControlDashboard() {
   const [location, setLocation] = useState("all");
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [failureDialogItem, setFailureDialogItem] = useState<QualityControlItem | null>(null);
+  // Undoing a pass after finishing is done also resets finishing, so that case asks first.
+  const [undoFinishedItem, setUndoFinishedItem] = useState<QualityControlItem | null>(null);
   const [failureReason, setFailureReason] = useState("");
   const [rejectedQuantityDraft, setRejectedQuantityDraft] = useState("1");
   const qcGridRef = useRef<AgGridReact<QualityControlItem>>(null);
@@ -255,6 +257,7 @@ export function QualityControlDashboard() {
     onSuccess: () => {
       toast.success("QC pass undone");
       setSelectedId(null);
+      setUndoFinishedItem(null);
       invalidateManufacturing();
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to undo QC pass"),
@@ -377,7 +380,9 @@ export function QualityControlDashboard() {
     }
     if (item.result === "passed") return <>
       <Button size={size} className={tall} onClick={() => updateNotesMutation.mutate({ item, notes: draft ?? item.notes })} disabled={notesArePending || draft === undefined || draft === item.notes}>{notesArePending ? <LoaderCircle className="animate-spin" /> : <Save />} Save note</Button>
-      <Button size={size} variant="outline" className={tall} onClick={() => undoReviewMutation.mutate(item)} disabled={!workAllowed(item.operations[0]) || undoReviewMutation.isPending || notesArePending}>{sheet && undoReviewMutation.isPending ? <LoaderCircle className="animate-spin" /> : <Clock3 />} Undo QC pass</Button>
+      <Button size={size} variant="outline" className={tall} onClick={() => item.operations[0].finishingRequired && item.operations[0].finishingComplete
+        ? setUndoFinishedItem(item)
+        : undoReviewMutation.mutate(item)} disabled={!workAllowed(item.operations[0]) || undoReviewMutation.isPending || notesArePending}>{sheet && undoReviewMutation.isPending ? <LoaderCircle className="animate-spin" /> : <Clock3 />} Undo QC pass</Button>
     </>;
     return sheet
       ? <div className="rounded-xl bg-rose-50 p-3 text-center text-sm font-medium text-rose-800 dark:bg-rose-400/15 dark:text-rose-200">Complete the reopened route to request QC again.</div>
@@ -704,6 +709,21 @@ export function QualityControlDashboard() {
           <DialogFooter>
             <Button variant="outline" onClick={() => setFailureDialogItem(null)} disabled={reviewIsPending}>Cancel</Button>
             <Button variant="destructive" onClick={submitFailure} disabled={!failureDialogItem || items.find((item) => item.requirementId === failureDialogItem.requirementId)?.operations[0]?.obsolete || reviewIsPending}>{reviewIsPending && <LoaderCircle className="animate-spin" />} Reject and restart route</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(undoFinishedItem)} onOpenChange={(open) => { if (!open && !undoReviewMutation.isPending) setUndoFinishedItem(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Undo QC pass and reset finishing?</DialogTitle>
+            <DialogDescription>
+              {undoFinishedItem?.operations[0].partNumber} has already been finished. Undoing the pass returns it to Ready for QC and clears the finishing job, so it has to be finished again after it passes QC.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setUndoFinishedItem(null)} disabled={undoReviewMutation.isPending}>Cancel</Button>
+            <Button variant="destructive" onClick={() => undoFinishedItem && undoReviewMutation.mutate(undoFinishedItem)} disabled={undoReviewMutation.isPending}>{undoReviewMutation.isPending && <LoaderCircle className="animate-spin" />} Undo QC pass</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

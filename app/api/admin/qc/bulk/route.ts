@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { errorResponse, readJson, requireUser } from "@/lib/api-route";
-import { toBulkOutcomes } from "@/lib/bulk-selection";
+import { BULK_REQUEST_SIZE, toBulkOutcomes } from "@/lib/bulk-selection";
 import { passQualityReviews } from "@/lib/manufacturing";
 import { scheduleQualityReviewEvent } from "@/lib/slack-notifications";
 
@@ -13,7 +13,7 @@ const bulkSchema = z.object({
   reviews: z.array(z.object({
     requirementId: z.number().int().positive(),
     notes: z.string().trim().max(2000).default(""),
-  }).strict()).min(1).max(100)
+  }).strict()).min(1).max(BULK_REQUEST_SIZE)
     .refine((reviews) => new Set(reviews.map((review) => review.requirementId)).size === reviews.length, "Each production requirement can only be included once"),
 }).strict();
 

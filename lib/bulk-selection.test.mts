@@ -108,7 +108,9 @@ test("bulk requests are chunked and a failed request rejects only its own chunk"
   assert.deepEqual(bodies, [{ ids: [1, 2] }, { ids: [3, 4] }, { ids: [5] }]);
   assert.deepEqual(progress, [2, 4, 5]);
   assert.deepEqual(results.map((result) => result.status === "fulfilled" ? result.value : (result.reason as Error).message), [
-    10, "Already claimed", "The manufacturing database is busy.", "The manufacturing database is busy.", 50,
+    10, "Already claimed",
+    "The manufacturing database is busy. Refresh to see which changes were saved.",
+    "The manufacturing database is busy. Refresh to see which changes were saved.", 50,
   ]);
 });
 

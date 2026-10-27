@@ -130,15 +130,16 @@ export function BulkForceQcDialog({ open, onOpenChange, requirements, onFinished
             On pass, completes powder coating for {finishingCount} {finishingCount === 1 ? "part" : "parts"} and credits you, instead of sending {finishingCount === 1 ? "it" : "them"} to Finishing.
           </FinishingToggle>}
           <label className="text-sm font-medium">Additional inspection notes<textarea value={notes} onChange={event => setNotes(event.target.value)} className="mt-2 min-h-24 w-full rounded-md border bg-background p-3 font-normal" disabled={busy} placeholder="Optional. Added after each part's generated Force QC note." /></label>
+          <p className="text-xs text-muted-foreground">Each part’s note, including its generated summary, must fit in {FORCE_QC_NOTES_LIMIT} characters.</p>
         </>}
         {busy && <p role="status" className="text-sm">Forcing QC… {progress}/{eligible.length}</p>}
         {errors.length > 0 && <ul role="alert" className="max-h-40 space-y-1 overflow-y-auto text-sm text-destructive">{errors.map((message, index) => <li key={`${index}-${message}`}>{message}</li>)}</ul>}
         <DialogFooter className="sm:flex-wrap">
           <Button variant="outline" disabled={busy} onClick={() => { onOpenChange(false); setErrors([]); }}>Cancel</Button>
-          <Button size="lg" variant="destructive" className="h-11" disabled={busy || !eligible.length || notes.trim().length > 1500 || finishingCount > 0 && completeFinishing} onClick={() => void submit("failed")}>
+          <Button size="lg" variant="destructive" className="h-11" disabled={busy || !eligible.length || notes.trim().length > FORCE_QC_NOTES_LIMIT || finishingCount > 0 && completeFinishing} onClick={() => void submit("failed")}>
             <AlertTriangle /> Force complete & fail QC
           </Button>
-          <Button size="lg" variant="destructive" className="h-11" disabled={busy || !eligible.length || notes.trim().length > 1500} onClick={() => void submit("passed")}>
+          <Button size="lg" variant="destructive" className="h-11" disabled={busy || !eligible.length || notes.trim().length > FORCE_QC_NOTES_LIMIT} onClick={() => void submit("passed")}>
             <AlertTriangle /> Force complete & pass QC
           </Button>
         </DialogFooter>

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { errorResponse, readJson, requireUser } from "@/lib/api-route";
-import { toBulkOutcomes } from "@/lib/bulk-selection";
+import { BULK_REQUEST_SIZE, toBulkOutcomes } from "@/lib/bulk-selection";
 import { applyQuantityActions } from "@/lib/manufacturing";
 import { isShopName } from "@/lib/profile-name";
 import { scheduleOperationQuantityEvent } from "@/lib/slack-notifications";
@@ -20,7 +20,7 @@ const bulkSchema = z.object({
     completeAllClaims: z.boolean().optional(),
     programPath: z.string().trim().max(1024).optional(),
     notes: z.string().trim().max(5000).optional(),
-  }).strict()).min(1).max(100),
+  }).strict()).min(1).max(BULK_REQUEST_SIZE),
 }).strict().superRefine((value, context) => {
   if (new Set(value.items.map((item) => item.id)).size !== value.items.length) {
     context.addIssue({ code: "custom", message: "Each operation can only be included once" });

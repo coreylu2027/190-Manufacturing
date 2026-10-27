@@ -2,14 +2,14 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { errorResponse, readJson, requireUser } from "@/lib/api-route";
-import { toBulkOutcomes } from "@/lib/bulk-selection";
+import { BULK_REQUEST_SIZE, toBulkOutcomes } from "@/lib/bulk-selection";
 import { applyFabricationActions } from "@/lib/manufacturing";
 import { isShopName } from "@/lib/profile-name";
 import { scheduleFinishingEvent } from "@/lib/slack-notifications";
 
 const bulkSchema = z.object({
   action: z.enum(["claim", "release", "complete"]),
-  ids: z.array(z.number().int().positive()).min(1).max(100)
+  ids: z.array(z.number().int().positive()).min(1).max(BULK_REQUEST_SIZE)
     .refine((ids) => new Set(ids).size === ids.length, "Each finishing job can only be included once"),
 }).strict();
 

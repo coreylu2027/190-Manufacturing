@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { errorResponse, readJson, requireUser } from "@/lib/api-route";
-import { toBulkOutcomes } from "@/lib/bulk-selection";
+import { BULK_REQUEST_SIZE, toBulkOutcomes } from "@/lib/bulk-selection";
 import { updatePartLocations } from "@/lib/manufacturing";
 import { scheduleLocationChangedEvent } from "@/lib/slack-notifications";
 import { storageLocationSchema } from "@/lib/storage-locations";
@@ -11,7 +11,7 @@ import { storageLocationSchema } from "@/lib/storage-locations";
 export const maxDuration = 120;
 
 const bulkSchema = z.object({
-  requirementIds: z.array(z.number().int().positive()).min(1).max(100)
+  requirementIds: z.array(z.number().int().positive()).min(1).max(BULK_REQUEST_SIZE)
     .refine((ids) => new Set(ids).size === ids.length, "Each production requirement can only be included once"),
   location: storageLocationSchema.nullable(),
 }).strict();

@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { z } from "zod";
 
+import * as bulkSelection from "./bulk-selection.ts";
 import { HttpError } from "./http-error.ts";
-import { isUserId } from "./manufacturing/write-adapter.ts";
+import { isUserId, ManufacturingWriteError } from "./manufacturing/write-adapter.ts";
 import * as profileName from "./profile-name.ts";
+import * as qualityControl from "./quality-control.ts";
 import { loadModule } from "./test-module-loader.mts";
 
 const nextServer = { NextResponse: { json: (body: unknown, options?: { status: number }) => ({ body, status: options?.status ?? 200 }) } };
@@ -295,6 +297,79 @@ test("Force QC forwards post-QC readiness and the rejected quantity to Slack", a
   assert.equal((await force({ notes: "Bad", token: "t", result: "failed" })).status, 200);
   assert.equal(events[1].postQcWorkReady, false);
   assert.equal(events[1].rejectedQuantity, 2);
+});
+
+test("bulk routes keep their single routes' access rules and reject duplicate or oversized batches", async () => {
+  let user: unknown = null;
+  let writes = 0;
+  const write = async (...args: unknown[]) => { writes++; return (args.find(Array.isArray) as unknown[]).map(() => ({ status: "fulfilled", value: { notificationContext: {} } })); };
+  const dependencies = {
+    zod: { z },
+    "@/lib/api-route": apiRoute(async () => user),
+    "@/lib/bulk-selection": bulkSelection,
+    "@/lib/manufacturing": { applyQuantityActions: write, applyFabricationActions: write, updatePartLocations: write, passQualityReviews: write, forceQualityReviews: write },
+    "@/lib/manufacturing/write-adapter": { ManufacturingWriteError },
+    "@/lib/profile-name": profileName,
+    "@/lib/quality-control": qualityControl,
+    "@/lib/slack-notifications": slack([]),
+    "@/lib/storage-locations": { storageLocationSchema: z.string() },
+  };
+  const many = (count: number) => Array.from({ length: count }, (_, index) => index + 1);
+  const routes = [
+    { path: "../app/api/operations/bulk/route.ts", admin: false, body: (ids: number[]) => ({ action: "claim", items: ids.map((id) => ({ id, quantity: 1 })) }) },
+    { path: "../app/api/fabrication/bulk/route.ts", admin: false, body: (ids: number[]) => ({ action: "claim", ids }) },
+    { path: "../app/api/requirements/bulk/location/route.ts", admin: false, body: (ids: number[]) => ({ requirementIds: ids, location: null }) },
+    { path: "../app/api/admin/qc/bulk/route.ts", admin: true, body: (ids: number[]) => ({ reviews: ids.map((requirementId) => ({ requirementId })) }) },
+    { path: "../app/api/admin/qc/bulk/force/route.ts", admin: true, body: (ids: number[]) => ({ requirementIds: ids, notes: "", result: "passed" }) },
+  ];
+  for (const { path, admin, body } of routes) {
+    const api = route(path, dependencies);
+    const post = (payload: unknown) => api.POST(new Request("https://example.com/", { method: "POST", body: typeof payload === "string" ? payload : JSON.stringify(payload) }));
+    user = null;
+    assert.equal((await post(body([1]))).status, 401, path);
+    user = { id: "pat", name: "Pat P.", approved: true, role: "machinist" };
+    assert.equal((await post(body([1]))).status, admin ? 403 : 200, path);
+    user = { ...user as object, role: "admin" };
+    writes = 0;
+    assert.equal((await post("{")).status, 400, path);
+    assert.equal((await post(body([1, 1]))).status, 400, path);
+    assert.equal((await post(body(many(bulkSelection.BULK_REQUEST_SIZE + 1)))).status, 400, path);
+    assert.equal(writes, 0, path);
+    assert.equal((await post(body(many(bulkSelection.BULK_REQUEST_SIZE)))).status, 200, path);
+  }
+});
+
+test("bulk routes report each outcome in order and announce only committed work with the adapter's flags", async () => {
+  const events: Array<Record<string, unknown>> = [];
+  const api = route("../app/api/operations/bulk/route.ts", {
+    zod: { z },
+    "@/lib/api-route": apiRoute(async () => ({ id: "alex", name: "Alex A.", approved: true, role: "machinist" })),
+    "@/lib/bulk-selection": bulkSelection,
+    "@/lib/manufacturing": {
+      applyQuantityActions: async () => [
+        { status: "fulfilled", value: { id: 10, status: "Complete", notificationContext: {
+          requirementId: 20, partNumber: "P-1", partName: "Fixture", assemblyNumber: "A-1", operationNumber: "OP1", workType: "Manufacturing", machine: "Mill",
+          previousRequirementStatus: "Ready for Manufacturing", requirementStatus: "Ready for QC", postQcWorkReady: true,
+        } } },
+        { status: "rejected", reason: new ManufacturingWriteError("Only 1 part(s) remain available", 409) },
+      ],
+    },
+    "@/lib/profile-name": profileName,
+    "@/lib/slack-notifications": slack(events),
+    "@/lib/storage-locations": { storageLocationSchema: z.string() },
+  });
+  const response = await api.POST(new Request("https://example.com/", { method: "POST",
+    body: JSON.stringify({ action: "complete", items: [{ id: 10, quantity: 2 }, { id: 11, quantity: 1 }] }) }));
+  assert.equal(response.status, 200);
+  assert.deepEqual(plain(response.body.results), [
+    { ok: true, value: { id: 10, status: "Complete" } },
+    { ok: false, error: "Only 1 part(s) remain available" },
+  ]);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, "operation_completed");
+  assert.equal(events[0].quantity, 2);
+  assert.equal(events[0].becameReadyForQc, true);
+  assert.equal(events[0].postQcWorkReady, true);
 });
 
 test("a committed steal still succeeds when notifying a displaced claimant fails", async () => {

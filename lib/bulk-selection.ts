@@ -1,4 +1,4 @@
-import { requestJson } from "./request-json.ts";
+import { errorStatus, requestJson } from "./request-json.ts";
 
 /**
  * Applies the grid's latest selection for visible rows without discarding
@@ -108,7 +108,12 @@ export async function postBulk<Item, Result>(url: string, items: readonly Item[]
       results.push(...payload.results.map((outcome): PromiseSettledResult<Result> => outcome.ok
         ? { status: "fulfilled", value: outcome.value }
         : { status: "rejected", reason: new Error(outcome.error) }));
-    } catch (reason) {
+    } catch (error) {
+      // Without a response, or after a server failure, some of the chunk may have been saved.
+      const status = errorStatus(error);
+      const reason = status === undefined || status >= 500
+        ? new Error(`${(error instanceof Error ? error.message : fallbackError).replace(/\.$/, "")}. Refresh to see which changes were saved.`)
+        : error;
       results.push(...chunk.map((): PromiseSettledResult<Result> => ({ status: "rejected", reason })));
     }
     onProgress?.(results.length);

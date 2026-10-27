@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { errorResponse, readJson, requireUser } from "@/lib/api-route";
-import { toBulkOutcomes } from "@/lib/bulk-selection";
+import { BULK_REQUEST_SIZE, toBulkOutcomes } from "@/lib/bulk-selection";
 import { forceQualityReviews } from "@/lib/manufacturing";
 import { ManufacturingWriteError } from "@/lib/manufacturing/write-adapter";
 import { bulkForceQcNotes, FORCE_QC_NOTES_LIMIT } from "@/lib/quality-control";
@@ -12,9 +12,9 @@ import { scheduleQualityReviewEvent } from "@/lib/slack-notifications";
 export const maxDuration = 120;
 
 const bulkSchema = z.object({
-  requirementIds: z.array(z.number().int().positive()).min(1).max(100)
+  requirementIds: z.array(z.number().int().positive()).min(1).max(BULK_REQUEST_SIZE)
     .refine((ids) => new Set(ids).size === ids.length, "Each production requirement can only be included once"),
-  notes: z.string().trim().max(1500),
+  notes: z.string().trim().max(FORCE_QC_NOTES_LIMIT),
   result: z.enum(["passed", "failed"]),
   completeFinishing: z.boolean().default(false),
 }).strict().refine((value) => !value.completeFinishing || value.result === "passed", { message: "Finishing can only be completed when QC passes" });
