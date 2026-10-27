@@ -15,20 +15,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { createClient } from "@/lib/supabase/client";
+import { requestJson } from "@/lib/request-json";
+import { joinAuthorizedChannel } from "@/lib/supabase/realtime";
 import type { AppNotification } from "@/lib/types";
 
 interface NotificationsResponse {
   notifications: AppNotification[];
 }
 
-async function fetchNotifications(): Promise<NotificationsResponse> {
-  const response = await fetch("/api/notifications", { cache: "no-store" });
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    throw new Error(body.error ?? "Unable to load alerts");
-  }
-  return response.json();
+function fetchNotifications() {
+  return requestJson<NotificationsResponse>("/api/notifications", { cache: "no-store" }, "Unable to load alerts");
 }
 
 function notificationFromRecord(record: Record<string, unknown>): AppNotification | null {
@@ -68,59 +64,34 @@ export function NotificationInbox({ userId }: { userId: string | null }) {
 
   useEffect(() => {
     if (!userId) return;
-    const supabase = createClient();
-    if (!supabase) return;
-    let cancelled = false;
-    let channel: ReturnType<typeof supabase.channel> | null = null;
-
-    const subscribe = async () => {
-      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
-      if (sessionError || !session) {
-        console.error("Notification realtime authentication failed", sessionError);
-        return;
-      }
-      await supabase.realtime.setAuth(session.access_token);
-      if (cancelled) return;
-
-      channel = supabase
-        .channel(`notifications:${userId}`)
-        .on(
-          "postgres_changes",
-          {
-            event: "INSERT",
-            schema: "public",
-            table: "notifications",
-            filter: `recipient_id=eq.${userId}`,
-          },
-          (payload) => {
-            const notification = notificationFromRecord(payload.new);
-            if (!notification) return;
-            queryClient.setQueryData<NotificationsResponse>(["notifications"], (existing) => {
-              if (existing?.notifications.some((item) => item.id === notification.id)) return existing;
-              return {
-                notifications: [...(existing?.notifications ?? []), notification]
-                  .sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
-              };
-            });
-          },
-        )
-        .subscribe((status, error) => {
-          if (cancelled) return;
-          if (status === "SUBSCRIBED") {
-            setRealtimeUserId(userId);
-            queryClient.invalidateQueries({ queryKey: ["notifications"] });
-          } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
-            setRealtimeUserId((connectedUserId) => connectedUserId === userId ? null : connectedUserId);
-            if (status !== "CLOSED") console.error("Notification realtime subscription failed", error);
-          }
-        });
-    };
-    void subscribe();
-
-    return () => {
-      cancelled = true;
-      if (channel) void supabase.removeChannel(channel);
-    };
+    return joinAuthorizedChannel("Notification", (supabase) => supabase
+      .channel(`notifications:${userId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "notifications",
+          filter: `recipient_id=eq.${userId}`,
+        },
+        (payload) => {
+          const notification = notificationFromRecord(payload.new);
+          if (!notification) return;
+          queryClient.setQueryData<NotificationsResponse>(["notifications"], (existing) => {
+            if (existing?.notifications.some((item) => item.id === notification.id)) return existing;
+            return {
+              notifications: [...(existing?.notifications ?? []), notification]
+                .sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
+            };
+          });
+        },
+      ), {
+      onSubscribed: () => {
+        setRealtimeUserId(userId);
+        queryClient.invalidateQueries({ queryKey: ["notifications"] });
+      },
+      onDisconnected: () => setRealtimeUserId((connectedUserId) => connectedUserId === userId ? null : connectedUserId),
+    });
   }, [queryClient, userId]);
 
   const current = query.data?.notifications[0] ?? null;
@@ -128,13 +99,7 @@ export function NotificationInbox({ userId }: { userId: string | null }) {
   const href = typeof current?.data.href === "string" && current.data.href.startsWith("/") && !current.data.href.startsWith("//")
     ? current.data.href : null;
   const mutation = useMutation({
-    mutationFn: async (id: string) => {
-      const response = await fetch(`/api/notifications/${id}`, { method: "PATCH" });
-      if (!response.ok) {
-        const body = await response.json().catch(() => ({}));
-        throw new Error(body.error ?? "Unable to acknowledge alert");
-      }
-    },
+    mutationFn: (id: string) => requestJson(`/api/notifications/${id}`, { method: "PATCH" }, "Unable to acknowledge alert"),
     onSuccess: (_data, id) => {
       queryClient.setQueryData<NotificationsResponse>(["notifications"], (existing) => ({
         notifications: existing?.notifications.filter((notification) => notification.id !== id) ?? [],

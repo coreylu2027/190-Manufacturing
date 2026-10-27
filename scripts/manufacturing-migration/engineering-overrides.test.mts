@@ -1,30 +1,13 @@
 // Runs in isolated PostgreSQL/WASM; never contacts Supabase or Onshape. The real
 // write adapter talks to PGlite through a minimal PostgREST-shaped fetch.
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import test from "node:test";
-import { PGlite } from "@electric-sql/pglite";
+import test, { after } from "node:test";
 import { createSupabaseWriteAdapter } from "../../lib/manufacturing/write-adapter.ts";
 import type { EngineeringOverrideState } from "../../lib/engineering-overrides.ts";
+import { createDatabase, ENGINEERING_SYNC_STUB, PUBLIC_TABLE_STUBS, SUPABASE_STUBS } from "./pglite-fixture.mts";
 
-const db = new PGlite();
-const sql = async <T extends object = Record<string, unknown>>(query: string, params: unknown[] = []) => (await db.query<T>(query, params)).rows;
-const install = async (path: string) => db.exec(await readFile(new URL(`../../${path}`, import.meta.url), "utf8"));
-await db.exec(`
-  create role anon; create role authenticated; create role service_role;
-  create schema auth; create table auth.users(id uuid primary key);
-  create function auth.uid() returns uuid language sql as 'select null::uuid';
-  create table public.profiles(id uuid primary key, display_name text, approved boolean, role text);
-  create type public.quality_result as enum ('passed','failed');
-  create table public.quality_control(id bigint generated always as identity primary key,
-    production_requirement_id bigint, operation_id bigint, result public.quality_result,
-    notes text, rejected_quantity integer, reviewed_by uuid, reviewed_at timestamptz, updated_at timestamptz);
-  create schema frc190_baserow_stage; create table frc190_baserow_stage.snapshots(id uuid primary key);
-  create schema storage;
-  create table storage.buckets(id text primary key, public boolean not null default false);
-  create table storage.objects(bucket_id text references storage.buckets(id), name text, primary key(bucket_id, name));
-  insert into storage.buckets values('manufacturing-files', false);
-`);
+const { db, sql, install } = await createDatabase(SUPABASE_STUBS + PUBLIC_TABLE_STUBS);
+after(() => db.close());
 await install("supabase/production/20260905_normalized_manufacturing.sql");
 await install("supabase/production/20260905_manufacturing_writes.sql");
 await install("supabase/production/20260905_manufacturing_attachments.sql");
@@ -32,8 +15,7 @@ await install("supabase/production/20260907_manufacturing_part_previews.sql");
 await db.exec(`
   alter table manufacturing.attachments alter column source_field_id drop not null;
   create function manufacturing.broadcast_change() returns trigger language plpgsql as $$ begin return null; end $$;
-  create table manufacturing.engineering_sync_runs(id integer primary key, status text,
-    started_at timestamptz not null default clock_timestamp());
+  ${ENGINEERING_SYNC_STUB};
 `);
 await install("supabase/migrations/20260910031802_assembly_glb_previews.sql");
 await install("supabase/migrations/20260911033920_initialize_synced_routing.sql");

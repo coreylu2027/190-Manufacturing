@@ -7,20 +7,10 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --experimental-strip-types --test lib/manufacturing-workflow.test.mts lib/bulk-selection.test.mts lib/storage-locations.test.mts lib/quality-control.test.mts lib/document-progress.test.mts lib/requirement-history.test.mts lib/slack-notifications.test.mts lib/notifications.test.mts lib/requirement-visibility.test.mts lib/manufacturing/glb.test.mts lib/manufacturing/file-names.test.mts lib/engineering-sync-review.test.mts",
-    "manufacturing:snapshot": "node --experimental-strip-types --env-file=.env.local scripts/manufacturing-migration/snapshot.mts",
-    "manufacturing:prepare": "node --experimental-strip-types scripts/manufacturing-migration/prepare.mts",
-    "manufacturing:test-migration": "node --experimental-strip-types --test scripts/manufacturing-migration/core.test.mts lib/manufacturing/model.test.mts lib/manufacturing/projections.test.mts lib/manufacturing/write-adapter.test.mts",
-    "manufacturing:import-prepare": "node --experimental-strip-types scripts/manufacturing-migration/import-normalized.mts",
-    "manufacturing:shadow": "node --experimental-strip-types --env-file=.env.local scripts/manufacturing-migration/shadow-parity.mts",
-    "manufacturing:migrate-attachments": "node --experimental-strip-types --env-file=.env.local scripts/manufacturing-migration/migrate-attachments.mts",
-    "manufacturing:verify-attachments": "node --experimental-strip-types --env-file=.env.local scripts/manufacturing-migration/verify-attachments.mts",
+    "test": "node --experimental-strip-types --test \"lib/**/*.test.mts\" \"scripts/**/*.test.mts\" \"scripts/**/*.test.mjs\"",
     "manufacturing:generate-previews": "node --experimental-strip-types --env-file=.env.local scripts/manufacturing-migration/generate-part-previews.mts",
-    "manufacturing:test-assembly-previews": "node --experimental-strip-types --test scripts/manufacturing-migration/assembly-glb.test.mjs",
-    "manufacturing:test-obsoletion": "node scripts/manufacturing-migration/obsoletion.test.mjs",
-    "manufacturing:test-overrides": "node --experimental-strip-types --test scripts/manufacturing-migration/engineering-overrides.test.mts",
     "onshape:test": "python -m unittest integrations/onshape/test_onshape_to_supabase.py",
-    "onshape:test-sql": "node integrations/onshape/tests/engineering-sync.test.mjs && node integrations/onshape/tests/imported-sync.test.mjs && node --experimental-strip-types --test scripts/manufacturing-migration/engineering-sync-review.test.mts"
+    "onshape:test-sql": "node integrations/onshape/tests/engineering-sync.test.mjs && node integrations/onshape/tests/imported-sync.test.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",
@@ -56,6 +46,7 @@
     "occt-import-js": "0.0.23",
     "supabase": "^2.118.0",
     "tailwindcss": "^4",
+    "three": "0.183.2",
     "typescript": "^5"
   }
 }

@@ -17,7 +17,9 @@ export function scheduleSlackManufacturingEvent(event: SlackManufacturingEvent) 
   });
 }
 
-type StatusChange = { previousRequirementStatus: string; requirementStatus: string };
+// postQcWorkReady comes from the write adapter, which knows whether the write
+// actually released work after QC; it is never inferred from a status change.
+type StatusChange = { previousRequirementStatus: string; requirementStatus: string; postQcWorkReady?: boolean };
 
 function partContext({ requirementId, partNumber, partName, assemblyNumber }: SlackPartContext): SlackPartContext {
   return { requirementId, partNumber, partName, assemblyNumber };
@@ -49,6 +51,7 @@ export function scheduleOperationQuantityEvent(
     machine: context.machine,
     quantity,
     becameReadyForQc: became(context, "Ready for QC"),
+    postQcWorkReady: context.postQcWorkReady,
     becameComplete: became(context, "Complete"),
   });
 }
@@ -72,7 +75,7 @@ export function scheduleFinishingEvent(
     ...partContext(context),
     color: context.color,
     quantity: context.quantity,
-    postQcWorkReady: became(context, "Ready for Manufacturing"),
+    postQcWorkReady: context.postQcWorkReady,
     becameComplete: became(context, "Complete"),
   });
 }
@@ -102,9 +105,6 @@ export function scheduleQualityReviewEvent(
     actorName,
     ...review,
     becameReadyForFinishing: became(context, "Ready for Finishing"),
-    // Force QC only announces post-QC work on a pass; a failure also returns
-    // the requirement to Ready for Manufacturing.
-    postQcWorkReady: (!review.forced || review.result === "passed") && became(context, "Ready for Manufacturing"),
     becameComplete: became(context, "Complete"),
     ...context,
   });

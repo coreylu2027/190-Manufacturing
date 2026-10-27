@@ -1,18 +1,11 @@
 import { NextResponse } from "next/server";
 
-import { getAppUser } from "@/lib/auth";
+import { requireUser } from "@/lib/api-route";
 import { getCurrentManufacturingSnapshot } from "@/lib/manufacturing/cache";
 
-export const dynamic = "force-dynamic";
-
 export async function GET() {
-  const user = await getAppUser();
-  if (!user) {
-    return NextResponse.json({ error: "Authentication required" }, { status: 401 });
-  }
-  if (!user.approved) {
-    return NextResponse.json({ error: "Account approval required", code: "APPROVAL_REQUIRED" }, { status: 403 });
-  }
+  const { user, response } = await requireUser();
+  if (response) return response;
 
   try {
     const { version, snapshot } = await getCurrentManufacturingSnapshot();

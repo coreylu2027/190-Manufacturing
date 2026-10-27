@@ -22,10 +22,3 @@ export async function createClient() {
     },
   });
 }
-
-export async function getCurrentUser() {
-  const supabase = await createClient();
-  if (!supabase) return null;
-  const { data } = await supabase.auth.getUser();
-  return data.user;
-}

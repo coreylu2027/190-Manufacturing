@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { getAdminActor } from "@/lib/auth";
+import { errorResponse, readJson, requireUser } from "@/lib/api-route";
 import { toBulkOutcomes } from "@/lib/bulk-selection";
 import { forceQualityReviews } from "@/lib/manufacturing";
 import { ManufacturingWriteError } from "@/lib/manufacturing/write-adapter";
@@ -21,11 +21,10 @@ const bulkSchema = z.object({
 
 /** Force QC for many production requirements; returns one outcome per requirement, in order. */
 export async function POST(request: Request) {
-  const actor = await getAdminActor();
-  if (!actor) return NextResponse.json({ error: "Authentication required" }, { status: 401 });
-  if (!actor.approved || actor.role !== "admin") return NextResponse.json({ error: "Administrator access required" }, { status: 403 });
+  const { user, response } = await requireUser({ admin: true });
+  if (response) return response;
 
-  const parsed = bulkSchema.safeParse(await request.json().catch(() => null));
+  const parsed = await readJson(request, bulkSchema);
   if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message }, { status: 400 });
   const { requirementIds, notes, result, completeFinishing } = parsed.data;
 
@@ -34,16 +33,12 @@ export async function POST(request: Request) {
       const combined = bulkForceQcNotes(preview.generatedNotes, notes, completeFinishing && preview.nextDestination === "Finishing");
       if (combined.length > FORCE_QC_NOTES_LIMIT) throw new ManufacturingWriteError(`Inspection notes exceed ${FORCE_QC_NOTES_LIMIT} characters`, 400);
       return combined;
-    }, actor, result, completeFinishing);
-    const outcomes = toBulkOutcomes(results.map((settled) => {
-      if (settled.status === "rejected") return settled;
-      const { notificationContext, ...review } = settled.value;
-      scheduleQualityReviewEvent(actor.name, { result, notes: review.notes, storageLocation: null, forced: true }, notificationContext);
-      return { status: "fulfilled" as const, value: review };
-    }), "Unable to force QC");
-    return NextResponse.json({ results: outcomes });
+    }, user, result, completeFinishing);
+    return NextResponse.json({ results: toBulkOutcomes(results, "Unable to force QC", ({ notificationContext, ...review }) => {
+      scheduleQualityReviewEvent(user.name, { result, notes: review.notes, storageLocation: null, rejectedQuantity: review.rejectedQuantity, forced: true }, notificationContext);
+      return review;
+    }) });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to force QC" },
-      { status: error instanceof ManufacturingWriteError ? error.status : 502 });
+    return errorResponse(error, "Unable to force QC");
   }
 }

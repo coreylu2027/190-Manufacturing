@@ -15,10 +15,13 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { formatShortDateTime } from "@/lib/date-format";
 import {
   describeSyncResult, SYNC_CHANGE_LABELS, syncChangeCounts,
   type StoredSyncReview, type SyncChange, type SyncChangeKind, type SyncProposalStatus, type SyncProposalSummary, type SyncReview,
 } from "@/lib/engineering-sync-review";
+import { invalidateManufacturingQueries } from "@/lib/query-keys";
+import { requestJson } from "@/lib/request-json";
 import { cn } from "@/lib/utils";
 
 type ProposalDetail = SyncProposalSummary & { exclusions: string[]; review: StoredSyncReview | null };
@@ -57,20 +60,10 @@ const SKIPPED_MEANING: Record<SyncChangeKind, string> = {
   membership: "",
 };
 
-async function readJson<T>(response: Response, fallback: string): Promise<T> {
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error ?? fallback);
-  return body as T;
-}
-const fetchProposals = async () => (await readJson<{ proposals: SyncProposalSummary[] }>(
-  await fetch("/api/admin/engineering-sync", { cache: "no-store" }), "Unable to load Onshape syncs")).proposals;
-const fetchProposal = async (id: string) => readJson<ProposalResponse>(
-  await fetch(`/api/admin/engineering-sync/${id}`, { cache: "no-store" }), "Unable to load the sync");
-
-function formatDate(value: string | null | undefined) {
-  if (!value) return "—";
-  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(value));
-}
+const fetchProposals = async () => (await requestJson<{ proposals: SyncProposalSummary[] }>(
+  "/api/admin/engineering-sync", { cache: "no-store" }, "Unable to load Onshape syncs")).proposals;
+const fetchProposal = (id: string) => requestJson<ProposalResponse>(`/api/admin/engineering-sync/${id}`, { cache: "no-store" }, "Unable to load the sync");
+const formatDate = (value: string | null | undefined) => formatShortDateTime(value ?? null, "—");
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
 function proposalTitle(proposal: SyncProposalSummary) {
   return `${proposal.details.label || "Onshape"} sync`;
@@ -216,11 +209,10 @@ function ProposalView({ id }: { id: string }) {
     return next;
   });
   const mutation = useMutation({
-    mutationFn: async (decision: "approve" | "deny") => readJson<{ status: string; proposal_status: SyncProposalStatus; error?: string }>(
-      await fetch(`/api/admin/engineering-sync/${id}`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ decision, exclusions, token: confirmedToken, note }),
-      }), "Unable to record the decision"),
+    mutationFn: (decision: "approve" | "deny") => requestJson<{ status: string; proposal_status: SyncProposalStatus; error?: string }>(
+      `/api/admin/engineering-sync/${id}`, {
+        method: "POST", body: JSON.stringify({ decision, exclusions, token: confirmedToken, note }),
+      }, "Unable to record the decision"),
     onSuccess: (result) => {
       setConfirm(null);
       if (result.proposal_status === "failed") toast.error(`Approval rolled back: ${result.error ?? "unknown error"}. Nothing was committed.`);
@@ -228,10 +220,7 @@ function ProposalView({ id }: { id: string }) {
       else toast.success(result.status === "partial" ? "Sync approved and committed with warnings" : "Sync approved and committed");
     },
     onError: (error) => { setConfirm(null); toast.error(error.message); },
-    onSettled: async () => {
-      await Promise.all(["engineering-sync", "operations", "fabrication", "qc", "admin", "engineering-corrections"]
-        .map((key) => queryClient.invalidateQueries({ queryKey: [key] })));
-    },
+    onSettled: () => invalidateManufacturingQueries(queryClient, { extraKeys: ["engineering-sync", "engineering-corrections"] }),
   });
 
   if (query.isPending) return <div className="space-y-3 rounded-2xl border bg-card p-5">{Array.from({ length: 6 }).map((_, index) => <Skeleton key={index} className="h-14 w-full" />)}</div>;

@@ -6,18 +6,13 @@ import { useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { invalidateManufacturingQueries } from "@/lib/query-keys";
+import { requestJson } from "@/lib/request-json";
 
-const MANUFACTURING_QUERY_KEYS = ["operations", "fabrication", "qc", "admin"] as const;
-
-async function saveProductionNotes(requirementId: number, notes: string): Promise<{ productionNotes: string }> {
-  const response = await fetch(`/api/requirements/${requirementId}/notes`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ notes }),
-  });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error ?? "Unable to update production notes");
-  return body;
+export function saveProductionNotes(requirementId: number, notes: string, fallbackError = "Unable to update production notes") {
+  return requestJson<{ productionNotes: string }>(`/api/requirements/${requirementId}/notes`, {
+    method: "PUT", body: JSON.stringify({ notes }),
+  }, fallbackError);
 }
 
 export function ProductionRequirementNotes({
@@ -36,9 +31,7 @@ export function ProductionRequirementNotes({
     mutationFn: () => saveProductionNotes(requirementId, draft),
     onSuccess: (result) => {
       setDraft(result.productionNotes);
-      for (const queryKey of MANUFACTURING_QUERY_KEYS) {
-        queryClient.invalidateQueries({ queryKey: [queryKey] }, { cancelRefetch: false });
-      }
+      void invalidateManufacturingQueries(queryClient, { cancelRefetch: false });
       toast.success(result.productionNotes ? "Production note saved" : "Production note deleted");
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to update production notes"),

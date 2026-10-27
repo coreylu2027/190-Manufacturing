@@ -10,8 +10,7 @@ Moved here from `Team-190/.github` (`pre-2027-onshape_ci/`, branch
 `cots-parts-sync`, commit `900a1fd`). The Poot Horse workflow now lives in this
 repository and **stages** each sync for administrator review instead of
 committing it. See [the review runbook](../../docs/engineering-sync-review.md).
-The delta workflow and the Baserow-era capture in [`upstream/`](upstream) are
-not wired up here.
+The delta workflow is not wired up here.
 
 | Path | Purpose |
 | --- | --- |

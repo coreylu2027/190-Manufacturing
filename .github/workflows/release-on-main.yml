@@ -9,7 +9,6 @@ on:
 
 permissions:
   contents: write
-  pull-requests: read
 
 # Releases must be serialized so two PRs merged close together cannot calculate
 # the same next patch version.
@@ -23,10 +22,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check out main and release tags
+      # Version, changelog range, and tag all use the merge commit, even when
+      # main has moved on before this run starts.
+      - name: Check out the merge commit and release tags
         uses: actions/checkout@v6
         with:
-          ref: main
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
           fetch-depth: 0
           fetch-tags: true
 
@@ -36,7 +37,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          git fetch --force --tags
           previous_tag="$(git tag --merged HEAD --list 'v2.*' --sort=-version:refname | head -n 1)"
 
           if [[ -z "$previous_tag" ]]; then
@@ -106,10 +106,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.version.outputs.next_tag }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
         shell: bash
         run: |
           set -euo pipefail
           gh release create "$RELEASE_TAG" \
-            --target "$GITHUB_SHA" \
+            --target "$MERGE_SHA" \
             --title "$RELEASE_TAG" \
             --notes-file RELEASE_NOTES.md

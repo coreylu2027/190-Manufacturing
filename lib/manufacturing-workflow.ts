@@ -1,14 +1,8 @@
-export const CAM_REQUIRED_MACHINES = ["Haas CNC", "Shop Sabre CNC"] as const;
-export const POST_QC_MACHINES = ["Threaded Insert"] as const;
+import { ManufacturingWriteError } from "./manufacturing/errors.ts";
+import type { OperationStatus, OperationWorkType } from "./types.ts";
 
-export type OperationWorkType = "Manufacturing" | "CAM";
-
-export type WorkflowOperationStatus =
-  | "Planned"
-  | "Ready"
-  | "In Progress"
-  | "Blocked"
-  | "Complete";
+const CAM_REQUIRED_MACHINES = ["Haas CNC", "Shop Sabre CNC"] as const;
+const POST_QC_MACHINES = ["Threaded Insert"] as const;
 
 export interface WorkflowOperation {
   id: number;
@@ -16,7 +10,7 @@ export interface WorkflowOperation {
   operationNumber: string;
   machine: string;
   workType: OperationWorkType;
-  status: WorkflowOperationStatus;
+  status: OperationStatus;
   active: boolean;
   claimedQuantity?: number;
   completedQuantity?: number;
@@ -26,7 +20,7 @@ export interface WorkflowOperation {
 
 export interface WorkflowStatusPatch {
   id: number;
-  status: WorkflowOperationStatus;
+  status: OperationStatus;
 }
 
 export interface WorkflowPlan {
@@ -49,8 +43,7 @@ export interface WorkflowContext {
   qcAfterOperation?: number | null;
 }
 
-const DOWNSTREAM_REQUIREMENT_STATUSES = new Set(["Ready for Finishing", "Complete"]);
-const PRESERVED_OPERATION_STATUSES = new Set<WorkflowOperationStatus>([
+const PRESERVED_OPERATION_STATUSES = new Set<OperationStatus>([
   "In Progress",
   "Blocked",
   "Complete",
@@ -61,7 +54,7 @@ function operationIndex(operationNumber: string) {
   return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
 }
 
-const STATUS_PRIORITY: Record<WorkflowOperationStatus, number> = {
+const STATUS_PRIORITY: Record<OperationStatus, number> = {
   Planned: 0,
   Ready: 1,
   Blocked: 2,
@@ -111,7 +104,7 @@ export function requiresCam(machine: string) {
   return (CAM_REQUIRED_MACHINES as readonly string[]).includes(machine);
 }
 
-export function requiresPassedQc(machine: string) {
+function requiresPassedQc(machine: string) {
   return (POST_QC_MACHINES as readonly string[]).some((name) => name.toLocaleLowerCase() === machine.trim().toLocaleLowerCase());
 }
 
@@ -125,6 +118,16 @@ export const QC_POINT_OPERATIONS = [1, 2, 3, 4] as const;
  */
 export function isPostQcOperation(operation: { machine: string; operationNumber: string }, qcAfterOperation: number | null | undefined) {
   return qcAfterOperation == null ? requiresPassedQc(operation.machine) : operationIndex(operation.operationNumber) > qcAfterOperation;
+}
+
+/** Legacy "Needs Rework" rows are claimable again, like Ready ones. */
+export function normalizeOperationStatus(status: unknown) {
+  return (status === "Needs Rework" ? "Ready" : status) as OperationStatus;
+}
+
+/** Whether finishing no longer holds up work after QC: none is required, or QC passed and finishing was done. */
+export function isFinishingComplete({ finishingRequired, qcPassed, status }: { finishingRequired: boolean; qcPassed: boolean; status: string }) {
+  return !finishingRequired || qcPassed && !["Ready for QC", "Ready for Finishing"].includes(status);
 }
 
 /** The next unfinished task in route order, respecting QC and finishing gates. */
@@ -168,7 +171,7 @@ export function validateCamAction(input: {
   quantity: number;
   targetStarted?: boolean;
 }) {
-  if (input.quantity !== 1) throw new Error("CAM is a single task");
+  if (input.quantity !== 1) throw new ManufacturingWriteError("CAM is a single task", 400);
   if (input.action === "undo_complete" && input.targetStarted) {
     throw new Error("CAM cannot be reopened after the target machine operation has started");
   }
@@ -178,17 +181,13 @@ export function validateCamAction(input: {
  * Calculates operation readiness and the requirement summary without mutating
  * the supplied rows. CAM is paired to its target by operation number.
  */
-export function planRequirementWorkflow(
-  operations: readonly WorkflowOperation[],
-  currentRequirementStatus = "Needs Triage",
-  context?: WorkflowContext,
-): WorkflowPlan {
+export function planRequirementWorkflow(operations: readonly WorkflowOperation[], context: WorkflowContext): WorkflowPlan {
   const active = deduplicateOperations(operations.filter((operation) => operation.active));
   const manufacturing = active
     .filter((operation) => operation.workType === "Manufacturing")
     .sort((a, b) => operationIndex(a.operationNumber) - operationIndex(b.operationNumber));
-  const preQcManufacturing = manufacturing.filter((operation) => !isPostQcOperation(operation, context?.qcAfterOperation));
-  const postQcManufacturing = manufacturing.filter((operation) => isPostQcOperation(operation, context?.qcAfterOperation));
+  const preQcManufacturing = manufacturing.filter((operation) => !isPostQcOperation(operation, context.qcAfterOperation));
+  const postQcManufacturing = manufacturing.filter((operation) => isPostQcOperation(operation, context.qcAfterOperation));
   const camTasks = active.filter((operation) => operation.workType === "CAM");
   const operationPatches: WorkflowStatusPatch[] = [];
   const projectedStatuses = new Map(active.map((operation) => [operation.id, operation.status]));
@@ -216,7 +215,7 @@ export function planRequirementWorkflow(
         const cam = camTasks.find((task) => task.operationNumber === operation.operationNumber);
         const camComplete = !requiresCam(operation.machine)
           || Boolean(cam && projectedStatuses.get(cam.id) === "Complete");
-        const nextStatus: WorkflowOperationStatus = released && previousComplete && camComplete ? "Ready" : "Planned";
+        const nextStatus: OperationStatus = released && previousComplete && camComplete ? "Ready" : "Planned";
 
         if (nextStatus !== operation.status) {
           projectedStatuses.set(operation.id, nextStatus);
@@ -227,58 +226,35 @@ export function planRequirementWorkflow(
     }
   }
 
-  if (context) {
-    planPhase(preQcManufacturing, true);
-    planPhase(postQcManufacturing, context.qcPassed && (!context.finishingRequired || context.finishingComplete));
-  } else {
-    planPhase(manufacturing, true);
-  }
+  planPhase(preQcManufacturing, true);
+  planPhase(postQcManufacturing, context.qcPassed && (!context.finishingRequired || context.finishingComplete));
 
-  if (context) {
-    if (preQcManufacturing.length === 0 || !preQcManufacturing.some((operation) => operationIndex(operation.operationNumber) === 1)) {
-      return { operationPatches, requirementStatus: "Needs Triage" };
-    }
-    if (!preQcManufacturing.every((operation) => projectedStatuses.get(operation.id) === "Complete")) {
-      if (preQcManufacturing.some((operation) => projectedStatuses.get(operation.id) === "In Progress")) {
-        return { operationPatches, requirementStatus: "On Machine" };
-      }
-      const preQcOperationNumbers = new Set(preQcManufacturing.map((operation) => operation.operationNumber));
-      if (camTasks.some((operation) => preQcOperationNumbers.has(operation.operationNumber)
-        && projectedStatuses.get(operation.id) !== "Complete")) {
-        return { operationPatches, requirementStatus: "Ready for CAM" };
-      }
-      return { operationPatches, requirementStatus: "Ready for Manufacturing" };
-    }
-    if (!context.qcPassed) {
-      return { operationPatches, requirementStatus: "Ready for QC" };
-    }
-    if (context.finishingRequired && !context.finishingComplete) {
-      return { operationPatches, requirementStatus: "Ready for Finishing" };
-    }
-    if (postQcManufacturing.some((operation) => projectedStatuses.get(operation.id) === "In Progress")) {
-      return { operationPatches, requirementStatus: "On Machine" };
-    }
-    if (postQcManufacturing.length > 0
-      && !postQcManufacturing.every((operation) => projectedStatuses.get(operation.id) === "Complete")) {
-      return { operationPatches, requirementStatus: "Ready for Manufacturing" };
-    }
-    return { operationPatches, requirementStatus: "Complete" };
-  }
-
-  if (DOWNSTREAM_REQUIREMENT_STATUSES.has(currentRequirementStatus)) {
-    return { operationPatches, requirementStatus: currentRequirementStatus as WorkflowPlan["requirementStatus"] };
-  }
-  if (manufacturing.length === 0 || !manufacturing.some((operation) => operationIndex(operation.operationNumber) === 1)) {
+  if (preQcManufacturing.length === 0 || !preQcManufacturing.some((operation) => operationIndex(operation.operationNumber) === 1)) {
     return { operationPatches, requirementStatus: "Needs Triage" };
   }
-  if (manufacturing.every((operation) => projectedStatuses.get(operation.id) === "Complete")) {
+  if (!preQcManufacturing.every((operation) => projectedStatuses.get(operation.id) === "Complete")) {
+    if (preQcManufacturing.some((operation) => projectedStatuses.get(operation.id) === "In Progress")) {
+      return { operationPatches, requirementStatus: "On Machine" };
+    }
+    const preQcOperationNumbers = new Set(preQcManufacturing.map((operation) => operation.operationNumber));
+    if (camTasks.some((operation) => preQcOperationNumbers.has(operation.operationNumber)
+      && projectedStatuses.get(operation.id) !== "Complete")) {
+      return { operationPatches, requirementStatus: "Ready for CAM" };
+    }
+    return { operationPatches, requirementStatus: "Ready for Manufacturing" };
+  }
+  if (!context.qcPassed) {
     return { operationPatches, requirementStatus: "Ready for QC" };
   }
-  if (manufacturing.some((operation) => projectedStatuses.get(operation.id) === "In Progress")) {
+  if (context.finishingRequired && !context.finishingComplete) {
+    return { operationPatches, requirementStatus: "Ready for Finishing" };
+  }
+  if (postQcManufacturing.some((operation) => projectedStatuses.get(operation.id) === "In Progress")) {
     return { operationPatches, requirementStatus: "On Machine" };
   }
-  if (camTasks.some((operation) => projectedStatuses.get(operation.id) !== "Complete")) {
-    return { operationPatches, requirementStatus: "Ready for CAM" };
+  if (postQcManufacturing.length > 0
+    && !postQcManufacturing.every((operation) => projectedStatuses.get(operation.id) === "Complete")) {
+    return { operationPatches, requirementStatus: "Ready for Manufacturing" };
   }
-  return { operationPatches, requirementStatus: "Ready for Manufacturing" };
+  return { operationPatches, requirementStatus: "Complete" };
 }

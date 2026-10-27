@@ -20,15 +20,12 @@ Production, and Finishing and can be changed or cleared by any approved
 machinist or administrator. The guarded `On Robot` location is available only
 after QC passes and any required finishing is complete.
 
-The historical [migration report](docs/baserow-supabase-staged-migration.md) and
-[shadow validation report](docs/supabase-shadow-migration.md) remain as offline
-cutover records.
-
-The Onshape → Supabase BOM sync lives in [`integrations/onshape`](integrations/onshape).
-The Poot Horse workflow stages each sync, and administrators approve, trim, or
-deny it at `/admin/sync` before anything reaches the shop. See the
-[sync review runbook](docs/engineering-sync-review.md) for setup and the
-GitHub Actions secrets it needs.
+The Onshape → Supabase BOM sync lives in [`integrations/onshape`](integrations/onshape)
+and writes the engineering data (parts, requirements, routing, and files) that
+this application reads. The Poot Horse workflow stages each sync, and
+administrators approve, trim, or deny it at `/admin/sync` before anything
+reaches the shop. See the [sync review runbook](docs/engineering-sync-review.md)
+for setup and the GitHub Actions secrets it needs.
 
 ## To-Do List
 
@@ -38,7 +35,6 @@ GitHub Actions secrets it needs.
 - [ ] Add stock size 
 - [X] Filter by assembly
 - [ ] Reduce clutter in operation detail panel
-- [ ]
 
 ## Stack
 
@@ -53,17 +49,23 @@ GitHub Actions secrets it needs.
 
 1. Copy `.env.example` to `.env.local`.
 2. Add the Supabase project URL, publishable key, and server-only secret key.
-3. Run the SQL files in `supabase/migrations` in filename order, followed by the
-   production manufacturing and attachment SQL documented in the
-   [production-write runbook](docs/supabase-production-writes.md).
+3. Install the database schema and create the private Storage bucket in the
+   order given in the
+   [production-write runbook](docs/supabase-production-writes.md#production-activation).
+   Filename order alone does not work: the manufacturing schema comes from
+   `supabase/production`, and some migrations need the engineering-sync API.
 4. Enable `manufacturing.write_control` only after the production schema is ready.
 5. Set `INITIAL_ADMIN_EMAILS` to one or more comma-separated administrator emails. These accounts bootstrap user approval and role assignment.
 6. Enable email/password auth, with `/auth/callback` as an allowed redirect path for email confirmation and password recovery.
 7. Add `/auth/callback` and `/auth/callback?next=/reset-password` to the Supabase redirect allow list for each app origin.
 8. To deliver notification emails, create a Resend API key, verify the sender domain, and set `RESEND_API_KEY` plus `NOTIFICATION_EMAIL_FROM`.
 9. To post manufacturing activity to Slack, create an incoming webhook for the desired channel and set the server-only `SLACK_WEBHOOK_URL` variable.
-10. Run `npm run dev`.
+10. To email alerts that the database creates itself (such as sync obsoletion), set `NOTIFICATION_WEBHOOK_SECRET` and add the `public.notifications` webhook described in [Requirement obsoletion](docs/requirement-obsoletion.md#stop-work-alerts-for-claimants).
+11. Run `npm run dev`.
 
+The preview scripts below need the Supabase CLI link
+(`npx supabase link --project-ref <ref>`, which uses `supabase/config.toml`) and
+refuse to run unless `NEXT_PUBLIC_SUPABASE_URL` points at the linked project.
 After applying the part-preview production SQL, generate or refresh the private
 GLB derivatives with:
 
@@ -73,6 +75,12 @@ npm run manufacturing:generate-previews -- --apply
 
 Authentication is mandatory. Missing Supabase server credentials fail closed
 instead of loading demo data or falling back to another backend.
+
+## Tests
+
+`npm test` runs the unit tests under `lib/` and the SQL suites under
+`scripts/manufacturing-migration/`. The SQL suites install the real schema into
+in-memory PostgreSQL (PGlite) and never contact Supabase or Onshape.
 
 ## Manufacturing writes
 
@@ -98,12 +106,10 @@ regardless of part quantity and accepts an optional shared-drive program path
 when it is completed. It does not enter manufacturing QC.
 
 The Operations table stores `Work Type`, `CAM Program Path`, and `CAM Notes`.
-Historical migration utilities are retained only under
-`scripts/manufacturing-migration` for offline audit and recovery.
 
 The Fabrication tab reads active rows from the Finishing table and joins their linked production requirements for part, assembly, status, and file details. A finishing job becomes claimable when its requirement reaches `Ready for Finishing`; claiming records the machinist on the Finishing row. Completing it advances the linked requirement to `Complete` unless the route contains a `Threaded Insert` operation, in which case finishing releases that operation and the requirement completes after the inserts are installed. Release and undo actions reverse those changes.
 
-The shop UI treats the Onshape document name and assembly part number as separate identifiers. It reads the document name from a `Source Document` text field on Production Requirements (with `Onshape Document` supported as a compatibility alias) and displays values such as `A-26C-0001`. The linked `Assembly` value, such as `A-190B-26…`, remains available for internal requirement identity and is not presented as the source document.
+The shop UI treats the Onshape document name and assembly part number as separate identifiers. The document name comes from the requirement's `source_document` column and displays values such as `A-26C-0001`. The linked `Assembly` value, such as `A-190B-26…`, remains available for internal requirement identity and is not presented as the source document.
 
 ## Access and quality control
 
@@ -115,10 +121,8 @@ The shop UI treats the Onshape document name and assembly part number as separat
 - Production requirements enter the administrator QC queue after every active pre-QC manufacturing operation is complete. `Threaded Insert` is the sole post-QC exception: it remains planned until QC passes and, when required, powder-coat finishing completes. Passing records the requirement-level review. Failing requires a reason and reopens the rejected quantity at OP1; later physical operations unlock in route order while CAM stays complete. Multi-quantity batches default to rejecting the full quantity, but an administrator may reject fewer units. Accepted units retain their completion credit while the batch remains held for reinspection.
 - Supabase is the authoritative QC history by production requirement. Historical operation IDs are retained only as migration provenance. QC and its workflow update commit together in Supabase.
 - Production notes belong to the production requirement and remain editable by approved users across Operations, Finishing, and Production. Inspection notes remain a separate administrator-only QC field. `supabase/production/20260909_requirement_notes.sql` adds both the production-note field and the private, append-only revision log for changes to either note type.
-- `supabase/migrations/20260905165307_part_locations.sql` extends the canonical location choices. Apply it before the normalized production schema, then apply `supabase/production/20260905_part_locations.sql` after the location-aware manufacturing write RPC.
-- Apply `supabase/production/20260909_qc_rejected_quantities.sql` before deploying this QC flow; it backfills failure quantities, resets legacy rework routes, and installs the atomic QC write wrapper.
 - Part location is independent from QC and can be changed at any workflow stage. The `On Robot` choice is enforced in both the application and the database and requires an effective passed review plus completed finishing (or no required finish).
-- Location edits replace the current value and record the editor and time. Clearing records who cleared it. Existing QC-era locations are copied into the requirement-level location during migration.
+- Location edits replace the current value and record the editor and time. Clearing records who cleared it.
 
 ## Notifications
 
@@ -138,14 +142,14 @@ npm run manufacturing:generate-previews -- --apply --missing-only
 
 This skips both STEP-derived and assembly-derived previews, verifies each uploaded GLB, and checks that existing STEP-preview metadata remains unchanged. Do not combine `--missing-only` with `--force`.
 
-Parts without STEP previews can use isolated meshes extracted from an Onshape assembly GLB. The `assembly_part_previews` table is a separate, private fallback; importing never updates `part_previews`, replaces an existing fallback, or overwrites a Storage object. The authenticated preview routes support both sources. Deploy the dashboard changes to show the viewer for parts without STEP files.
+Parts without STEP previews can use isolated meshes extracted from an Onshape assembly GLB. The `assembly_part_previews` table is a separate, private fallback; importing never updates `part_previews`, replaces an existing fallback, or overwrites a Storage object. The authenticated preview routes support both sources.
 
-Apply `supabase/migrations/20260910031802_assembly_glb_previews.sql` after the production part-preview schema. Obtain an inventory using the server-only `manufacturing_assembly_preview_inventory()` RPC and save its JSON array locally. Then run:
+Obtain an inventory using the server-only `manufacturing_assembly_preview_inventory()` RPC and save its JSON array locally. Then run:
 
 ```powershell
 node scripts/manufacturing-migration/extract-assembly-previews.mjs robot.glb parts.json migration-artifacts/robot-glb
 node scripts/manufacturing-migration/validate-assembly-previews.mjs migration-artifacts/robot-glb
-npm run manufacturing:test-assembly-previews
+npm test
 node --env-file=.env.local scripts/manufacturing-migration/upload-assembly-previews.mjs migration-artifacts/robot-glb --apply
 ```
 
@@ -155,4 +159,4 @@ Uploads use immutable SHA-256 paths, download each object to verify its hash, re
 
 ## Vercel
 
-Import this directory as a Vercel project, add the values from `.env.example`, and deploy. Set `NEXT_PUBLIC_APP_URL` to the production origin for canonical metadata. Do not add legacy backend tokens or manufacturing source-selection flags.
+Import this directory as a Vercel project, add the values from `.env.example`, and deploy. Set `NEXT_PUBLIC_APP_URL` to the production origin for canonical metadata.

@@ -1,10 +1,9 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { getAdminActor } from "@/lib/auth";
+import { errorResponse, readJson, requireUser } from "@/lib/api-route";
 import { toBulkOutcomes } from "@/lib/bulk-selection";
 import { passQualityReviews } from "@/lib/manufacturing";
-import { ManufacturingWriteError } from "@/lib/manufacturing/write-adapter";
 import { scheduleQualityReviewEvent } from "@/lib/slack-notifications";
 
 // Each QC review commits separately.
@@ -20,25 +19,20 @@ const bulkSchema = z.object({
 
 /** Passes QC for many production requirements; returns one outcome per review, in order. */
 export async function POST(request: Request) {
-  const currentUser = await getAdminActor();
-  if (!currentUser) return NextResponse.json({ error: "Authentication required" }, { status: 401 });
-  if (!currentUser.approved || currentUser.role !== "admin") return NextResponse.json({ error: "Administrator access required" }, { status: 403 });
+  const { user, response } = await requireUser({ admin: true });
+  if (response) return response;
 
-  const parsed = bulkSchema.safeParse(await request.json().catch(() => null));
+  const parsed = await readJson(request, bulkSchema);
   if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message }, { status: 400 });
   const { reviews } = parsed.data;
 
   try {
-    const results = await passQualityReviews(reviews, currentUser);
-    const outcomes = toBulkOutcomes(results.map((result, index) => {
-      if (result.status === "rejected") return result;
-      const { notificationContext, ...review } = result.value;
-      scheduleQualityReviewEvent(currentUser.name, { result: "passed", notes: reviews[index].notes, storageLocation: null, rejectedQuantity: review.rejectedQuantity }, notificationContext);
-      return { status: "fulfilled" as const, value: review };
-    }), "Unable to record quality review");
-    return NextResponse.json({ results: outcomes });
+    const results = await passQualityReviews(reviews, user);
+    return NextResponse.json({ results: toBulkOutcomes(results, "Unable to record quality review", ({ notificationContext, ...review }, index) => {
+      scheduleQualityReviewEvent(user.name, { result: "passed", notes: reviews[index].notes, storageLocation: null, rejectedQuantity: review.rejectedQuantity }, notificationContext);
+      return review;
+    }) });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to record quality reviews" },
-      { status: error instanceof ManufacturingWriteError ? error.status : 502 });
+    return errorResponse(error, "Unable to record quality reviews");
   }
 }

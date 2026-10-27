@@ -18,25 +18,19 @@ import {
   type OverrideFileKind, type PassedQcQuantityMode, type Routing,
 } from "@/lib/engineering-overrides";
 import { QC_POINT_OPERATIONS, isPostQcOperation } from "@/lib/manufacturing-workflow";
+import { invalidateManufacturingQueries } from "@/lib/query-keys";
+import { errorStatus, requestJson } from "@/lib/request-json";
 import { createClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
 
 const NO_MACHINE = "__none";
 const DEFAULT_QC_POINT = "default";
 const DEFAULT_QC_POINT_LABEL = "After all operations except threaded inserts";
-const MANUFACTURING_QUERY_KEYS = ["operations", "cam", "fabrication", "qc", "admin", "engineering-corrections"] as const;
 const FILE_KINDS: Array<{ kind: OverrideFileKind; label: string; accept: string; icon: typeof FileText }> = [
   { kind: "drawing-pdf", label: "Drawing PDF", accept: ".pdf,application/pdf", icon: FileText },
   { kind: "step", label: "STEP file", accept: ".step,.stp", icon: Download },
 ];
 const TEXTAREA_CLASS = "mt-1.5 w-full resize-y rounded-xl border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring focus:ring-3 focus:ring-ring/50 disabled:opacity-70";
-
-async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, { cache: "no-store", ...init, headers: { "Content-Type": "application/json", ...init?.headers } });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw Object.assign(new Error(body.error ?? "Request failed"), { status: response.status });
-  return body as T;
-}
 
 const display = (value: unknown) => value === null || value === undefined || value === "" ? "—" : String(value);
 const formatDate = (value: string) => new Date(value).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
@@ -181,12 +175,13 @@ export function EngineeringOverrides({ requirementId, partNumber, obsolete, acti
   const queryKey = ["engineering-overrides", requirementId];
   const query = useQuery({
     queryKey,
-    queryFn: () => requestJson<EngineeringOverrideState>(`/api/requirements/${requirementId}/engineering`),
+    queryFn: () => requestJson<EngineeringOverrideState>(`/api/requirements/${requirementId}/engineering`, { cache: "no-store" }),
   });
   // Keep the values and CAS token the user actually opened together. A refetch
   // must not silently turn untouched draft fields into edits against newer data.
   const state = open ? draftState : query.data;
-  const draftIsStale = Boolean(open && draftState && query.data && draftState.token !== query.data.token);
+  // A file action briefly moves the token before its own refresh adopts it; Save is disabled meanwhile.
+  const draftIsStale = Boolean(open && uploading === null && draftState && query.data && draftState.token !== query.data.token);
 
   function loadDraft(latest: EngineeringOverrideState) {
     setDraftState(latest);
@@ -197,13 +192,25 @@ export function EngineeringOverrides({ requirementId, partNumber, obsolete, acti
   async function refresh() {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey }),
-      ...MANUFACTURING_QUERY_KEYS.map((key) => queryClient.invalidateQueries({ queryKey: [key] })),
+      invalidateManufacturingQueries(queryClient, { extraKeys: ["engineering-corrections"] }),
     ]);
+  }
+  /**
+   * The editor's own file change also moves the token. Keep the open draft current when nothing but
+   * the files changed, so unsaved edits stay valid and the next action has the new token; any other
+   * concurrent change (including a synced value under an override) still leaves the draft stale.
+   */
+  async function refreshAfterFileChange(opened: EngineeringOverrideState | null) {
+    await queryClient.invalidateQueries({ queryKey });
+    const latest = queryClient.getQueryData<EngineeringOverrideState>(queryKey);
+    const withoutFiles = (value: EngineeringOverrideState) => JSON.stringify({ ...value, token: null, files: null, file_overrides: null });
+    if (opened && latest && withoutFiles(latest) === withoutFiles(opened)) setDraftState(latest);
+    await invalidateManufacturingQueries(queryClient, { extraKeys: ["engineering-corrections"] });
   }
   function handleConflict(caught: unknown) {
     const message = caught instanceof Error ? caught.message : "Unable to save";
     setError(message);
-    if ((caught as { status?: number }).status === 409) void queryClient.invalidateQueries({ queryKey });
+    if (errorStatus(caught) === 409) void queryClient.invalidateQueries({ queryKey });
   }
 
   const save = useMutation({
@@ -241,7 +248,7 @@ export function EngineeringOverrides({ requirementId, partNumber, obsolete, acti
         method: "PUT", body: JSON.stringify({ stagingPath: staged.path, name: file.name, expectedToken: state.token, reason: draft?.reason.trim() ?? "" }),
       });
       toast.success(`${kind === "step" ? "STEP file" : "Drawing PDF"} replaced for ${partNumber}`);
-      await refresh();
+      await refreshAfterFileChange(draftState);
     } catch (caught) { handleConflict(caught); }
     finally { setUploading(null); }
   }
@@ -255,7 +262,7 @@ export function EngineeringOverrides({ requirementId, partNumber, obsolete, acti
         method: "DELETE", body: JSON.stringify({ expectedToken: state.token, reason: draft?.reason.trim() ?? "" }),
       });
       toast.success(`Restored the Onshape ${kind === "step" ? "STEP file" : "drawing PDF"} for ${partNumber}`);
-      await refresh();
+      await refreshAfterFileChange(draftState);
     } catch (caught) { handleConflict(caught); }
     finally { setUploading(null); }
   }

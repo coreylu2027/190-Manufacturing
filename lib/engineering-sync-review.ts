@@ -4,6 +4,8 @@
 // (scope, deactivation, legacy re-keying) and the obsoletion trigger that runs
 // after it, so the review predicts what the commit will do.
 
+import { HttpError } from "./http-error.ts";
+
 type Row = Record<string, unknown>;
 
 export type SyncProposalStatus = "pending" | "approved" | "denied" | "superseded" | "failed";
@@ -221,7 +223,10 @@ export interface SyncReview {
   partial: boolean;
 }
 
-export class SyncReviewError extends Error {}
+/** The review no longer matches the proposal, or the requested decision can't apply to it. */
+export class SyncReviewError extends HttpError {
+  constructor(message: string) { super(message, 409); }
+}
 
 export const SYNC_CHANGE_LABELS: Record<SyncChangeKind, string> = {
   added: "New", restored: "Back in BOM", removed: "Removed", revised: "New revision", changed: "Changed",

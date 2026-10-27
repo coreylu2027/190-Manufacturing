@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { mergeVisibleSelection, postBulk, settleConcurrently, settleSequentially, toBulkOutcomes } from "./bulk-selection.ts";
+import { mergeVisibleSelection, partitionSettled, postBulk, settleConcurrently, settleSequentially, toBulkOutcomes } from "./bulk-selection.ts";
 
 test("bulk selection keeps rows hidden by search or filters", () => {
   assert.deepEqual(mergeVisibleSelection([1, 2], [2, 3], [2]), [1, 2]);
@@ -81,7 +81,7 @@ test("bulk outcomes report each failure's message in request order", () => {
     { status: "fulfilled", value: 1 },
     { status: "rejected", reason: new Error("Only 1 part(s) remain available") },
     { status: "rejected", reason: "not an error" },
-  ], "Unable to update"), [
+  ], "Unable to update", (value, index) => value + index), [
     { ok: true, value: 1 },
     { ok: false, error: "Only 1 part(s) remain available" },
     { ok: false, error: "Unable to update" },
@@ -110,4 +110,20 @@ test("bulk requests are chunked and a failed request rejects only its own chunk"
   assert.deepEqual(results.map((result) => result.status === "fulfilled" ? result.value : (result.reason as Error).message), [
     10, "Already claimed", "The manufacturing database is busy.", "The manufacturing database is busy.", 50,
   ]);
+});
+
+test("settled results split into successes and failure reasons in order", () => {
+  const first = new Error("first failed");
+  assert.deepEqual(partitionSettled<number>([
+    { status: "rejected", reason: first },
+    { status: "fulfilled", value: 1 },
+    { status: "rejected", reason: "not an Error" },
+    { status: "fulfilled", value: 2 },
+  ]), { succeeded: [1, 2], failures: [first, "not an Error"] });
+});
+
+test("settled results with every item failed have no successes", () => {
+  const failure = new Error("claim failed");
+  assert.deepEqual(partitionSettled([{ status: "rejected", reason: failure }]), { succeeded: [], failures: [failure] });
+  assert.deepEqual(partitionSettled([]), { succeeded: [], failures: [] });
 });
