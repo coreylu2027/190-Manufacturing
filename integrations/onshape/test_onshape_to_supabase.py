@@ -1992,6 +1992,22 @@ class SupabaseSyncTests(unittest.TestCase):
         ), patch.object(MODULE, "run_sync", return_value={"dry_run": True}):
             self.assertEqual(MODULE.main(["--dry-run"]), 0)
 
+    def test_main_records_a_cancelled_or_timed_out_run_as_failed(self):
+        client = Mock()
+        client.begin_run.return_value = "fixture"
+        env = {"ONSHAPE_DOC_URL": MODULE.onshape_target_url(target())}
+        for interruption in (KeyboardInterrupt(), SystemExit(143)):
+            client.reset_mock()
+            with patch.dict(os.environ, env, clear=True), patch.object(
+                MODULE.SupabaseClient, "from_env", return_value=client
+            ), patch.object(MODULE, "run_sync", side_effect=interruption):
+                with self.assertRaises(type(interruption)):
+                    MODULE.main([])
+            self.assertEqual(client.finish_run.call_args.args[1:],
+                             ("failed", {"error": "Cancelled or timed out before finishing"}))
+        with self.assertRaises(SystemExit):
+            MODULE.stop_on_sigterm(MODULE.signal.SIGTERM, None)
+
     def test_revision_gate_requires_cad_completion_only_when_requested(self):
         released = MODULE.released_assembly_from_revision(revision("B", VID_B))
         client = Mock()

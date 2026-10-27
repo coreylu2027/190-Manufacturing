@@ -19,6 +19,7 @@ import hmac
 import json
 import os
 import re
+import signal
 import time
 import uuid
 from collections import Counter
@@ -2428,8 +2429,6 @@ def run_sync(
             print(f"Dry-run JSON written to {destination}")
         return result
 
-    if output_json:
-        raise ValueError("--output-json is only available with --dry-run")
     summary = sync_to_supabase(
         parts,
         requirements,
@@ -2441,7 +2440,7 @@ def run_sync(
         assembly_records=assembly_records,
         synced_roots=seen_roots,
         discovery_master=discovery_master_url,
-        discovered_roots={released.part_number for _, released in resolved_root_sources} if not dry_run else seen_roots,
+        discovered_roots={released.part_number for _, released in resolved_root_sources},
         discovery_complete=discovery_complete,
         run_id=run_id,
         stage_for_review=stage_for_review,
@@ -2467,6 +2466,11 @@ def report_staged_review(result: dict) -> None:
         link = f"[Review the changes]({review_url})" if review_url else "Review the changes in Admin > Onshape sync."
         with open(summary_path, "a", encoding="utf-8") as summary:
             summary.write(f"### Onshape sync staged for review\n\nNothing was committed. {link}\n")
+
+
+def stop_on_sigterm(signum, _frame):
+    """Exit through main's cleanup when GitHub Actions stops a cancelled or timed-out job."""
+    raise SystemExit(128 + signum)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2514,6 +2518,9 @@ def main(argv: list[str] | None = None) -> int:
     reset_onshape_call_counts()
     client = None if args.dry_run else SupabaseClient.from_env()
     run_id = client.begin_run() if client else None
+    # A run left 'running' keeps recording every shop write as an obsoletion
+    # candidate, so a cancel or timeout must still record it as failed.
+    previous_sigterm = signal.signal(signal.SIGTERM, stop_on_sigterm) if client else None
     try:
         result = run_sync(
             sync_targets,
@@ -2532,14 +2539,17 @@ def main(argv: list[str] | None = None) -> int:
             client.finish_run(run_id, "partial" if result.get("warnings") else "success", result)
         if result.get("status") == "staged":
             report_staged_review(result)
-    except Exception as exc:
+    except BaseException as exc:
         if client:
+            error = str(exc) if isinstance(exc, Exception) else "Cancelled or timed out before finishing"
             try:
-                client.finish_run(run_id, "failed", {"error": str(exc)[:10000]})
+                client.finish_run(run_id, "failed", {"error": error[:10000]})
             except Exception as audit_error:
                 print(f"WARNING: Could not record sync failure: {audit_error}")
         raise
     finally:
+        if previous_sigterm is not None:
+            signal.signal(signal.SIGTERM, previous_sigterm)
         print("Onshape API calls: " + json.dumps(onshape_call_summary(), sort_keys=True))
     return 0
 

@@ -41,7 +41,8 @@ concurrency:
   group: >-
     onshape-supabase-poot_horse-${{ github.event_name == 'workflow_dispatch' &&
       inputs.dry_run && 'dry-run' || 'production' }}
-  cancel-in-progress: true
+  # A newer dispatch waits for a staging run instead of interrupting its writes.
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
 
 env:
   DEFAULT_ONSHAPE_SUBASSEMBLY_URLS: |-
